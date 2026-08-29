@@ -1,0 +1,22 @@
+[Unit]
+Description=FileBox file service
+After=network.target
+
+[Service]
+Type=simple
+User=filebox
+WorkingDirectory=/opt/filebox
+ExecStart=/opt/filebox/filebox --data=/var/lib/filebox --log-enabled=true --log-dir=/var/log/filebox
+Environment=FILEBOX_JWT_SECRET=CHANGE_ME
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+
+# Install: create the filebox user, install the binary at /opt/filebox/filebox,
+# create /var/lib/filebox and /var/log/filebox, and grant filebox ownership.
+# Then copy this unit to /etc/systemd/system/filebox.service and run:
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now filebox
+# Check status and logs with systemctl status filebox and journalctl -u filebox.

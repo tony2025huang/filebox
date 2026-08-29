@@ -1,0 +1,22 @@
+# 数据与运行产物
+data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+.env
+
+# 构建产物
+bin/
+dist/
+web/node_modules/
+web/dist/
+!internal/webassets/dist/
+!internal/webassets/dist/**
+
+# 编辑器/系统
+.vscode/
+.idea/
+*.log
+.DS_Store
+Thumbs.db

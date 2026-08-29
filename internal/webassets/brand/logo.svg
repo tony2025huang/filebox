@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 208 48" role="img" aria-label="FileBox">
+  <rect x="0" y="22" width="12" height="22" rx="2" fill="#1b998b"/>
+  <rect x="17" y="5" width="12" height="39" rx="2" fill="#e76f51"/>
+  <rect x="34" y="14" width="12" height="30" rx="2" fill="#264653"/>
+  <text x="59" y="33" fill="#102a43" font-family="Arial, sans-serif" font-size="24" font-weight="700">FileBox</text>
+</svg>

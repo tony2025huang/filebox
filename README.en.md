@@ -1,0 +1,139 @@
+# FileBox
+
+[中文](README.md)
+
+FileBox is a self-hosted file transfer and management service that runs as a single Go binary on Windows or Linux. Stage 1 provides multi-user isolation, JWT login, single-file uploads, Range downloads, dual-hash verification, quotas, disk protection, audit logs, configurable branding, and a multilingual interface.
+
+## Features
+
+- Multi-user roles: `admin` and `user`; administrators manage accounts, roles, quotas, passwords, and disabled state, while regular users can access only their own files.
+- JWT login and security: passwords use bcrypt; JWTs expire after 7 days by default; repeated failures can trigger temporary or permanent locks under the admin policy, with optional automatic unlock; login failures use one uniform response to reduce account enumeration.
+- File transfer: upload initialization, single chunk `0` upload, completion, paginated/searchable listing, deletion, and download; `http.ServeContent` supports `Range` and returns `206 Partial Content` for range requests.
+- Name conflicts: a same-name file in the user's current monthly directory causes `409`; the frontend offers overwrite or rename; overwrite is transactional and rename allocates the smallest available numeric suffix.
+- Filename security: pre-upload validation rejects separators, control characters, Windows-illegal characters, traversal markers, empty/`.`/`..` names, and names over 255 bytes; the on-disk name preserves the original semantics while replacing selected illegal characters.
+- Quotas: initialization reserves pending bytes and the default quota is 100 GiB; overwrite subtracts the old file usage first.
+- Integrity: the server computes MD5 and SHA-256 from the actual content; clients may submit expected values for comparison.
+- Disk protection: admin statistics expose capacity, used, free, and usage percentage; initialization requires 2 GiB free by default and the threshold can be changed or disabled.
+- Audit operations: login, upload completion, and successful/failed downloads record username, target, source IP, result, and reason; users see their own records and admins can filter all records; writes lazily prune records older than the retention period, defaulting to 30 days.
+- Branding: administrators can set the title, SEO description, login/main logos, favicon, ICP text, and public-security filing text; empty text renders no blank area, unset assets use embedded SVG defaults, and assets are limited to 512 KiB with extension/content checks.
+- Multilingual UI: Simplified Chinese, Traditional Chinese, and English are supported; administrators choose the system default and users can choose an immediate personal preference.
+- Interface theme color: administrators can enter `#RGB`/`#RRGGBB` or use the color picker, restore the default, and apply the main color immediately across the site.
+- Advanced account security: configurable initial admin credentials with forced password change, password strength policy, TOTP, per-user IP allowlists, IP login locks, and lock management.
+
+### Stage delivery markers
+
+`MVP`: login, JWT, bcrypt, SQLite, multi-user isolation, file upload/download/deletion, paginated search, single-file single-chunk transfer, MD5/SHA-256, and the admin console.
+
+`R-DISK`: cross-platform disk statistics, minimum free-space configuration, and `DISK_FULL` upload protection.
+
+`R-NAME`: original on-disk names under per-user/month directories with unique storage paths.
+
+`R-CONFLICT`: `409` same-directory conflicts with overwrite and numbered rename choices.
+
+`R-VALID`: pre-upload filename safety validation.
+
+`R-LOG`: operation audit, retention cleanup, pagination/filtering, and the logs page.
+
+`R-LOCK`: failed-login thresholds, temporary/permanent locks, automatic unlock, uniform errors, and admin reset.
+
+`R-BRAND`: text and logo/favicon settings, resource validation, embedded fallback, and filing footer.
+
+`R-LANG`: complete Simplified Chinese, Traditional Chinese, and English UI dictionaries with system-default and personal language preferences.
+
+`R-THEME`: configurable interface theme color with hex input, color picker, default reset, and immediate application.
+
+`R-INIT/R-PWD/R-TOTP/R-IPACL/R-IPBAN/R-LOCKADMIN`: forced initial password change, password policy, encrypted TOTP, source-IP allowlists, IP login lockout, and administrator lock management.
+
+`R-OPS`: local maintenance commands bypassing web authentication for direct SQLite recovery when the service or web UI is unavailable. Restrict server shell access to trusted operators.
+
+`R-SRVLOG`: optional service file logging with local-date rotation, gzip archives, and retention cleanup; disabled mode writes only to the console.
+
+`R-SERVICE/R-PROXY`: Linux systemd, Windows NSSM/sc, and Nginx HTTPS reverse-proxy templates are in [`deploy/`](deploy/).
+
+## Technology stack
+
+Go 1.22+ standard-library HTTP, `modernc.org/sqlite`, Vue 3, Vite, `vue-router`, `lucide-vue-next`, and `embed`. The Vite production bundle and embedded branding assets are packaged into the Go binary.
+
+## Quick start
+
+Requirements: Go 1.22+, Node.js 20+, and npm. Development mode:
+
+```powershell
+npm --prefix web install
+npm --prefix web run build
+go run ./scripts/sync-web.go
+go run ./cmd/filebox
+```
+
+The default listener is `:8080`; open <http://localhost:8080>. The first start creates `admin/admin123`; change the password immediately after the first login or disable the account. You can also run `go run ./cmd/filebox --addr=:8080 --data=./data`. For frontend-only development, run `npm run dev` from `web/`; Vite proxies `/api` to `http://localhost:8080`.
+
+## Local maintenance commands
+
+The single binary also provides local maintenance subcommands. `admin reset-password` resets an administrator or regular-user password and forces a password change at the next login; `admin clear-ip-acl` disables and clears a user's IP allowlist so an administrator can recover from an allowlist misconfiguration; `locks list` shows IP and user lock state; `locks clear` clears a lock by IP, user ID, or all records. `--generate` creates and prints a one-time 16-character strong password.
+
+```bash
+filebox admin reset-password --data=./data --username=admin --new-password='NewPass123!'
+filebox admin reset-password --data=./data --username=admin --generate
+filebox admin clear-ip-acl --data=./data --username=admin
+filebox locks list --data=./data
+filebox locks clear --data=./data --ip=1.2.3.4
+filebox locks clear --data=./data --user=2
+filebox locks clear --data=./data --all
+```
+
+For production, run `make build` and then `make start`; Windows can run `bin/filebox.exe`, while Linux uses `make build-linux`. Production deployments must set a strong random `FILEBOX_JWT_SECRET` and use an HTTPS reverse proxy.
+
+## Service logs
+
+Service logs are disabled by default. When enabled, they are written to the console and `filebox-YYYY-MM-DD.log`; the previous day is gzip archived and logs older than the retention period are removed. Service logs never record passwords, tokens, or file contents; event lines include the operator and source IP.
+
+```bash
+filebox --log-enabled=true --log-dir=/var/log/filebox --log-retention-days=90
+```
+
+## Configuration
+
+Each flag reads its `FILEBOX_*` environment variable as the default; an explicit command-line value takes precedence.
+
+| Flag | Environment variable | Default | Meaning |
+|---|---|---:|---|
+| `--addr` | `FILEBOX_ADDR` | `:8080` | HTTP listen address |
+| `--data` | `FILEBOX_DATA` | `./data` | Root for SQLite, files, temporary content, and branding assets |
+| `--max-file-size` | `FILEBOX_MAX_FILE_SIZE` | `107374182400` (100 GiB) | Backend per-file size limit |
+| `--min-free-space` | `FILEBOX_MIN_FREE_SPACE` | `2147483648` (2 GiB) | Minimum free space at upload initialization; `0` disables protection |
+| `--jwt-secret` | `FILEBOX_JWT_SECRET` | `filebox-development-secret-change-me` | HS256 signing key; replace in production |
+| `--register-enabled` | `FILEBOX_REGISTER_ENABLED` | `false` | Registration switch; Stage 1 has no public registration endpoint |
+| `--admin-user` | `FILEBOX_ADMIN_USER` | `admin` | Initial administrator username |
+| `--admin-pass` | `FILEBOX_ADMIN_PASS` | `admin123` | Initial administrator password; forced change on first login |
+| `--trusted-proxies` | `FILEBOX_TRUSTED_PROXIES` | empty | Trusted proxy IP/CIDR list; empty means X-Forwarded-For is ignored |
+| `--log-enabled` | `FILEBOX_LOG_ENABLED` | `false` | Enable service file logs; console output remains enabled |
+| `--log-dir` | `FILEBOX_LOG_DIR` | `<executable directory>/logs` | Service log directory |
+| `--log-retention-days` | `FILEBOX_LOG_RETENTION_DAYS` | `90` | Retention for service logs and gzip archives |
+
+The backend limit is 100 GiB, while the Stage 1 browser UI limits direct uploads to 100 MiB. Admin policy defaults are 30-day log retention, lock after 5 failures, automatic unlock enabled, and a 5-minute unlock period.
+
+## Service deployment
+
+Complete systemd, Windows NSSM/sc, and Nginx reverse-proxy examples and security notes are in [`deploy/README.md`](deploy/README.md) and [`deploy/README.en.md`](deploy/README.en.md). Production should use a dedicated account, separate data/log directories, a strong random JWT secret, HTTPS, and `--trusted-proxies` matching the actual proxy networks.
+
+## API summary
+
+JSON responses use `{ "code": number, "message": string, "data": any }`; protected endpoints require `Authorization: Bearer <token>`. Main paths are auth `/api/auth/login`, `/api/auth/totp`, `/api/auth/totp-qrcode`, `/api/auth/change-password`, `/api/auth/logout`, `/api/auth/me`, `/api/auth/language`; public branding `/api/brand` and `/brand/{asset}`; files `/api/files`, `/api/files/upload-init`, `/api/files/{taskID}/chunks/0`, `/api/files/{taskID}/complete`, `/api/files/{id}/download`, `/api/files/{id}`; logs `/api/logs`, `/api/logs/actions`; and admin `/api/admin/users[/{id}]`, `/api/admin/users/{id}/totp`, `/api/admin/users/{id}/ip-acl`, `/api/admin/stats`, `/api/admin/settings`, `/api/admin/brand`, `/api/admin/locks`.
+
+File, user, and log lists default to `pageSize=20` and cap it at 100. Administrators can view all files and logs; regular users are isolated by account. Downloads support Range, and logout does not maintain a server-side JWT blacklist.
+
+## Directory structure
+
+`cmd/filebox/` is the Go entry point; `internal/httpapi/` handles routes, auth, transfer, download, branding, and audit; `internal/store/` owns the SQLite schema and persistence; `internal/diskusage/` provides Windows/Linux disk statistics; `internal/webassets/` provides embedding and fallback assets; `scripts/sync-web.go` syncs the frontend bundle; `web/src/` is the Vue frontend; `docs/requirements/` stores requirement state and change history; `data/` is the default runtime data directory.
+
+## Data storage
+
+Under `--data`: `filebox.db`; with the default path, `data/files/<userID>/<yy>/<mm>/<stored-name>`, `data/tmp/<taskID>/0`, and `data/brand/<favicon|login-logo|main-logo>.<ext>`. SQLite stores metadata, ownership, quotas, and audit logs. Content is staged in the temporary file before completion and then moved into the user/year/month directory. The visible name is `name`, while the on-disk name is `stored_name`; conflicts use the smallest suffix such as `name (1).ext` and `name (2).ext`. Deletion marks `deleted`, subtracts quota, and removes physical content.
+
+## Known limitations and Stage 2
+
+Not implemented: resumable chunks, true multi-chunk concurrency, instant upload, folder uploads, share links, online previews, rate limiting, open registration, or scheduled cleanup of abandoned upload tasks. `--register-enabled` is retained as a configuration slot, but there is currently no public registration route.
+
+## License and acknowledgements
+
+The repository currently has no project-level `LICENSE` file. Third-party dependencies remain subject to their own licenses; see the upstream notices for the Go modules and npm packages. Requirement state and change history are in [`docs/requirements/STATE.md`](docs/requirements/STATE.md) and [`docs/requirements/CHANGELOG.md`](docs/requirements/CHANGELOG.md).
