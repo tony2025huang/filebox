@@ -14,13 +14,15 @@ import (
 // ErrSyncReferenced indicates that a remote system is still referenced by tasks.
 var ErrSyncReferenced = errors.New("sync remote system is referenced")
 
-// RemoteSystem 保存一个可被多个同步任务复用的 SFTP 目标配置。
-// RemoteSystem stores an SFTP target configuration reusable by multiple tasks.
+// RemoteSystem 保存一个可被多个同步任务复用的远端目标配置（SFTP 或另一套 FileBox）。
+// RemoteSystem stores a remote target configuration reusable by multiple tasks (SFTP or another FileBox).
 type RemoteSystem struct {
 	ID                 int64  `json:"id"`
 	UserID             int64  `json:"userId"`
 	Name               string `json:"name"`
+	Kind               string `json:"kind"`
 	Host               string `json:"host"`
+	URL                string `json:"url"`
 	Port               int    `json:"port"`
 	Username           string `json:"username"`
 	AuthType           string `json:"authType"`
@@ -31,8 +33,8 @@ type RemoteSystem struct {
 	CreatedAt          string `json:"createdAt"`
 }
 
-// SyncTask 描述一个 FileBox 与 SFTP 之间的同步任务。
-// SyncTask describes a FileBox-to-SFTP or SFTP-to-FileBox synchronization task.
+// SyncTask 描述一个 FileBox 与远端（SFTP/FileBox）之间的同步任务。
+// SyncTask describes a FileBox-to-remote (SFTP/FileBox) synchronization task.
 type SyncTask struct {
 	ID             int64  `json:"id"`
 	UserID         int64  `json:"userId"`
@@ -41,6 +43,7 @@ type SyncTask struct {
 	RemoteSystemID int64  `json:"remoteSystemId"`
 	SourceType     string `json:"sourceType"`
 	SourcePath     string `json:"sourcePath"`
+	SourceKind     string `json:"sourceKind"`
 	TargetType     string `json:"targetType"`
 	TargetPath     string `json:"targetPath"`
 	ConflictPolicy string `json:"conflictPolicy"`
@@ -131,20 +134,43 @@ CREATE INDEX IF NOT EXISTS idx_sync_logs_run ON sync_logs(run_at);`)
 			return err
 		}
 	}
+	// v013：目标系统支持另一套 FileBox（kind='filebox' 时使用 url 登录对方 HTTP API）。
+	// v013: remote systems may point at another FileBox instance (kind='filebox' uses url for its HTTP API).
+	if !columns["kind"] {
+		if _, err := s.DB.Exec("ALTER TABLE remote_systems ADD COLUMN kind TEXT NOT NULL DEFAULT 'sftp'"); err != nil {
+			return err
+		}
+	}
+	if !columns["url"] {
+		if _, err := s.DB.Exec("ALTER TABLE remote_systems ADD COLUMN url TEXT NOT NULL DEFAULT ''"); err != nil {
+			return err
+		}
+	}
+	syncColumns, err := tableColumns(s.DB, "sync_tasks")
+	if err != nil {
+		return err
+	}
+	// v013：源路径可为单个文件（source_kind='file'），用于消除同名文件/目录歧义。
+	// v013: the source path may be a single file (source_kind='file') to disambiguate same-name files and directories.
+	if !syncColumns["source_kind"] {
+		if _, err := s.DB.Exec("ALTER TABLE sync_tasks ADD COLUMN source_kind TEXT NOT NULL DEFAULT 'directory'"); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
 func scanRemoteSystem(row interface{ Scan(...any) error }) (RemoteSystem, error) {
 	var item RemoteSystem
 	var err error
-	err = row.Scan(&item.ID, &item.UserID, &item.Name, &item.Host, &item.Port, &item.Username, &item.AuthType, &item.AuthSecret, &item.AuthPassphrase, &item.HostKeyFingerprint, &item.CreatedAt, &item.TaskCount)
+	err = row.Scan(&item.ID, &item.UserID, &item.Name, &item.Kind, &item.Host, &item.URL, &item.Port, &item.Username, &item.AuthType, &item.AuthSecret, &item.AuthPassphrase, &item.HostKeyFingerprint, &item.CreatedAt, &item.TaskCount)
 	if errors.Is(err, sql.ErrNoRows) {
 		return RemoteSystem{}, ErrNotFound
 	}
 	return item, err
 }
 
-const remoteSystemColumns = `r.id, r.user_id, r.name, r.host, r.port, r.username, r.auth_type,
+const remoteSystemColumns = `r.id, r.user_id, r.name, r.kind, r.host, COALESCE(r.url, ''), r.port, r.username, r.auth_type,
  r.auth_secret, COALESCE(r.auth_passphrase, ''), COALESCE(r.host_key_fingerprint, ''), r.created_at,
  (SELECT COUNT(t.id) FROM sync_tasks t WHERE t.remote_system_id = r.id)`
 
@@ -152,8 +178,12 @@ const remoteSystemColumns = `r.id, r.user_id, r.name, r.host, r.port, r.username
 // CreateRemoteSystem inserts a remote system configuration.
 func (s *Store) CreateRemoteSystem(ctx context.Context, item RemoteSystem) (RemoteSystem, error) {
 	now := time.Now().UTC().Format(time.RFC3339)
-	result, err := s.DB.ExecContext(ctx, `INSERT INTO remote_systems(user_id, name, host, port, username, auth_type, auth_secret, auth_passphrase, host_key_fingerprint, created_at)
-VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, item.UserID, item.Name, item.Host, item.Port, item.Username, item.AuthType, item.AuthSecret, item.AuthPassphrase, item.HostKeyFingerprint, now)
+	kind := item.Kind
+	if kind == "" {
+		kind = "sftp"
+	}
+	result, err := s.DB.ExecContext(ctx, `INSERT INTO remote_systems(user_id, name, kind, host, url, port, username, auth_type, auth_secret, auth_passphrase, host_key_fingerprint, created_at)
+VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, item.UserID, item.Name, kind, item.Host, item.URL, item.Port, item.Username, item.AuthType, item.AuthSecret, item.AuthPassphrase, item.HostKeyFingerprint, now)
 	if err != nil {
 		return RemoteSystem{}, err
 	}
@@ -209,9 +239,13 @@ func (s *Store) UpdateRemoteSystem(ctx context.Context, item RemoteSystem, userI
 	if admin {
 		where, args = "id = ?", []any{item.ID}
 	}
-	values := []any{item.Name, item.Host, item.Port, item.Username, item.AuthType, item.AuthSecret, item.AuthPassphrase, item.HostKeyFingerprint}
+	kind := item.Kind
+	if kind == "" {
+		kind = "sftp"
+	}
+	values := []any{item.Name, kind, item.Host, item.URL, item.Port, item.Username, item.AuthType, item.AuthSecret, item.AuthPassphrase, item.HostKeyFingerprint}
 	values = append(values, args...)
-	result, err := s.DB.ExecContext(ctx, "UPDATE remote_systems SET name = ?, host = ?, port = ?, username = ?, auth_type = ?, auth_secret = ?, auth_passphrase = ?, host_key_fingerprint = ? WHERE "+where,
+	result, err := s.DB.ExecContext(ctx, "UPDATE remote_systems SET name = ?, kind = ?, host = ?, url = ?, port = ?, username = ?, auth_type = ?, auth_secret = ?, auth_passphrase = ?, host_key_fingerprint = ? WHERE "+where,
 		values...)
 	if err != nil {
 		return err
@@ -257,7 +291,7 @@ func (s *Store) DeleteRemoteSystem(ctx context.Context, id, userID int64, admin 
 func scanSyncTask(row interface{ Scan(...any) error }) (SyncTask, error) {
 	var item SyncTask
 	var enabled int
-	err := row.Scan(&item.ID, &item.UserID, &item.Name, &item.Direction, &item.RemoteSystemID, &item.SourceType, &item.SourcePath, &item.TargetType, &item.TargetPath, &item.ConflictPolicy, &item.ScheduleType, &item.Cron, &enabled, &item.LastRunAt, &item.LastResult, &item.CreatedAt)
+	err := row.Scan(&item.ID, &item.UserID, &item.Name, &item.Direction, &item.RemoteSystemID, &item.SourceType, &item.SourcePath, &item.SourceKind, &item.TargetType, &item.TargetPath, &item.ConflictPolicy, &item.ScheduleType, &item.Cron, &enabled, &item.LastRunAt, &item.LastResult, &item.CreatedAt)
 	item.Enabled = enabled != 0
 	if errors.Is(err, sql.ErrNoRows) {
 		return SyncTask{}, ErrNotFound
@@ -266,7 +300,7 @@ func scanSyncTask(row interface{ Scan(...any) error }) (SyncTask, error) {
 }
 
 const syncTaskColumns = `id, user_id, name, direction, remote_system_id, source_type, source_path,
- target_type, target_path, conflict_policy, schedule_type, cron, enabled,
+ COALESCE(source_kind, 'directory'), target_type, target_path, conflict_policy, schedule_type, cron, enabled,
  COALESCE(last_run_at, ''), COALESCE(last_result, ''), created_at`
 
 // CreateSyncTask 创建同步任务，并校验目标系统归属。
@@ -283,8 +317,12 @@ func (s *Store) CreateSyncTask(ctx context.Context, item SyncTask, admin bool) (
 		return SyncTask{}, ErrNotFound
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	result, err := s.DB.ExecContext(ctx, `INSERT INTO sync_tasks(user_id, name, direction, remote_system_id, source_type, source_path, target_type, target_path, conflict_policy, schedule_type, cron, enabled, created_at)
-VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, item.UserID, item.Name, item.Direction, item.RemoteSystemID, item.SourceType, item.SourcePath, item.TargetType, item.TargetPath, item.ConflictPolicy, item.ScheduleType, item.Cron, boolInt(item.Enabled), now)
+	sourceKind := item.SourceKind
+	if sourceKind == "" {
+		sourceKind = "directory"
+	}
+	result, err := s.DB.ExecContext(ctx, `INSERT INTO sync_tasks(user_id, name, direction, remote_system_id, source_type, source_path, source_kind, target_type, target_path, conflict_policy, schedule_type, cron, enabled, created_at)
+VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, item.UserID, item.Name, item.Direction, item.RemoteSystemID, item.SourceType, item.SourcePath, sourceKind, item.TargetType, item.TargetPath, item.ConflictPolicy, item.ScheduleType, item.Cron, boolInt(item.Enabled), now)
 	if err != nil {
 		return SyncTask{}, err
 	}
@@ -342,9 +380,13 @@ func (s *Store) UpdateSyncTask(ctx context.Context, item SyncTask, userID int64,
 	if admin {
 		where, args = "id = ?", []any{item.ID}
 	}
-	values := []any{item.Name, item.Direction, item.RemoteSystemID, item.SourceType, item.SourcePath, item.TargetType, item.TargetPath, item.ConflictPolicy, item.ScheduleType, item.Cron, boolInt(item.Enabled)}
+	sourceKind := item.SourceKind
+	if sourceKind == "" {
+		sourceKind = "directory"
+	}
+	values := []any{item.Name, item.Direction, item.RemoteSystemID, item.SourceType, item.SourcePath, sourceKind, item.TargetType, item.TargetPath, item.ConflictPolicy, item.ScheduleType, item.Cron, boolInt(item.Enabled)}
 	values = append(values, args...)
-	result, err := s.DB.ExecContext(ctx, `UPDATE sync_tasks SET name = ?, direction = ?, remote_system_id = ?, source_type = ?, source_path = ?, target_type = ?, target_path = ?, conflict_policy = ?, schedule_type = ?, cron = ?, enabled = ? WHERE `+where,
+	result, err := s.DB.ExecContext(ctx, `UPDATE sync_tasks SET name = ?, direction = ?, remote_system_id = ?, source_type = ?, source_path = ?, source_kind = ?, target_type = ?, target_path = ?, conflict_policy = ?, schedule_type = ?, cron = ?, enabled = ? WHERE `+where,
 		values...)
 	if err != nil {
 		return err
@@ -385,7 +427,7 @@ func (s *Store) DeleteSyncTask(ctx context.Context, id, userID int64, admin bool
 // ListScheduledSyncTasks returns periodic tasks for the scheduler scan.
 func (s *Store) ListScheduledSyncTasks(ctx context.Context) ([]SyncTask, error) {
 	rows, err := s.DB.QueryContext(ctx, `SELECT sync_tasks.id, sync_tasks.user_id, sync_tasks.name, sync_tasks.direction, sync_tasks.remote_system_id,
- sync_tasks.source_type, sync_tasks.source_path, sync_tasks.target_type, sync_tasks.target_path, sync_tasks.conflict_policy,
+ sync_tasks.source_type, sync_tasks.source_path, COALESCE(sync_tasks.source_kind, 'directory'), sync_tasks.target_type, sync_tasks.target_path, sync_tasks.conflict_policy,
  sync_tasks.schedule_type, sync_tasks.cron, sync_tasks.enabled, COALESCE(sync_tasks.last_run_at, ''),
  COALESCE(sync_tasks.last_result, ''), sync_tasks.created_at
  FROM sync_tasks JOIN users ON users.id = sync_tasks.user_id

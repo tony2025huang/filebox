@@ -1,6 +1,6 @@
 <template>
   <main class="app-shell admin-shell">
-    <header class="topbar"><div class="topbar-brand"><BrandLogo variant="main" compact link /><span class="slash">/</span><span class="section-name">{{ t('nav.admin') }}</span></div><div class="topbar-actions"><LanguageSelect :user="sessionUser" /><RouterLink to="/" class="icon-text-button"><FolderOpen :size="16" /> {{ t('nav.files') }}</RouterLink><RouterLink to="/logs" class="icon-text-button"><ScrollText :size="16" /> {{ t('nav.logs') }}</RouterLink><RouterLink to="/change-password?mode=self" class="icon-button" :title="t('nav.changePassword')"><KeyRound :size="17" /></RouterLink><button class="icon-button" :title="t('nav.logout')" @click="logout"><LogOut :size="18" /></button></div></header>
+    <AuthenticatedTopbar :user="sessionUser" section="admin" />
     <section class="admin-layout">
       <aside class="admin-sidebar">
         <button v-for="tab in tabs" :key="tab.key" class="admin-tab" :class="{ active: activeTab === tab.key }" @click="switchTab(tab.key)"><component :is="tab.icon" :size="17" /><span>{{ t(tab.label) }}</span></button>
@@ -49,14 +49,14 @@
 // AdminView ä½¿ç”¨å·¦ä¾§é¡µç­¾å¯¼èˆªç»„ç»‡å…¨éƒ¨ç®¡ç†é¢æ¿ï¼ˆæ¦‚è§ˆ/ç”¨æˆ·/å®‰å…¨/å“ç‰Œ/é”å®š/ç³»ç»Ÿï¼‰ï¼Œç”¨æˆ·ç¼–è¾‘ä¸Žæ–°å»ºä¸ºå±…ä¸­å¼¹çª—ã€‚
 // AdminView organizes admin panels with a left tab navigation (overview/users/security/branding/locks/system) and centered modals for user create/edit.
 import { computed, onMounted, reactive, ref, watch } from 'vue'
-import { RouterLink, useRoute, useRouter } from 'vue-router'
-import { api, clearSession } from '../api'
+import { useRoute, useRouter } from 'vue-router'
+import { api } from '../api'
 import { applyTheme, brand, DEFAULT_THEME_COLOR, isThemeColor, loadBrand, normalizeThemeColor } from '../brand'
+import AuthenticatedTopbar from '../components/AuthenticatedTopbar.vue'
 import BrandFooter from '../components/BrandFooter.vue'
 import BrandLogo from '../components/BrandLogo.vue'
-import LanguageSelect from '../components/LanguageSelect.vue'
 import { currentLocale, setLocale, systemLocale, t } from '../i18n'
-import { Files, FolderOpen, HardDrive, KeyRound, LayoutDashboard, LoaderCircle, Lock, LogOut, Palette, Pencil, RefreshCw, Save, ScrollText, Search, Settings, Share2, Shield, Trash2, Unlock, UserPlus, Users, X } from 'lucide-vue-next'
+import { Files, HardDrive, LayoutDashboard, LoaderCircle, Lock, Palette, Pencil, RefreshCw, Save, Search, Settings, Share2, Shield, Trash2, Unlock, UserPlus, Users, X } from 'lucide-vue-next'
 
 const router = useRouter(); const route = useRoute(); const sessionUser = ref(JSON.parse(localStorage.getItem('filebox_user') || '{}')); const users = ref([]); const total = ref(0); const stats = ref({}); const ipLocks = ref([]); const userLocks = ref([]); const searchInput = ref(''); const loading = ref(false); const saving = ref(false); const settingsSaving = ref(false); const error = ref(''); const notice = ref(''); const showCreate = ref(false); const editing = ref(null)
 // tabs å®šä¹‰å·¦ä¾§èœå•ï¼›activeTab æ”¯æŒ ?tab= æ·±é“¾ä¸Žåˆ·æ–°ä¿æŒã€‚
@@ -99,7 +99,6 @@ async function updateUser() { saving.value = true; error.value = ''; try { await
 async function unlockIP(ip) { try { await api(`/api/admin/locks/ip/${encodeURIComponent(ip)}`, { method: 'DELETE' }); notice.value = t('notice.lockReleased'); loadLocks() } catch (err) { error.value = err.message } }
 async function unlockUser(id) { try { await api(`/api/admin/locks/user/${id}`, { method: 'DELETE' }); notice.value = t('notice.lockReleased'); loadLocks() } catch (err) { error.value = err.message } }
 async function remove(item) { if (!window.confirm(t('confirm.deleteUser', { name: item.username }))) return; try { await api(`/api/admin/users/${item.id}`, { method: 'DELETE' }); notice.value = t('notice.userDeleted'); loadAll() } catch (err) { error.value = err.message } }
-async function logout() { try { await api('/api/auth/logout', { method: 'POST' }) } finally { clearSession(); router.push('/login') } }
 function formatBytes(bytes = 0) { if (bytes < 1024) return `${bytes} B`; const units = ['KB', 'MB', 'GB', 'TB']; let value = bytes; let unit = -1; do { value /= 1024; unit++ } while (value >= 1024 && unit < units.length - 1); return `${value.toFixed(value >= 10 ? 0 : 1)} ${units[unit]}` }
 function formatDate(value) { return value ? new Date(value).toLocaleDateString(currentLocale.value) : '-' }
 watch(() => brandForm.themeColor, value => { if (isThemeColor(value)) themeColorPicker.value = value ? normalizeThemeColor(value) : DEFAULT_THEME_COLOR })

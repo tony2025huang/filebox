@@ -181,6 +181,12 @@ var (
 	ErrCollectionLimit   = errors.New("collection upload limit reached")
 	ErrCollectionExpired = errors.New("collection expired")
 	ErrCollectionRevoked = errors.New("collection revoked")
+	// ErrCollectionMaxUploadsBelow 表示下调上传次数上限时低于当前已用次数。
+	// ErrCollectionMaxUploadsBelow indicates a lowered upload limit below the current used count.
+	ErrCollectionMaxUploadsBelow = errors.New("collection max uploads below used count")
+	// ErrCollectionInvalidUpdate 表示收集编辑参数无效（如到期时间非未来）。
+	// ErrCollectionInvalidUpdate indicates invalid collection edit parameters (e.g. a non-future expiry).
+	ErrCollectionInvalidUpdate = errors.New("invalid collection update")
 )
 
 // ChunkInfo 表示一个已写入临时目录的上传分片。
@@ -2076,6 +2082,66 @@ FROM upload_collections`
 	return collections, rows.Err()
 }
 
+// UpdateUploadCollection 原子更新收集链接（名称/到期时间/次数上限/单文件上限）。
+// 撤销后不可编辑；下调 maxUploads 不允许低于当前 uploadCount；到期时间必须为未来（可用于重新激活过期收集）。
+// UpdateUploadCollection atomically updates a collection (name/expiry/upload limit/single-file limit).
+// Revoked collections cannot be edited; lowering maxUploads below the current uploadCount is rejected;
+// the expiry must be in the future (which may re-activate an expired collection).
+func (s *Store) UpdateUploadCollection(ctx context.Context, id, userID int64, admin bool, name, expiresAt string, maxUploads int, maxFileBytes int64) (UploadCollection, error) {
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return UploadCollection{}, err
+	}
+	defer tx.Rollback()
+	where := "id = ?"
+	args := []any{id}
+	if !admin {
+		where += " AND created_by = ?"
+		args = append(args, userID)
+	}
+	var collection UploadCollection
+	err = tx.QueryRowContext(ctx, `SELECT id, created_by, name, token, expires_at, max_uploads, upload_count, max_file_bytes, COALESCE(revoked_at, ''), created_at
+FROM upload_collections WHERE `+where, args...).Scan(&collection.ID, &collection.CreatedBy, &collection.Name, &collection.Token, &collection.ExpiresAt, &collection.MaxUploads, &collection.UploadCount, &collection.MaxFileBytes, &collection.RevokedAt, &collection.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return UploadCollection{}, ErrNotFound
+	}
+	if err != nil {
+		return UploadCollection{}, err
+	}
+	if collection.RevokedAt != "" {
+		return UploadCollection{}, ErrCollectionRevoked
+	}
+	deadline, parseErr := time.Parse(time.RFC3339, expiresAt)
+	if parseErr != nil || !time.Now().UTC().Before(deadline) {
+		return UploadCollection{}, ErrCollectionInvalidUpdate
+	}
+	if maxUploads < 0 || maxUploads > 100000 || maxFileBytes < 0 {
+		return UploadCollection{}, ErrCollectionInvalidUpdate
+	}
+	if maxUploads > 0 && maxUploads < collection.UploadCount {
+		return UploadCollection{}, ErrCollectionMaxUploadsBelow
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	result, err := tx.ExecContext(ctx, `UPDATE upload_collections SET name = ?, expires_at = ?, max_uploads = ?, max_file_bytes = ?, updated_at = ?
+WHERE id = ? AND revoked_at IS NULL`, name, expiresAt, maxUploads, maxFileBytes, now, id)
+	if err != nil {
+		return UploadCollection{}, err
+	}
+	if count, err := result.RowsAffected(); err != nil {
+		return UploadCollection{}, err
+	} else if count != 1 {
+		return UploadCollection{}, ErrCollectionRevoked
+	}
+	if err := tx.Commit(); err != nil {
+		return UploadCollection{}, err
+	}
+	collection.Name = name
+	collection.ExpiresAt = expiresAt
+	collection.MaxUploads = maxUploads
+	collection.MaxFileBytes = maxFileBytes
+	return collection, nil
+}
+
 // RevokeUploadCollection disables a collection without touching received files.
 // RevokeUploadCollection 撤销收集链接，但保留已经收到的文件。
 func (s *Store) RevokeUploadCollection(ctx context.Context, id, userID int64, admin bool) error {
@@ -2298,6 +2364,32 @@ WHERE ucf.collection_id = ? ORDER BY ucf.created_at DESC, ucf.id DESC`, collecti
 	for rows.Next() {
 		var item UploadCollectionFile
 		if err := rows.Scan(&item.ID, &item.CollectionID, &item.FileID, &item.OriginalName, &item.Remark, &item.CreatedAt, &item.File.ID, &item.File.UserID, &item.File.Name, &item.File.StoredName, &item.File.Size, &item.File.Mime, &item.File.SHA256, &item.File.MD5, &item.File.Status, &item.File.StoragePath, &item.File.CreatedAt, &item.File.DeletedAt); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+// ListDirectChildFiles 返回某目录下的直接子文件（不含递归子目录），供同步源端选择器使用。
+// ListDirectChildFiles lists the direct child files of one directory (no recursion), used by the sync source picker.
+func (s *Store) ListDirectChildFiles(ctx context.Context, userID int64, path string) ([]File, error) {
+	root := filepath.ToSlash(filepath.Join("files", strconv.FormatInt(userID, 10)))
+	prefix := root
+	if path != "" {
+		prefix = root + "/" + strings.Trim(path, "/")
+	}
+	rows, err := s.DB.QueryContext(ctx, `SELECT id, user_id, name, stored_name, size, mime, sha256, md5, status, storage_path, created_at, COALESCE(deleted_at, '')
+FROM files WHERE user_id = ? AND status = 'ready' AND storage_path LIKE ? ESCAPE '\' AND storage_path NOT LIKE ? ESCAPE '\' ORDER BY name`,
+		userID, escapeLike(prefix)+"/%", escapeLike(prefix)+"/%/%")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]File, 0)
+	for rows.Next() {
+		var item File
+		if err := rows.Scan(&item.ID, &item.UserID, &item.Name, &item.StoredName, &item.Size, &item.Mime, &item.SHA256, &item.MD5, &item.Status, &item.StoragePath, &item.CreatedAt, &item.DeletedAt); err != nil {
 			return nil, err
 		}
 		items = append(items, item)

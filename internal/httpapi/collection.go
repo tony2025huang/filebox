@@ -28,6 +28,15 @@ type collectionCreateRequest struct {
 	MaxFileBytes   int64  `json:"maxFileBytes"`
 }
 
+// collectionUpdateRequest 是收集编辑请求体；expiresAt 为绝对时间（RFC3339），0=不限沿用创建语义。
+// collectionUpdateRequest is the collection-edit body; expiresAt is an absolute RFC3339 time, 0 keeps the "unlimited" semantics.
+type collectionUpdateRequest struct {
+	Name         string `json:"name"`
+	ExpiresAt    string `json:"expiresAt"`
+	MaxUploads   int    `json:"maxUploads"`
+	MaxFileBytes int64  `json:"maxFileBytes"`
+}
+
 type collectionUploadInitRequest struct {
 	Name      string `json:"name"`
 	Size      int64  `json:"size"`
@@ -158,6 +167,53 @@ func (s *Server) getCollectionFiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeData(w, http.StatusOK, "读取成功", map[string]any{"items": publicCollectionFiles(files)})
+}
+
+// updateCollection 更新当前用户（或管理员）创建的收集链接：到期时间、上传次数、单文件大小上限。
+// updateCollection updates an owned collection (or any, for admins): expiry, upload limit, single-file size limit.
+func (s *Server) updateCollection(w http.ResponseWriter, r *http.Request) {
+	user := currentUser(r.Context())
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "收集链接不存在")
+		return
+	}
+	if s.rejectReadOnly(w, r, user, "collection_update", r.PathValue("id")) {
+		return
+	}
+	var input collectionUpdateRequest
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	input.Name = strings.TrimSpace(input.Name)
+	if input.Name == "" || len(input.Name) > 255 {
+		writeError(w, http.StatusBadRequest, "收集链接参数无效")
+		return
+	}
+	collection, err := s.store.UpdateUploadCollection(r.Context(), id, user.ID, user.Role == "admin", input.Name, input.ExpiresAt, input.MaxUploads, input.MaxFileBytes)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		writeError(w, http.StatusNotFound, "收集链接不存在")
+		return
+	case errors.Is(err, store.ErrCollectionRevoked):
+		writeError(w, http.StatusBadRequest, "收集链接已撤销，不可编辑")
+		return
+	case errors.Is(err, store.ErrCollectionMaxUploadsBelow):
+		writeErrorData(w, http.StatusBadRequest, "上传次数上限不能低于当前已用次数", map[string]string{"code": "COLLECTION_MAX_UPLOADS_BELOW_USED"})
+		return
+	case errors.Is(err, store.ErrCollectionInvalidUpdate):
+		writeError(w, http.StatusBadRequest, "收集链接参数无效")
+		return
+	case err != nil:
+		log.Printf("update collection: %v", err)
+		writeError(w, http.StatusInternalServerError, "保存收集链接失败")
+		return
+	}
+	s.serviceEvent(r, "collection_update", user.Username, "collection=%d result=success", collection.ID)
+	s.recordAudit(r, &user.ID, user.Username, "collection_update", collection.Name, "success", "update")
+	result := publicCollection(collection, true)
+	result["url"] = "/u/" + collection.Token
+	writeData(w, http.StatusOK, "收集链接已更新", result)
 }
 
 // deleteCollection revokes a collection while keeping files already received.
@@ -319,6 +375,15 @@ func (s *Server) collectionFailure(w http.ResponseWriter, r *http.Request, targe
 	writeErrorData(w, status, message, data)
 }
 
+// maskedCollectionToken 返回收集 token 的脱敏前缀（前 8 位），完整 token 是公开凭据，禁止写入日志。
+// maskedCollectionToken returns a masked prefix (first 8 chars) of a collection token; the full token is a public credential and must never be logged.
+func maskedCollectionToken(token string) string {
+	if len(token) <= 8 {
+		return "****"
+	}
+	return token[:8] + "…"
+}
+
 // collectionUploadInit validates limits and creates an anonymous upload task.
 // collectionUploadInit 校验收集限制并创建匿名上传任务，支持目录内秒传。
 func (s *Server) collectionUploadInit(w http.ResponseWriter, r *http.Request) {
@@ -404,7 +469,7 @@ func (s *Server) collectionUploadInit(w http.ResponseWriter, r *http.Request) {
 			linked, linkErr := s.store.CreateCollectionFile(r.Context(), token, file.ID, name, strings.TrimSpace(input.Remark))
 			if linkErr == nil {
 				s.recordAudit(r, nil, "anonymous", "upload_collect", name, "success", "collection_upload")
-				s.serviceEvent(r, "upload_collect", "anonymous", "name=%s size=%d result=success reason=collection_upload", name, input.Size)
+				s.serviceEvent(r, "upload_collect", "anonymous", "name=%s size=%d owner=%s owner_id=%d collection=%d dir=uploads/%s result=success reason=collection_upload", name, input.Size, owner.Username, owner.ID, collection.ID, maskedCollectionToken(collection.Token))
 				writeData(w, http.StatusOK, "上传完成", map[string]any{"instant": true, "file": publicFile(linked.File)})
 				return
 			}
@@ -442,7 +507,11 @@ func (s *Server) collectionUploadInit(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		var quotaErr *store.QuotaError
 		if errors.As(err, &quotaErr) {
-			s.collectionFailure(w, r, name, "quota_exceeded", http.StatusRequestEntityTooLarge, "超出用户配额", map[string]any{"code": "QUOTA_EXCEEDED", "usedBytes": quotaErr.UsedBytes, "quotaBytes": quotaErr.QuotaBytes, "fileSize": quotaErr.FileSize})
+			// 配额错误脱敏：匿名收集场景不返回 usedBytes/quotaBytes/fileSize 等内部配额明细，
+			// 避免外部人员借此推断收集者账户的配额状态；登录用户普通上传仍保留 QUOTA_EXCEEDED 明细。
+			// Quota errors are masked for anonymous collection uploads: internal quota details are
+			// never exposed to outsiders; regular authenticated uploads keep the QUOTA_EXCEEDED detail.
+			s.collectionFailure(w, r, name, "quota_exceeded", http.StatusRequestEntityTooLarge, "配额不足，请联系链接提供方", map[string]string{"code": "COLLECTION_QUOTA_EXCEEDED"})
 			return
 		}
 		log.Printf("create collection upload task: %v", err)
@@ -598,7 +667,7 @@ func (s *Server) collectionUploadComplete(w http.ResponseWriter, r *http.Request
 		r.URL.RawQuery = query.Encode()
 		preloaded = true
 	}
-	_, owner, task, err := s.loadCollectionTask(r)
+	collection, owner, task, err := s.loadCollectionTask(r)
 	if err != nil {
 		s.writeCollectionTaskError(w, r, err)
 		return
@@ -607,15 +676,23 @@ func (s *Server) collectionUploadComplete(w http.ResponseWriter, r *http.Request
 	defer func() {
 		if auditReason == "" {
 			s.recordAudit(r, nil, "anonymous", "upload_collect", task.Name, "success", "collection_upload")
-			s.serviceEvent(r, "upload_collect", "anonymous", "name=%s size=%d result=success reason=collection_upload", task.Name, task.Size)
+			s.serviceEvent(r, "upload_collect", "anonymous", "name=%s size=%d owner=%s owner_id=%d collection=%d dir=uploads/%s result=success reason=collection_upload", task.Name, task.Size, owner.Username, owner.ID, collection.ID, maskedCollectionToken(collection.Token))
 		} else {
 			s.recordAudit(r, nil, "anonymous", "upload_collect_fail", task.Name, "failure", auditReason)
-			s.serviceEvent(r, "upload_collect_fail", "anonymous", "name=%s size=%d result=failure reason=%s", task.Name, task.Size, auditReason)
+			s.serviceEvent(r, "upload_collect_fail", "anonymous", "name=%s size=%d owner=%s owner_id=%d collection=%d dir=uploads/%s result=failure reason=%s", task.Name, task.Size, owner.Username, owner.ID, collection.ID, maskedCollectionToken(collection.Token), auditReason)
 		}
 	}()
 	if s.userReadOnly(owner) {
 		auditReason = "read_only"
 		writeErrorData(w, http.StatusForbidden, "收集者处于只读时段，暂不接受上传", map[string]string{"code": "READ_ONLY"})
+		return
+	}
+	// 完成阶段重校验单文件上限：收集编辑可能下调 maxFileBytes，需拦截在编辑前已初始化的超限任务。
+	// Re-check the single-file limit at completion: an edit may have lowered maxFileBytes, so pending
+	// tasks initialized before the edit must be rejected here.
+	if collection.MaxFileBytes > 0 && task.Size > collection.MaxFileBytes {
+		auditReason = "collection_file_too_large"
+		writeErrorData(w, http.StatusRequestEntityTooLarge, "文件超过收集链接单文件大小上限", map[string]any{"code": "COLLECTION_FILE_TOO_LARGE"})
 		return
 	}
 	if !preloaded && r.Body != nil && r.ContentLength != 0 {

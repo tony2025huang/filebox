@@ -224,3 +224,130 @@ func TestSyncTaskValidationAndLogRetention(t *testing.T) {
 func storeSyncLog(taskID, userID int64, runAt string) store.SyncLog {
 	return store.SyncLog{TaskID: taskID, UserID: userID, RunAt: runAt, Direction: "push", Result: "success", Message: "ok"}
 }
+
+func TestValidateRemotePathNormalization(t *testing.T) {
+	// 归一化规则：`/` 与绝对路径均合法（#4 目录上级导航的后端基础）。
+	// Normalization rules: `/` and absolute paths are valid (backend basis for #4 parent navigation).
+	tests := []struct {
+		input string
+		want  string
+		ok    bool
+	}{
+		{"", ".", true},
+		{"   ", ".", true},
+		{".", ".", true},
+		{"/", "/", true},
+		{"/tmp", "/tmp", true},
+		{"/tmp/", "/tmp", true},
+		{"/tmp/a", "/tmp/a", true},
+		{"foo", "foo", true},
+		{"foo/bar", "foo/bar", true},
+		{"../escape", "", false},
+		{"/tmp/../etc", "/etc", true},
+		{"a\\b", "", false},
+		{"bad\x00path", "", false},
+	}
+	for _, test := range tests {
+		got, err := validateRemotePath(test.input)
+		if (err == nil) != test.ok || (err == nil && got != test.want) {
+			t.Fatalf("validateRemotePath(%q) = %q, %v; want %q ok=%t", test.input, got, err, test.want, test.ok)
+		}
+	}
+}
+
+func TestValidateFileBoxSyncPathNormalization(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+		ok    bool
+	}{
+		{"docs", "docs", true},
+		{"docs/readme.txt", "docs/readme.txt", true},
+		{"a\\b", "a/b", true},
+		{"/absolute", "", false},
+		{"..", "", false},
+		{"a/../b", "", false},
+		{"a:b", "", false},
+		{"a\x00b", "", false},
+	}
+	for _, test := range tests {
+		got, err := validateFileBoxSyncPath(test.input, false)
+		if (err == nil) != test.ok || (err == nil && got != test.want) {
+			t.Fatalf("validateFileBoxSyncPath(%q, false) = %q, %v; want %q ok=%t", test.input, got, err, test.want, test.ok)
+		}
+	}
+	// allowEmpty 分支：空路径合法。
+	got, err := validateFileBoxSyncPath("", true)
+	if err != nil || got != "" {
+		t.Fatalf("validateFileBoxSyncPath(\"\", true) = %q, %v", got, err)
+	}
+}
+
+func TestValidateSyncTaskDirectionMatrix(t *testing.T) {
+	// 方向矩阵（#5）：push 支持 filebox→sftp / filebox→filebox；pull 支持 sftp→filebox / filebox→filebox。
+	// Direction matrix (#5): push allows filebox→sftp / filebox→filebox; pull allows sftp→filebox / filebox→filebox.
+	valid := []struct {
+		name, direction, sourceType, targetType string
+	}{
+		{"push sftp", "push", "filebox", "sftp"},
+		{"push filebox", "push", "filebox", "filebox"},
+		{"pull sftp", "pull", "sftp", "filebox"},
+		{"pull filebox", "pull", "filebox", "filebox"},
+	}
+	for _, test := range valid {
+		targetPath := "."
+		if test.targetType == "filebox" {
+			targetPath = ""
+		}
+		input := syncTaskRequest{Name: "t", Direction: test.direction, RemoteSystemID: 1, SourceType: test.sourceType, SourcePath: "a", TargetType: test.targetType, TargetPath: targetPath, ConflictPolicy: "overwrite", ScheduleType: "once"}
+		if _, err := validateSyncTaskInput(input); err != nil {
+			t.Fatalf("valid matrix %s (%s→%s): %v", test.name, test.sourceType, test.targetType, err)
+		}
+	}
+	invalid := []struct {
+		name, direction, sourceType, targetType string
+	}{
+		{"push sftp source", "push", "sftp", "filebox"},
+		{"pull sftp target", "pull", "filebox", "sftp"},
+		{"both sftp", "push", "sftp", "sftp"},
+	}
+	for _, test := range invalid {
+		input := syncTaskRequest{Name: "t", Direction: test.direction, RemoteSystemID: 1, SourceType: test.sourceType, SourcePath: "a", TargetType: test.targetType, TargetPath: ".", ConflictPolicy: "overwrite", ScheduleType: "once"}
+		if _, err := validateSyncTaskInput(input); err == nil {
+			t.Fatalf("invalid matrix %s (%s→%s) accepted", test.name, test.sourceType, test.targetType)
+		}
+	}
+	// sourceKind 消歧：file 与 directory 合法，其他拒绝。
+	for _, kind := range []string{"", "directory", "file"} {
+		input := syncTaskRequest{Name: "t", Direction: "push", RemoteSystemID: 1, SourceType: "filebox", SourcePath: "a", SourceKind: kind, TargetType: "sftp", TargetPath: ".", ConflictPolicy: "overwrite", ScheduleType: "once"}
+		if _, err := validateSyncTaskInput(input); err != nil {
+			t.Fatalf("sourceKind %q rejected: %v", kind, err)
+		}
+	}
+	bad := syncTaskRequest{Name: "t", Direction: "push", RemoteSystemID: 1, SourceType: "filebox", SourcePath: "a", SourceKind: "folder", TargetType: "sftp", TargetPath: ".", ConflictPolicy: "overwrite", ScheduleType: "once"}
+	if _, err := validateSyncTaskInput(bad); err == nil {
+		t.Fatal("invalid sourceKind accepted")
+	}
+}
+
+func TestValidateSyncSystemInputFileBoxKind(t *testing.T) {
+	// FileBox 目标系统校验：url 必须合法 http(s)、仅密码认证、禁内嵌账号密码。
+	// FileBox remote validation: url must be valid http(s), password auth only, no embedded credentials.
+	valid := syncSystemRequest{Name: "remote-filebox", Kind: "filebox", URL: "https://files.example.com", Username: "u", AuthType: "password", AuthSecret: "p"}
+	if _, err := validateSyncSystemInput(valid, true); err != nil {
+		t.Fatalf("valid filebox system rejected: %v", err)
+	}
+	invalid := []syncSystemRequest{
+		{Name: "n", Kind: "filebox", URL: "ftp://files.example.com", Username: "u", AuthType: "password", AuthSecret: "p"},
+		{Name: "n", Kind: "filebox", URL: "https://user:pass@files.example.com", Username: "u", AuthType: "password", AuthSecret: "p"},
+		{Name: "n", Kind: "filebox", URL: "not-a-url", Username: "u", AuthType: "password", AuthSecret: "p"},
+		{Name: "n", Kind: "filebox", URL: "https://files.example.com", Username: "u", AuthType: "key", AuthSecret: "p"},
+		{Name: "n", Kind: "filebox", URL: "https://files.example.com", Username: "u", AuthType: "password", AuthSecret: ""},
+		{Name: "n", Kind: "bogus", URL: "https://files.example.com", Username: "u", AuthType: "password", AuthSecret: "p"},
+	}
+	for index, input := range invalid {
+		if _, err := validateSyncSystemInput(input, true); err == nil {
+			t.Fatalf("invalid filebox system #%d accepted: %#v", index, input)
+		}
+	}
+}

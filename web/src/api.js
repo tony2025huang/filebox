@@ -19,7 +19,7 @@ const settingsMessageKeys = {
   '密码复杂度无效': 'error.invalidPasswordComplexity', 'IP 锁定窗口无效': 'error.invalidIPLockWindow', 'IP 锁定阈值无效': 'error.invalidIPLockThreshold', 'IP 解锁时长无效': 'error.invalidIPUnlockMinutes'
 }
 
-const codeKeys = { DISK_FULL: 'error.diskFull', PASSWORD_CHANGE_REQUIRED: 'error.passwordChangeRequired', REGISTER_DISABLED: 'error.registerDisabled', FILE_TOO_LARGE: 'error.fileTooLarge', SHARE_DOWNLOAD_LIMIT: 'error.shareLimit', BATCH_DELETE_EMPTY: 'error.batchDeleteEmpty', INVALID_FILE_ID: 'error.invalidFileId', INVALID_READ_ONLY_WINDOW: 'readOnly.invalidWindow', READ_ONLY: 'readOnly.error', COLLECTION_LIMIT: 'collection.limitReached', COLLECTION_EXPIRED: 'collection.expired', COLLECTION_REVOKED: 'collection.revoked', COLLECTION_FILE_TOO_LARGE: 'collection.fileTooLarge', QUOTA_EXCEEDED: 'error.quotaExceeded', SYNC_TASK_RUNNING: 'sync.confirmRunning' }
+const codeKeys = { DISK_FULL: 'error.diskFull', PASSWORD_CHANGE_REQUIRED: 'error.passwordChangeRequired', REGISTER_DISABLED: 'error.registerDisabled', FILE_TOO_LARGE: 'error.fileTooLarge', SHARE_DOWNLOAD_LIMIT: 'error.shareLimit', BATCH_DELETE_EMPTY: 'error.batchDeleteEmpty', INVALID_FILE_ID: 'error.invalidFileId', INVALID_READ_ONLY_WINDOW: 'readOnly.invalidWindow', READ_ONLY: 'readOnly.error', COLLECTION_LIMIT: 'collection.limitReached', COLLECTION_EXPIRED: 'collection.expired', COLLECTION_REVOKED: 'collection.revoked', COLLECTION_FILE_TOO_LARGE: 'collection.fileTooLarge', COLLECTION_QUOTA_EXCEEDED: 'collection.quotaExceeded', QUOTA_EXCEEDED: 'error.quotaExceeded', SYNC_TASK_RUNNING: 'sync.confirmRunning' }
 const shareMessageKeys = { '分享已撤销': 'error.shareRevoked', '分享下载被拒绝': 'error.shareDenied', '获取分享列表失败': 'error.shareListFailed', '获取分享日志失败': 'error.shareLogsFailed', '延期分享失败': 'error.shareExtendFailed', '增加分享次数失败': 'error.shareIncreaseFailed' }
 
 // computeFileSHA256 computes the client checksum and reports progress for the upload row.
@@ -150,11 +150,12 @@ function redirectOnSessionExpired() {
   }
 }
 
-// clearSession 清除本地保存的认证令牌和用户快照。
-// clearSession removes the locally stored authentication token and user snapshot.
+// clearSession 清除本地保存的认证令牌、用户快照与同会话传输记录（避免换用户看到旧记录）。
+// clearSession removes the locally stored authentication token, user snapshot, and same-session transfer records.
 export function clearSession() {
   localStorage.removeItem('filebox_token')
   localStorage.removeItem('filebox_user')
+  sessionStorage.removeItem('filebox_transfers_v1')
 }
 
 // saveSession 持久化登录响应中的 JWT 和公开用户信息。

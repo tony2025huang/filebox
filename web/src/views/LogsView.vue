@@ -1,6 +1,6 @@
 <template>
   <main class="app-shell">
-    <header class="topbar"><div class="topbar-brand"><BrandLogo variant="main" compact link /><span class="slash">/</span><span class="section-name">{{ t('nav.logs') }}</span></div><div class="topbar-actions"><LanguageSelect :user="user" /><RouterLink to="/" class="icon-text-button"><FolderOpen :size="16" /> {{ t('nav.files') }}</RouterLink><RouterLink to="/shares" class="icon-text-button"><Share2 :size="16" /> {{ t('nav.shares') }}</RouterLink><RouterLink v-if="user.role === 'admin'" to="/admin" class="icon-text-button"><Shield :size="16" /> {{ t('nav.admin') }}</RouterLink><RouterLink to="/change-password?mode=self" class="icon-button" :title="t('nav.changePassword')"><KeyRound :size="17" /></RouterLink><button class="icon-button" :title="t('nav.logout')" @click="logout"><LogOut :size="18" /></button></div></header>
+    <AuthenticatedTopbar :user="user" section="logs" />
     <section class="content-wrap">
       <div class="page-heading"><div><p class="eyebrow">{{ t('logs.eyebrow') }}</p><h1>{{ t('logs.heading') }}</h1><p class="muted">{{ t('logs.copy') }}</p></div></div>
       <div class="toolbar logs-toolbar"><div class="search-box"><Search :size="17" /><input v-model="keywordInput" :placeholder="t('logs.searchPlaceholder')" @keyup.enter="applyFilters" /></div><select v-model="filters.action" :aria-label="t('logs.actionType')" :disabled="actionsLoading"><option value="">{{ actionsLoading ? t('logs.loadingActions') : t('logs.allActions') }}</option><optgroup :label="t('logs.actionType')"><option v-for="action in actionGroups.businessActions" :key="action" :value="action">{{ actionLabel(action) }}</option></optgroup><optgroup v-if="actionGroups.systemActions.length" :label="t('logs.systemGroup')"><option v-for="action in actionGroups.systemActions" :key="action" :value="action">{{ actionLabel(action) }}</option></optgroup></select><select v-model="filters.result" :aria-label="t('logs.result')"><option value="">{{ t('logs.allResults') }}</option><option value="success">{{ t('logs.success') }}</option><option value="failure">{{ t('logs.failure') }}</option></select><select v-if="user.role === 'admin'" v-model="filters.userId" :aria-label="t('logs.user')"><option value="">{{ t('logs.allUsers') }}</option><option v-for="item in users" :key="item.id" :value="String(item.id)">{{ item.username }}</option></select><button class="secondary-button" @click="applyFilters"><Search :size="16" /> {{ t('logs.filter') }}</button><button class="refresh-button" :title="t('logs.refresh')" @click="loadLogs"><RefreshCw :size="17" :class="{ spin: loading }" /></button><span class="result-count">{{ t('common.records', { count: total }) }}</span></div>
@@ -14,15 +14,13 @@
 
 <script setup>
 import { computed, onMounted, reactive, ref } from 'vue'
-import { RouterLink, useRouter } from 'vue-router'
-import { api, clearSession } from '../api'
+import { api } from '../api'
+import AuthenticatedTopbar from '../components/AuthenticatedTopbar.vue'
 import BrandFooter from '../components/BrandFooter.vue'
-import BrandLogo from '../components/BrandLogo.vue'
-import LanguageSelect from '../components/LanguageSelect.vue'
 import { currentLocale, t } from '../i18n'
-import { ChevronLeft, ChevronRight, FolderOpen, LoaderCircle, LogOut, RefreshCw, ScrollText, Search, KeyRound, Share2, Shield } from 'lucide-vue-next'
+import { ChevronLeft, ChevronRight, LoaderCircle, RefreshCw, ScrollText, Search } from 'lucide-vue-next'
 
-const router = useRouter(); const user = ref(JSON.parse(localStorage.getItem('filebox_user') || '{}')); const logs = ref([]); const actions = ref([]); const actionsLoading = ref(true); const users = ref([]); const total = ref(0); const page = ref(1); const pageSize = 20; const loading = ref(false); const error = ref(''); const notice = ref(''); const keywordInput = ref(''); const filters = reactive({ action: '', result: '', keyword: '', userId: '' })
+const user = ref(JSON.parse(localStorage.getItem('filebox_user') || '{}')); const logs = ref([]); const actions = ref([]); const actionsLoading = ref(true); const users = ref([]); const total = ref(0); const page = ref(1); const pageSize = 20; const loading = ref(false); const error = ref(''); const notice = ref(''); const keywordInput = ref(''); const filters = reactive({ action: '', result: '', keyword: '', userId: '' })
 async function loadLogs() { loading.value = true; error.value = ''; const query = new URLSearchParams({ page: String(page.value), pageSize: String(pageSize), action: filters.action, result: filters.result, keyword: filters.keyword }); if (user.value.role === 'admin' && filters.userId) query.set('userId', filters.userId); try { const body = await api(`/api/logs?${query}`); logs.value = body.data.items; total.value = body.data.total } catch (err) { error.value = err.message } finally { loading.value = false } }
 // loadActions 异步拉取筛选项：普通用户只取自己实际存在的动作类型（不展示无权分类），
 // 加载完成前在筛选中显示"加载中"占位（问题 5/6）。
@@ -46,7 +44,6 @@ const pageNumbers = computed(() => {
   return [...pages].filter(p => p >= 1 && p <= totalPages.value).sort((a, b) => a - b)
 })
 function gotoPage(target) { if (target < 1 || target > totalPages.value || target === page.value) return; page.value = target; loadLogs() }
-async function logout() { try { await api('/api/auth/logout', { method: 'POST' }) } finally { clearSession(); router.push('/login') } }
 function actionLabel(value) {
   const labels = {
     login: t('logs.login'), register: t('logs.register'), upload: t('logs.upload'), upload_init: t('logs.uploadInit'), upload_chunk: t('logs.uploadChunk'), download: t('logs.download'),
@@ -54,7 +51,7 @@ function actionLabel(value) {
     settings_update: t('logs.settingsUpdate'), brand_update: t('logs.brandUpdate'), language_update: t('logs.languageUpdate'),
     password_change: t('logs.passwordChange'), password_reset: t('logs.passwordReset'), user_create: t('logs.userCreate'),
     user_update: t('logs.userUpdate'), user_disabled: t('logs.userDisabled'), totp_update: t('logs.totpUpdate'),
-    ip_acl_update: t('logs.ipAclUpdate'), folder_create: t('logs.folderCreate'), folder_list: t('logs.folderList'), collection: t('logs.collection'), upload_collect: t('logs.uploadCollect'), upload_collect_fail: t('logs.uploadCollectFail'),
+    ip_acl_update: t('logs.ipAclUpdate'), folder_create: t('logs.folderCreate'), folder_list: t('logs.folderList'), collection: t('logs.collection'), upload_collect: t('logs.uploadCollect'), upload_collect_fail: t('logs.uploadCollectFail'), collection_update: t('logs.collectionUpdate'),
     folder_rename: t('logs.folderRename'), folder_delete: t('logs.folderDelete'), file_list: t('logs.fileList'),
     admin_stats: t('logs.adminStats'), log_list: t('logs.logList')
   }
@@ -63,7 +60,7 @@ function actionLabel(value) {
 // actionGroups 把动作分为业务与"系统配置"两组，供筛选下拉分组展示。
 // actionGroups splits actions into business and "system configuration" groups for grouped filter options.
 const actionGroups = computed(() => {
-  const business = new Set(['login', 'register', 'upload', 'upload_init', 'upload_chunk', 'upload_collect', 'upload_collect_fail', 'download', 'delete', 'share', 'share_view', 'share_download', 'share_extend', 'share_increase', 'share_revoke', 'batch_share'])
+  const business = new Set(['login', 'register', 'upload', 'upload_init', 'upload_chunk', 'upload_collect', 'upload_collect_fail', 'download', 'delete', 'share', 'share_view', 'share_download', 'share_extend', 'share_increase', 'share_revoke', 'batch_share', 'collection_update'])
   const businessActions = actions.value.filter(action => business.has(action))
   const systemActions = actions.value.filter(action => !business.has(action))
   return { businessActions, systemActions }

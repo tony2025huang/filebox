@@ -1,9 +1,6 @@
 <template>
   <main class="app-shell">
-    <header class="topbar">
-      <div class="topbar-brand"><BrandLogo variant="main" compact link /><span class="slash">/</span><span class="section-name">{{ t('nav.shares') }}</span></div>
-      <div class="topbar-actions"><LanguageSelect :user="user" /><RouterLink to="/" class="icon-text-button"><FolderOpen :size="16" /> {{ t('nav.files') }}</RouterLink><RouterLink to="/logs" class="icon-text-button"><ScrollText :size="16" /> {{ t('nav.logs') }}</RouterLink><RouterLink v-if="user.role === 'admin'" to="/admin" class="icon-text-button"><Shield :size="16" /> {{ t('nav.admin') }}</RouterLink><RouterLink to="/change-password?mode=self" class="icon-button" :title="t('nav.changePassword')"><KeyRound :size="17" /></RouterLink><button class="icon-button" :title="t('nav.logout')" @click="logout"><LogOut :size="18" /></button></div>
-    </header>
+    <AuthenticatedTopbar :user="user" section="shares" />
     <section class="content-wrap">
       <div class="page-heading"><div><p class="eyebrow">{{ t('shares.eyebrow') }}</p><h1>{{ t('shares.heading') }}</h1><p class="muted">{{ t('shares.copy') }}</p></div><button class="refresh-button" :title="t('shares.refresh')" @click="loadShares"><RefreshCw :size="18" :class="{ spin: loading }" /></button></div>
       <div v-if="error" class="alert error">{{ error }}</div><div v-if="notice" class="alert success">{{ notice }}</div>
@@ -16,15 +13,12 @@
 
 <script setup>
 import { onMounted, ref } from 'vue'
-import { RouterLink, useRouter } from 'vue-router'
-import { api, clearSession } from '../api'
+import { api } from '../api'
+import AuthenticatedTopbar from '../components/AuthenticatedTopbar.vue'
 import BrandFooter from '../components/BrandFooter.vue'
-import BrandLogo from '../components/BrandLogo.vue'
-import LanguageSelect from '../components/LanguageSelect.vue'
 import { currentLocale, t } from '../i18n'
-import { Clock3, Copy, ExternalLink, Eye, FolderOpen, KeyRound, LoaderCircle, LogOut, Plus, RefreshCw, ScrollText, Share2, Shield, Trash2, X } from 'lucide-vue-next'
+import { Clock3, Copy, Eye, LoaderCircle, Plus, RefreshCw, Share2, Trash2, X } from 'lucide-vue-next'
 
-const router = useRouter()
 const user = ref(JSON.parse(localStorage.getItem('filebox_user') || '{}'))
 const shares = ref([]); const selected = ref(null); const shareLogs = ref([]); const loading = ref(false); const logsLoading = ref(false); const saving = ref(false); const error = ref(''); const detailError = ref(''); const notice = ref(''); const extendHours = ref(24); const increaseMax = ref(1)
 
@@ -45,6 +39,5 @@ function statusLabel(status) { return t(`shares.status.${status}`) }
 function remainingLabel(item) { if (item.status === 'revoked') return t('shares.revokedAt'); if (!item.remainingSeconds) return t('shares.expiredNow'); const hours = Math.floor(item.remainingSeconds / 3600); const minutes = Math.max(1, Math.floor(item.remainingSeconds / 60)); return t('shares.timeLeft', { value: hours ? `${hours}h` : `${minutes}m` }) }
 function reasonLabel(value) { const keys = { share_not_found: 'logReason.shareNotFound', share_expired: 'logReason.shareExpired', share_revoked: 'logReason.shareRevoked', share_limit: 'logReason.shareLimit', share_denied: 'logReason.shareDenied' }; return keys[value] ? t(keys[value]) : value || '-' }
 function formatDate(value) { return value ? new Date(value).toLocaleString(currentLocale.value === 'en' ? 'en-US' : currentLocale.value, { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '-' }
-async function logout() { try { await api('/api/auth/logout', { method: 'POST' }) } finally { clearSession(); router.push('/login') } }
 onMounted(loadShares)
 </script>

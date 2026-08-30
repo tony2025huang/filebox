@@ -145,6 +145,21 @@ func TestUploadCollectionLimitsExpiryQuotaAndOwnership(t *testing.T) {
 	if quotaInit.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("collection quota = %d: %s", quotaInit.Code, quotaInit.Body.String())
 	}
+	// #9 配额脱敏：匿名收集场景不得泄露 usedBytes/quotaBytes/fileSize 等内部配额明细。
+	// #9 quota masking: anonymous collection uploads must not leak usedBytes/quotaBytes/fileSize details.
+	var quotaBody response
+	if err := json.Unmarshal(quotaInit.Body.Bytes(), &quotaBody); err != nil {
+		t.Fatal(err)
+	}
+	quotaData2, ok := quotaBody.Data.(map[string]any)
+	if !ok || quotaData2["code"] != "COLLECTION_QUOTA_EXCEEDED" {
+		t.Fatalf("collection quota body = %s", quotaInit.Body.String())
+	}
+	for _, key := range []string{"usedBytes", "quotaBytes", "fileSize"} {
+		if _, exists := quotaData2[key]; exists {
+			t.Fatalf("collection quota error leaked %s: %s", key, quotaInit.Body.String())
+		}
+	}
 	other := testJSONRequest(t, handler, http.MethodPost, "/api/admin/users", token, `{"username":"other-collection-user","password":"Other123!","role":"user","quotaBytes":1024}`)
 	if other.Code != http.StatusCreated {
 		t.Fatalf("create other user = %d: %s", other.Code, other.Body.String())
@@ -157,6 +172,63 @@ func TestUploadCollectionLimitsExpiryQuotaAndOwnership(t *testing.T) {
 	}
 	if cross := testJSONRequest(t, handler, http.MethodDelete, "/api/collections/"+strconv.FormatInt(collectionID, 10), otherToken, ""); cross.Code != http.StatusNotFound {
 		t.Fatalf("cross-owner collection revoke = %d: %s", cross.Code, cross.Body.String())
+	}
+}
+
+func TestUploadCollectionUpdate(t *testing.T) {
+	db, handler := newTestServer(t)
+	token := testAdminToken(t, handler)
+	created := testJSONRequest(t, handler, http.MethodPost, "/api/collections", token, `{"name":"可编辑","expiresInHours":24,"maxUploads":2,"maxFileBytes":0}`)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create collection = %d: %s", created.Code, created.Body.String())
+	}
+	data := responseData(t, created)
+	collectionID := int64(data["id"].(float64))
+	future := time.Now().UTC().Add(48 * time.Hour).Format(time.RFC3339)
+	updated := testJSONRequest(t, handler, http.MethodPut, "/api/collections/"+strconv.FormatInt(collectionID, 10), token, `{"name":"已编辑","expiresAt":"`+future+`","maxUploads":5,"maxFileBytes":2048}`)
+	if updated.Code != http.StatusOK {
+		t.Fatalf("update collection = %d: %s", updated.Code, updated.Body.String())
+	}
+	updatedData := responseData(t, updated)
+	if updatedData["name"] != "已编辑" || int(updatedData["maxUploads"].(float64)) != 5 || int64(updatedData["maxFileBytes"].(float64)) != 2048 {
+		t.Fatalf("updated collection = %#v", updatedData)
+	}
+	// 下调 maxUploads 不允许低于当前 uploadCount（先占用 3 次再下调到 2 会被拒绝；0=不限不受限）。
+	if _, err := db.DB.Exec("UPDATE upload_collections SET upload_count = 3 WHERE id = ?", collectionID); err != nil {
+		t.Fatal(err)
+	}
+	below := testJSONRequest(t, handler, http.MethodPut, "/api/collections/"+strconv.FormatInt(collectionID, 10), token, `{"name":"x","expiresAt":"`+future+`","maxUploads":2,"maxFileBytes":0}`)
+	if below.Code != http.StatusBadRequest {
+		t.Fatalf("lower maxUploads below used = %d: %s", below.Code, below.Body.String())
+	}
+	// 过期时间必须是未来时间。
+	past := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
+	pastUpdate := testJSONRequest(t, handler, http.MethodPut, "/api/collections/"+strconv.FormatInt(collectionID, 10), token, `{"name":"x","expiresAt":"`+past+`","maxUploads":5,"maxFileBytes":0}`)
+	if pastUpdate.Code != http.StatusBadRequest {
+		t.Fatalf("past expiry update = %d: %s", pastUpdate.Code, pastUpdate.Body.String())
+	}
+	// 撤销后不可编辑。
+	if revoked := testJSONRequest(t, handler, http.MethodDelete, "/api/collections/"+strconv.FormatInt(collectionID, 10), token, ""); revoked.Code != http.StatusOK {
+		t.Fatalf("revoke = %d: %s", revoked.Code, revoked.Body.String())
+	}
+	afterRevoke := testJSONRequest(t, handler, http.MethodPut, "/api/collections/"+strconv.FormatInt(collectionID, 10), token, `{"name":"x","expiresAt":"`+future+`","maxUploads":5,"maxFileBytes":0}`)
+	if afterRevoke.Code != http.StatusBadRequest {
+		t.Fatalf("edit revoked collection = %d: %s", afterRevoke.Code, afterRevoke.Body.String())
+	}
+	// 越权编辑按 404 隐藏。
+	other := testJSONRequest(t, handler, http.MethodPost, "/api/admin/users", token, `{"username":"edit-other","password":"Other123!","role":"user","quotaBytes":1024}`)
+	if other.Code != http.StatusCreated {
+		t.Fatalf("create other user = %d: %s", other.Code, other.Body.String())
+	}
+	otherLogin := testJSONRequest(t, handler, http.MethodPost, "/api/auth/login", "", `{"username":"edit-other","password":"Other123!"}`)
+	otherToken := responseData(t, otherLogin)["token"].(string)
+	if cross := testJSONRequest(t, handler, http.MethodPut, "/api/collections/"+strconv.FormatInt(collectionID, 10), otherToken, `{"name":"x","expiresAt":"`+future+`","maxUploads":5,"maxFileBytes":0}`); cross.Code != http.StatusNotFound {
+		t.Fatalf("cross-owner update = %d: %s", cross.Code, cross.Body.String())
+	}
+	// collection_update 审计动作已记录。
+	var auditCount int
+	if err := db.DB.QueryRow("SELECT COUNT(*) FROM audit_logs WHERE action = 'collection_update' AND result = 'success'").Scan(&auditCount); err != nil || auditCount != 1 {
+		t.Fatalf("collection_update audit = %d, %v", auditCount, err)
 	}
 }
 

@@ -4,7 +4,7 @@
     <section class="share-content">
       <div v-if="loading" class="empty-state"><LoaderCircle :size="30" class="spin" /><span>{{ t('share.loading') }}</span></div>
       <section v-else-if="error" class="share-error"><XCircle :size="42" /><h1>{{ error }}</h1><div class="share-actions"><button class="primary-button" @click="loadMeta"><RefreshCw :size="16" /> {{ t('share.retry') }}</button><RouterLink to="/login" class="secondary-button"><ArrowLeft :size="16" /> {{ t('share.backLogin') }}</RouterLink></div></section>
-      <section v-else class="share-card"><p class="eyebrow">{{ t('share.heading') }}</p><h1>{{ meta.fileName }}</h1><dl class="share-meta"><div><dt>{{ t('files.size') }}</dt><dd>{{ formatBytes(meta.fileSize) }}</dd></div><div><dt>{{ t('files.type') }}</dt><dd>{{ meta.mime }}</dd></div><div><dt>{{ t('share.owner') }}</dt><dd>{{ meta.createdBy }}</dd></div><div><dt>{{ t('share.expiresAt') }}</dt><dd>{{ formatDate(meta.expiresAt) }}</dd></div><div v-if="meta.maxDownloads"><dt>{{ t('share.availableDownloads', { count: Math.max(0, meta.maxDownloads - meta.downloadCount) }) }}</dt><dd>{{ t('share.downloads', { count: meta.downloadCount }) }}</dd></div></dl><p v-if="downloadExhausted" class="alert error">{{ t('share.limitReached') }}</p><p v-if="downloadError" class="alert error">{{ downloadError }}</p><button type="button" class="primary-button share-download" :disabled="downloadLoading" @click="downloadFile"><Download :size="17" /> {{ downloadLoading ? t('common.loading') : t('share.download') }}</button><div v-if="previewAllowed" class="share-preview"><h2>{{ t('share.preview') }}</h2><div v-if="previewLoading" class="empty-state"><LoaderCircle :size="26" class="spin" /></div><p v-else-if="previewError" class="alert error">{{ previewError }}</p><img v-else-if="previewKind === 'image'" class="preview-content preview-image" :src="previewUrl" :alt="meta.fileName" /><video v-else-if="previewKind === 'video'" class="preview-content" :src="previewUrl" controls></video><iframe v-else-if="previewKind === 'pdf'" class="preview-content preview-frame" :src="previewUrl" :title="meta.fileName"></iframe><pre v-else class="preview-text">{{ previewText }}</pre></div><BrandFooter /></section>
+      <section v-else class="share-card"><p class="eyebrow">{{ t('share.heading') }}</p><h1>{{ meta.fileName }}</h1><dl class="share-meta"><div><dt>{{ t('files.size') }}</dt><dd>{{ formatBytes(meta.fileSize) }}</dd></div><div><dt>{{ t('files.type') }}</dt><dd>{{ meta.mime }}</dd></div><div><dt>{{ t('share.owner') }}</dt><dd>{{ meta.createdBy }}</dd></div><div><dt>{{ t('share.expiresAt') }}</dt><dd>{{ formatDate(meta.expiresAt) }}</dd></div><div v-if="meta.maxDownloads"><dt>{{ t('share.availableDownloads', { count: Math.max(0, meta.maxDownloads - meta.downloadCount) }) }}</dt><dd>{{ t('share.downloads', { count: meta.downloadCount }) }}</dd></div></dl><p v-if="downloadExhausted || downloadError" class="alert error">{{ downloadExhausted ? t('share.limitReached') : downloadError }}</p><button type="button" class="primary-button share-download" :disabled="downloadLoading" @click="downloadFile"><Download :size="17" /> {{ downloadLoading ? t('common.loading') : t('share.download') }}</button><div v-if="previewAllowed" class="share-preview"><h2>{{ t('share.preview') }}</h2><div v-if="previewLoading" class="empty-state"><LoaderCircle :size="26" class="spin" /></div><p v-else-if="previewError" class="alert error">{{ previewError }}</p><img v-else-if="previewKind === 'image'" class="preview-content preview-image" :src="previewUrl" :alt="meta.fileName" /><video v-else-if="previewKind === 'video'" class="preview-content" :src="previewUrl" controls></video><iframe v-else-if="previewKind === 'pdf'" class="preview-content preview-frame" :src="previewUrl" :title="meta.fileName"></iframe><pre v-else class="preview-text">{{ previewText }}</pre></div><BrandFooter /></section>
     </section>
   </main>
 </template>
@@ -28,9 +28,11 @@ const downloadUrl = computed(() => `/api/files/shared/${encodeURIComponent(token
 async function loadMeta() { loading.value = true; error.value = ''; downloadError.value = ''; try { const body = await api(`/api/files/shared/${encodeURIComponent(token.value)}/meta`); meta.value = body.data; if (previewAllowed.value) await loadPreview() } catch (err) { error.value = err.message } finally { loading.value = false } }
 // downloadFile 先用 fetch 获取响应，确保 JSON 错误能显示在分享页，而不是变成浏览器下载权限错误。
 // downloadFile fetches the response so JSON errors remain visible on the share page instead of becoming browser download errors.
+// 次数耗尽只由模板中的统一错误出口（downloadExhausted）展示，不再重复写入普通错误。
+// The exhausted state is rendered only by the single template error outlet (downloadExhausted), never duplicated into the generic error.
 async function downloadFile() {
   if (downloadLoading.value) return
-  if (downloadExhausted.value) { downloadError.value = t('share.limitReached'); return }
+  if (downloadExhausted.value) { downloadError.value = ''; return }
   downloadLoading.value = true
   downloadError.value = ''
   try {
@@ -54,7 +56,7 @@ async function downloadFile() {
   } catch (err) {
     if (err.data?.code === 'SHARE_DOWNLOAD_LIMIT') {
       meta.value.downloadAvailable = false
-      downloadError.value = t('share.limitReached')
+      downloadError.value = ''
     } else {
       downloadError.value = err instanceof TypeError ? t('error.network') : (err.message || t('error.downloadFailed'))
     }

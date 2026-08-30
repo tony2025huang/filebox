@@ -17,6 +17,7 @@ import (
 	"mime"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	pathpkg "path"
 	"path/filepath"
@@ -38,7 +39,9 @@ import (
 // syncSystemRequest is the remote-system API body; authSecret is write-only credential input.
 type syncSystemRequest struct {
 	Name               string `json:"name"`
+	Kind               string `json:"kind"`
 	Host               string `json:"host"`
+	URL                string `json:"url"`
 	Port               int    `json:"port"`
 	Username           string `json:"username"`
 	AuthType           string `json:"authType"`
@@ -53,6 +56,7 @@ type syncTaskRequest struct {
 	RemoteSystemID int64  `json:"remoteSystemId"`
 	SourceType     string `json:"sourceType"`
 	SourcePath     string `json:"sourcePath"`
+	SourceKind     string `json:"sourceKind"`
 	TargetType     string `json:"targetType"`
 	TargetPath     string `json:"targetPath"`
 	ConflictPolicy string `json:"conflictPolicy"`
@@ -66,11 +70,19 @@ type syncMkdirRequest struct {
 }
 
 func publicSyncSystem(item store.RemoteSystem) map[string]any {
-	return map[string]any{"id": item.ID, "name": item.Name, "host": item.Host, "port": item.Port, "username": item.Username, "authType": item.AuthType, "hostKeyFingerprint": item.HostKeyFingerprint, "hasCredentials": item.AuthSecret != "", "taskCount": item.TaskCount, "createdAt": item.CreatedAt}
+	kind := item.Kind
+	if kind == "" {
+		kind = "sftp"
+	}
+	return map[string]any{"id": item.ID, "name": item.Name, "kind": kind, "host": item.Host, "url": item.URL, "port": item.Port, "username": item.Username, "authType": item.AuthType, "hostKeyFingerprint": item.HostKeyFingerprint, "hasCredentials": item.AuthSecret != "", "taskCount": item.TaskCount, "createdAt": item.CreatedAt}
 }
 
 func publicSyncTask(item store.SyncTask) map[string]any {
-	return map[string]any{"id": item.ID, "userId": item.UserID, "name": item.Name, "direction": item.Direction, "remoteSystemId": item.RemoteSystemID, "sourceType": item.SourceType, "sourcePath": item.SourcePath, "targetType": item.TargetType, "targetPath": item.TargetPath, "conflictPolicy": item.ConflictPolicy, "scheduleType": item.ScheduleType, "cron": item.Cron, "enabled": item.Enabled, "lastRunAt": item.LastRunAt, "lastResult": item.LastResult, "createdAt": item.CreatedAt}
+	sourceKind := item.SourceKind
+	if sourceKind == "" {
+		sourceKind = "directory"
+	}
+	return map[string]any{"id": item.ID, "userId": item.UserID, "name": item.Name, "direction": item.Direction, "remoteSystemId": item.RemoteSystemID, "sourceType": item.SourceType, "sourcePath": item.SourcePath, "sourceKind": sourceKind, "targetType": item.TargetType, "targetPath": item.TargetPath, "conflictPolicy": item.ConflictPolicy, "scheduleType": item.ScheduleType, "cron": item.Cron, "enabled": item.Enabled, "lastRunAt": item.LastRunAt, "lastResult": item.LastResult, "createdAt": item.CreatedAt}
 }
 
 func publicSyncLog(item store.SyncLog) map[string]any {
@@ -88,16 +100,48 @@ func parseSyncID(value string) (int64, error) {
 func validateSyncSystemInput(input syncSystemRequest, requireSecret bool) (syncSystemRequest, error) {
 	input.Name = strings.TrimSpace(input.Name)
 	input.Host = strings.TrimSpace(input.Host)
+	input.URL = strings.TrimSpace(strings.ReplaceAll(input.URL, "\\", "/"))
 	input.Username = strings.TrimSpace(input.Username)
 	input.AuthType = strings.TrimSpace(input.AuthType)
+	input.Kind = strings.TrimSpace(input.Kind)
 	input.HostKeyFingerprint = strings.TrimSpace(input.HostKeyFingerprint)
+	if input.Kind == "" {
+		input.Kind = "sftp"
+	}
+	if input.Kind != "sftp" && input.Kind != "filebox" {
+		return input, errors.New("invalid remote system kind")
+	}
 	if input.Port == 0 {
 		input.Port = 22
 	}
-	if input.Name == "" || len([]byte(input.Name)) > 255 || input.Host == "" || len([]byte(input.Host)) > 255 || input.Username == "" || len([]byte(input.Username)) > 255 || input.Port < 1 || input.Port > 65535 {
+	if input.Name == "" || len([]byte(input.Name)) > 255 || input.Username == "" || len([]byte(input.Username)) > 255 || input.Port < 1 || input.Port > 65535 {
 		return input, errors.New("invalid remote system")
 	}
-	if strings.ContainsAny(input.Host, "\r\n\x00") || strings.ContainsAny(input.Username, "\r\n\x00") {
+	if input.Kind == "filebox" {
+		// FileBox 远端仅支持密码认证，且必须有合法的 http(s) 基础 URL（SSRF 防护：禁内嵌账号密码）。
+		// A remote FileBox uses password auth and a valid http(s) base URL (SSRF guard: no embedded credentials).
+		if input.AuthType != "password" {
+			return input, errors.New("invalid auth type")
+		}
+		if strings.Contains(input.Host, "://") || strings.ContainsAny(input.Host, "\r\n\x00") {
+			return input, errors.New("invalid remote system")
+		}
+		parsed, err := url.Parse(input.URL)
+		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil || strings.ContainsAny(input.URL, "\r\n\x00") {
+			return input, errors.New("invalid remote system")
+		}
+		input.HostKeyFingerprint = ""
+		input.AuthPassphrase = ""
+	} else {
+		if input.Host == "" || len([]byte(input.Host)) > 255 {
+			return input, errors.New("invalid remote system")
+		}
+		if strings.ContainsAny(input.Host, "\r\n\x00") {
+			return input, errors.New("invalid remote system")
+		}
+		input.URL = ""
+	}
+	if strings.ContainsAny(input.Username, "\r\n\x00") {
 		return input, errors.New("invalid remote system")
 	}
 	if input.AuthType != "password" && input.AuthType != "key" {
@@ -152,7 +196,7 @@ func (s *Server) createSyncSystem(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "保存目标系统失败")
 		return
 	}
-	item, err := s.store.CreateRemoteSystem(r.Context(), store.RemoteSystem{UserID: user.ID, Name: input.Name, Host: input.Host, Port: input.Port, Username: input.Username, AuthType: input.AuthType, AuthSecret: secret, AuthPassphrase: passphrase, HostKeyFingerprint: input.HostKeyFingerprint})
+	item, err := s.store.CreateRemoteSystem(r.Context(), store.RemoteSystem{UserID: user.ID, Name: input.Name, Kind: input.Kind, Host: input.Host, URL: input.URL, Port: input.Port, Username: input.Username, AuthType: input.AuthType, AuthSecret: secret, AuthPassphrase: passphrase, HostKeyFingerprint: input.HostKeyFingerprint})
 	if err != nil {
 		log.Printf("create sync remote system: %v", err)
 		writeError(w, http.StatusInternalServerError, "创建目标系统失败")
@@ -233,7 +277,7 @@ func (s *Server) updateSyncSystem(w http.ResponseWriter, r *http.Request) {
 	if input.AuthType == "password" {
 		passphrase = ""
 	}
-	if err := s.store.UpdateRemoteSystem(r.Context(), store.RemoteSystem{ID: id, Name: input.Name, Host: input.Host, Port: input.Port, Username: input.Username, AuthType: input.AuthType, AuthSecret: secret, AuthPassphrase: passphrase, HostKeyFingerprint: fingerprint}, user.ID, user.Role == "admin"); errors.Is(err, store.ErrNotFound) {
+	if err := s.store.UpdateRemoteSystem(r.Context(), store.RemoteSystem{ID: id, Name: input.Name, Kind: input.Kind, Host: input.Host, URL: input.URL, Port: input.Port, Username: input.Username, AuthType: input.AuthType, AuthSecret: secret, AuthPassphrase: passphrase, HostKeyFingerprint: fingerprint}, user.ID, user.Role == "admin"); errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "目标系统不存在")
 		return
 	} else if err != nil {
@@ -287,6 +331,8 @@ func (s *Server) loadSyncSystem(r *http.Request) (store.RemoteSystem, error) {
 	return s.store.GetRemoteSystem(r.Context(), id, user.ID, user.Role == "admin")
 }
 
+// browseSyncSystem 列出远端直接子项；includeFiles=true 时同时返回文件（源端选择用）。
+// browseSyncSystem lists direct children of a remote path; includeFiles=true also returns files (for source picking).
 func (s *Server) browseSyncSystem(w http.ResponseWriter, r *http.Request) {
 	item, err := s.loadSyncSystem(r)
 	if errors.Is(err, store.ErrNotFound) {
@@ -302,25 +348,94 @@ func (s *Server) browseSyncSystem(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "远端目录无效")
 		return
 	}
-	client, closeClient, err := s.openSFTP(r.Context(), item)
-	if err != nil {
-		writeError(w, http.StatusBadGateway, "无法连接目标系统")
-		return
-	}
-	defer closeClient()
-	entries, err := client.ReadDir(remotePath)
+	includeFiles := r.URL.Query().Get("includeFiles") == "1" || r.URL.Query().Get("includeFiles") == "true"
+	items, err := s.browseRemoteEntries(r.Context(), item, remotePath, includeFiles)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "读取远端目录失败")
 		return
 	}
+	writeData(w, http.StatusOK, "获取成功", map[string]any{"path": remotePath, "items": items})
+}
+
+// browseRemoteEntries 按目标系统类型（SFTP/FileBox）返回远端直接子项。
+// browseRemoteEntries returns direct remote children by remote-system kind (SFTP/FileBox).
+func (s *Server) browseRemoteEntries(ctx context.Context, item store.RemoteSystem, remotePath string, includeFiles bool) ([]map[string]any, error) {
+	if item.Kind == "filebox" {
+		client, err := s.openFileBox(ctx, item)
+		if err != nil {
+			return nil, err
+		}
+		defer client.close()
+		return client.browse(ctx, remotePath, includeFiles)
+	}
+	client, closeClient, err := s.openSFTP(ctx, item)
+	if err != nil {
+		return nil, err
+	}
+	defer closeClient()
+	entries, err := client.ReadDir(remotePath)
+	if err != nil {
+		return nil, err
+	}
 	items := make([]map[string]any, 0, len(entries))
 	for _, entry := range entries {
-		if !entry.IsDir() {
+		if !includeFiles && !entry.IsDir() {
 			continue
 		}
-		items = append(items, map[string]any{"name": entry.Name(), "path": pathpkg.Join(remotePath, entry.Name())})
+		items = append(items, map[string]any{
+			"name": entry.Name(), "path": pathpkg.Join(remotePath, entry.Name()),
+			"isDir": entry.IsDir(), "kind": entryKind(entry.IsDir()), "size": entry.Size(),
+		})
 	}
-	writeData(w, http.StatusOK, "获取成功", map[string]any{"path": remotePath, "items": items})
+	return items, nil
+}
+
+func entryKind(isDir bool) string {
+	if isDir {
+		return "directory"
+	}
+	return "file"
+}
+
+// browseLocalFileBox 返回本地 FileBox 目录的直接子文件夹与文件（同步源端选择用）。
+// browseLocalFileBox lists the direct child folders and files of a local FileBox path (for sync source picking).
+func (s *Server) browseLocalFileBox(w http.ResponseWriter, r *http.Request) {
+	user := currentUser(r.Context())
+	path, err := validateFileBoxSyncPath(r.URL.Query().Get("path"), true)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "目录无效")
+		return
+	}
+	includeFiles := r.URL.Query().Get("includeFiles") == "1" || r.URL.Query().Get("includeFiles") == "true"
+	folders, err := s.store.ListFolders(r.Context(), user.ID)
+	if err != nil {
+		log.Printf("list folders for sync browse: %v", err)
+		writeError(w, http.StatusInternalServerError, "获取目录失败")
+		return
+	}
+	items := make([]map[string]any, 0)
+	for _, folder := range folders {
+		parent := ""
+		if index := strings.LastIndex(folder.Path, "/"); index >= 0 {
+			parent = folder.Path[:index]
+		}
+		if parent == path {
+			items = append(items, map[string]any{"name": folder.Name, "path": folder.Path, "isDir": true, "kind": "directory", "size": 0, "id": folder.ID})
+		}
+	}
+	if includeFiles {
+		files, err := s.store.ListDirectChildFiles(r.Context(), user.ID, path)
+		if err != nil {
+			log.Printf("list files for sync browse: %v", err)
+			writeError(w, http.StatusInternalServerError, "获取文件列表失败")
+			return
+		}
+		for _, file := range files {
+			relative := filepath.ToSlash(strings.TrimPrefix(filepath.ToSlash(file.StoragePath), filepath.ToSlash(filepath.Join("files", strconv.FormatInt(user.ID, 10)))+"/"))
+			items = append(items, map[string]any{"name": file.Name, "path": relative, "isDir": false, "kind": "file", "size": file.Size, "id": file.ID})
+		}
+	}
+	writeData(w, http.StatusOK, "获取成功", map[string]any{"path": path, "items": items})
 }
 
 func (s *Server) mkdirSyncSystem(w http.ResponseWriter, r *http.Request) {
@@ -340,6 +455,20 @@ func (s *Server) mkdirSyncSystem(w http.ResponseWriter, r *http.Request) {
 	remotePath, err := validateRemotePath(input.Path)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "远端目录无效")
+		return
+	}
+	if item.Kind == "filebox" {
+		client, openErr := s.openFileBox(r.Context(), item)
+		if openErr != nil {
+			writeError(w, http.StatusBadGateway, "无法连接目标系统")
+			return
+		}
+		defer client.close()
+		if mkdirErr := client.ensureDir(r.Context(), remotePath); mkdirErr != nil {
+			writeError(w, http.StatusBadGateway, "创建远端目录失败")
+			return
+		}
+		writeData(w, http.StatusOK, "远端目录已创建", map[string]any{"path": remotePath})
 		return
 	}
 	client, closeClient, err := s.openSFTP(r.Context(), item)
@@ -404,6 +533,7 @@ func validateSyncTaskInput(input syncTaskRequest) (syncTaskRequest, error) {
 	input.Name = strings.TrimSpace(input.Name)
 	input.Direction = strings.TrimSpace(input.Direction)
 	input.SourceType = strings.TrimSpace(input.SourceType)
+	input.SourceKind = strings.TrimSpace(input.SourceKind)
 	input.TargetType = strings.TrimSpace(input.TargetType)
 	input.ConflictPolicy = strings.TrimSpace(input.ConflictPolicy)
 	input.ScheduleType = strings.TrimSpace(input.ScheduleType)
@@ -414,8 +544,14 @@ func validateSyncTaskInput(input syncTaskRequest) (syncTaskRequest, error) {
 	if input.Direction != "push" && input.Direction != "pull" || input.ConflictPolicy != "overwrite" && input.ConflictPolicy != "skip" && input.ConflictPolicy != "rename" || input.ScheduleType != "once" && input.ScheduleType != "periodic" {
 		return input, errors.New("invalid sync task")
 	}
-	if input.Direction == "push" && (input.SourceType != "filebox" || input.TargetType != "sftp") || input.Direction == "pull" && (input.SourceType != "sftp" || input.TargetType != "filebox") {
+	// 方向矩阵：push 以本地 FileBox 为源（目标为 SFTP 或远端 FileBox）；pull 以本地 FileBox 为目标（源为 SFTP 或远端 FileBox）。
+	// Direction matrix: push uses local FileBox as the source (target SFTP or remote FileBox); pull targets local FileBox (source SFTP or remote FileBox).
+	if input.Direction == "push" && (input.SourceType != "filebox" || input.TargetType != "sftp" && input.TargetType != "filebox") ||
+		input.Direction == "pull" && (input.SourceType != "sftp" && input.SourceType != "filebox" || input.TargetType != "filebox") {
 		return input, errors.New("invalid sync endpoints")
+	}
+	if input.SourceKind != "" && input.SourceKind != "directory" && input.SourceKind != "file" {
+		return input, errors.New("invalid sync task")
 	}
 	var err error
 	if input.SourceType == "filebox" {
@@ -448,7 +584,11 @@ func validateSyncTaskInput(input syncTaskRequest) (syncTaskRequest, error) {
 }
 
 func syncTaskFromRequest(input syncTaskRequest, userID int64) store.SyncTask {
-	return store.SyncTask{UserID: userID, Name: input.Name, Direction: input.Direction, RemoteSystemID: input.RemoteSystemID, SourceType: input.SourceType, SourcePath: input.SourcePath, TargetType: input.TargetType, TargetPath: input.TargetPath, ConflictPolicy: input.ConflictPolicy, ScheduleType: input.ScheduleType, Cron: input.Cron, Enabled: input.Enabled}
+	sourceKind := input.SourceKind
+	if sourceKind == "" {
+		sourceKind = "directory"
+	}
+	return store.SyncTask{UserID: userID, Name: input.Name, Direction: input.Direction, RemoteSystemID: input.RemoteSystemID, SourceType: input.SourceType, SourcePath: input.SourcePath, SourceKind: sourceKind, TargetType: input.TargetType, TargetPath: input.TargetPath, ConflictPolicy: input.ConflictPolicy, ScheduleType: input.ScheduleType, Cron: input.Cron, Enabled: input.Enabled}
 }
 
 func (s *Server) createSyncTask(w http.ResponseWriter, r *http.Request) {
@@ -983,6 +1123,9 @@ func remoteRename(client *sftp.Client, target string) (string, error) {
 }
 
 func (s *Server) executeSyncPush(ctx context.Context, task store.SyncTask, system store.RemoteSystem) syncRunResult {
+	if system.Kind == "filebox" {
+		return s.executeSyncPushFileBox(ctx, task, system)
+	}
 	result := syncRunResult{}
 	client, closeClient, err := s.openSFTP(ctx, system)
 	if err != nil {
@@ -1138,6 +1281,9 @@ func hashSyncFile(path string) (string, string, error) {
 }
 
 func (s *Server) executeSyncPull(ctx context.Context, task store.SyncTask, system store.RemoteSystem) syncRunResult {
+	if system.Kind == "filebox" {
+		return s.executeSyncPullFileBox(ctx, task, system)
+	}
 	result := syncRunResult{}
 	client, closeClient, err := s.openSFTP(ctx, system)
 	if err != nil {
