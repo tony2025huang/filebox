@@ -113,11 +113,13 @@ settings   key, value                     -- 注册开关/默认配额/上传上
 - `GET    /api/files/:taskId/status` → 已上传分片列表（断点续传用）
 - `POST   /api/files/check` → `{sha256, md5?, size}` 秒传判定（md5 优先，sha256 兜底），命中直接返回文件记录
 - `GET    /api/files/:id/download` → 流式下载（`Content-Disposition: attachment`，支持 Range 206）
+- `POST   /api/files/batch-download` → `{ids: []}` 生成 ZIP 流；响应带 `Content-Length`，便于前端显示字节进度
 - `GET    /api/files/:id/preview` → 在线预览（按 MIME 白名单输出 inline）
 - `DELETE /api/files/:id` → 删除（软删除 + 物理清理）
 
 ### 5.3 分享链接（已实现）
 - `POST /api/files/:id/share` → `{expiresInHours, maxDownloads?}` 生成分享
+- `POST /api/files/batch-share` → `{fileIds: [], expiresInHours, maxDownloads?}` 为每个文件创建独立分享链接；任一文件越权时整批拒绝，审计 action=`batch_share`
 - `GET  /api/files/shared/:token/meta` → 分享元数据（匿名）
 - `GET  /api/files/shared/:token/download` → 匿名下载（校验有效期/次数）
 - `DELETE /api/files/:id/shares` → 撤销该文件全部分享

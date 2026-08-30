@@ -1,5 +1,11 @@
 # Requirement Change Log
 
+## 2026-08-30 - 功能 5（批量分享 + 详细下载进度）
+
+- **批量分享**：新增 `POST /api/files/batch-share`，一次校验整批归属后为每个文件创建独立链接，统一应用有效期/下载次数参数；审计动作 `batch_share`，结果同步出现在分享管理页。
+- **详细下载进度**：单文件和批量 ZIP 下载都由前端按响应流逐块读取，传输抽屉显示已传输字节、总字节、百分比和 B/KB/MB/GB 每秒速率，并支持 `AbortController` 取消；批量 ZIP 响应补充 `Content-Length`。
+- **前端**：FilesView 新增批量分享弹窗、逐文件链接复制和三语 i18n 文案。
+
 ## 2026-08-30 - v012 批次 E（功能 8/9：分享管理 + 分享下载日志）
 
 - **功能 8（分享管理）**：新增 `/shares` 分享管理页与 API——`GET /api/shares`（我的分享列表：文件名/token/有效期/下载次数/状态/剩余时间）、`GET /api/shares/{token}`（详情）、`PUT /api/shares/{token}/extend`（延期，仅创建者/管理员）、`PUT /api/shares/{token}/increase`（增次，不允许降低）、`DELETE /api/shares/{token}`（单条撤销，软撤销）、`GET /api/shares/{token}/logs`（下载日志）；越权一律 404。

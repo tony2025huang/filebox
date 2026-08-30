@@ -11,7 +11,7 @@
       <div v-if="childFolders.length" class="folder-list"><div v-for="folder in childFolders" :key="folder.id" class="folder-row"><button class="folder-entry" @click="navigateDir(folder.path)"><Folder :size="17" /> <strong>{{ folder.name }}</strong></button><div v-if="!readOnly" class="folder-actions"><button class="icon-button" :title="t('files.renameFolder')" @click="openRenameFolder(folder)"><Pencil :size="15" /></button><button class="icon-button danger-icon" :title="t('files.deleteFolder')" @click="removeFolder(folder)"><Trash2 :size="15" /></button></div></div></div>
       <div v-if="!readOnly" class="upload-zone" :class="{ dragging }" @dragover.prevent="dragging = true" @dragleave.prevent="dragging = false" @drop.prevent="handleDrop"><UploadCloud :size="26" /><div><strong>{{ t('files.dropTitle') }}</strong><span>{{ t('files.dropCopy') }}</span></div><button class="secondary-button" @click="fileInput?.click()"><Upload :size="17" /> {{ t('files.choose') }}</button><button class="secondary-button" @click="folderInput?.click()"><FolderUp :size="17" /> {{ t('files.uploadFolder') }}</button><input ref="fileInput" type="file" multiple hidden @change="handleInput" /><input ref="folderInput" type="file" webkitdirectory directory multiple hidden @change="handleFolderInput" /></div>
       <section class="collection-section"><div class="collection-section-header"><h2>{{ t('collection.my') }}</h2><button class="icon-button" :title="t('files.refresh')" @click="loadCollections"><RefreshCw :size="17" :class="{ spin: collectionsLoading }" /></button></div><div v-if="collectionsLoading" class="empty-state"><LoaderCircle :size="24" class="spin" /></div><div v-else-if="!collections.length" class="transfers-empty">{{ t('collection.noCollections') }}</div><div v-else class="collection-grid"><article v-for="item in collections" :key="item.id" class="collection-row"><strong>{{ item.name }}</strong><small>{{ item.uploadCount }} / {{ item.maxUploads || t('collection.unlimited') }}</small><span class="status-label" :class="{ disabled: item.status !== 'active' }"><i></i>{{ collectionStatusLabel(item) }}</span><button class="icon-text-button" @click="viewCollection(item)"><Eye :size="15" /> {{ t('collection.viewFiles') }}</button><a class="collection-link" :href="absoluteCollectionUrl(item)" target="_blank" rel="noopener">{{ absoluteCollectionUrl(item) }}</a><button class="icon-button" :title="t('collection.copy')" @click="copyCollection(item)"><Copy :size="15" /></button><button v-if="item.status === 'active'" class="icon-button danger-icon" :title="t('collection.revoke')" @click="revokeCollection(item)"><Trash2 :size="15" /></button><div v-if="collectionDetails?.id === item.id" class="collection-files"><div v-if="!collectionDetails.files?.length">{{ t('collection.noCollections') }}</div><div v-for="received in collectionDetails.files" :key="received.id" class="collection-file"><strong>{{ received.originalName }}</strong><span v-if="received.remark">{{ t('collection.remark') }}: {{ received.remark }}</span><small>{{ formatDate(received.createdAt) }}</small></div></div></article></div></section>
-      <div class="toolbar"><div class="search-box"><Search :size="17" /><input v-model="searchInput" :placeholder="t('files.searchPlaceholder')" @keyup.enter="search" /><button v-if="searchInput" :title="t('files.clearSearch')" @click="searchInput = ''; search()"><X :size="15" /></button></div><button v-if="selectedIds.size" class="secondary-button batch-download-button" :disabled="batchDownloading || batchDeleting" @click="batchDownload"><Archive :size="16" /> {{ t('files.batchDownload', { count: selectedIds.size }) }}</button><button v-if="selectedIds.size && !readOnly" class="secondary-button batch-delete-button" :disabled="batchDownloading || batchDeleting" @click="batchDelete"><Trash2 :size="16" /> {{ t('files.batchDelete', { count: selectedIds.size }) }}</button><button v-if="batchDownloading" class="icon-button" :title="t('common.cancel')" @click="cancelBatchDownload"><X :size="16" /></button><label class="check-label md5-toggle"><input v-model="showMd5" type="checkbox" @change="persistMd5" /> {{ t('files.showMd5') }}</label><button class="refresh-button" :title="t('files.refresh')" @click="loadFiles"><RefreshCw :size="17" :class="{ spin: loading }" /></button><span class="result-count">{{ t('common.files', { count: total }) }}</span></div>
+      <div class="toolbar"><div class="search-box"><Search :size="17" /><input v-model="searchInput" :placeholder="t('files.searchPlaceholder')" @keyup.enter="search" /><button v-if="searchInput" :title="t('files.clearSearch')" @click="searchInput = ''; search()"><X :size="15" /></button></div><button v-if="selectedIds.size" class="secondary-button batch-download-button" :disabled="batchDownloading || batchSharing || batchDeleting" @click="batchDownload"><Archive :size="16" /> {{ t('files.batchDownload', { count: selectedIds.size }) }}</button><button v-if="selectedIds.size && !readOnly" class="secondary-button batch-share-button" :disabled="batchDownloading || batchSharing || batchDeleting" @click="openBatchShare"><Share2 :size="16" /> {{ t('files.batchShare', { count: selectedIds.size }) }}</button><button v-if="selectedIds.size && !readOnly" class="secondary-button batch-delete-button" :disabled="batchDownloading || batchSharing || batchDeleting" @click="batchDelete"><Trash2 :size="16" /> {{ t('files.batchDelete', { count: selectedIds.size }) }}</button><button v-if="batchDownloading" class="icon-button" :title="t('common.cancel')" @click="cancelBatchDownload"><X :size="16" /></button><label class="check-label md5-toggle"><input v-model="showMd5" type="checkbox" @change="persistMd5" /> {{ t('files.showMd5') }}</label><button class="refresh-button" :title="t('files.refresh')" @click="loadFiles"><RefreshCw :size="17" :class="{ spin: loading }" /></button><span class="result-count">{{ t('common.files', { count: total }) }}</span></div>
       <div v-if="notice" class="alert success">{{ notice }}</div><div v-if="error" class="alert error">{{ error }}</div>
       <div class="file-table-wrap"><table class="file-table"><thead><tr><th class="select-col"><input type="checkbox" :checked="allSelected" :aria-label="t('files.selectAll')" @change="toggleSelectAll" /></th><th>{{ t('files.name') }}</th><th>{{ t('files.size') }}</th><th>{{ t('files.type') }}</th><th>{{ t('files.integrity') }}</th><th>{{ t('files.uploadedAt') }}</th><th></th></tr></thead><tbody><tr v-for="file in files" :key="file.id" :class="{ 'row-selected': selectedIds.has(file.id) }"><td class="select-col"><input type="checkbox" :checked="selectedIds.has(file.id)" :aria-label="t('files.selectFile', { name: file.name })" @change="toggleSelect(file.id)" /></td><td><div class="file-title"><span class="file-icon"><component :is="fileIcon(file.mime, file.name)" :size="17" /></span><strong>{{ file.name }}</strong><span v-if="isShared(file)" class="shared-mark" :title="t('files.shared')"><Share2 :size="14" /></span></div></td><td>{{ formatBytes(file.size) }}</td><td><span class="mime-label" :class="{ 'preview-mime': canPreview(file.mime) }">{{ shortMime(file.mime) }}</span></td><td><code v-if="showMd5" class="md5-cell" :title="`MD5 ${file.md5}\nSHA-256 ${file.sha256}`">{{ file.md5 }}</code><span v-else class="hash-label" :title="`MD5 ${file.md5}\nSHA-256 ${file.sha256}`"><CheckCircle2 :size="15" /> {{ t('files.hashes') }}</span></td><td>{{ formatDate(file.createdAt) }}</td><td><div class="row-actions"><button v-if="canPreview(file.mime)" class="icon-button" :title="t('files.preview')" @click="openPreview(file)"><Eye :size="17" /></button><button v-if="!readOnly" class="icon-button" :title="t('files.share')" @click="openShare(file)"><Share2 :size="17" /></button><button class="icon-button" :title="t('files.download')" @click="download(file)"><Download :size="17" /></button><button v-if="!readOnly" class="icon-button danger-icon" :title="t('files.delete')" @click="remove(file)"><Trash2 :size="17" /></button></div></td></tr></tbody></table><div v-if="!loading && !files.length" class="empty-state"><FolderOpen :size="34" /><strong>{{ keyword ? t('files.noMatch') : t('files.noFiles') }}</strong><span>{{ keyword ? t('files.noMatchCopy') : t('files.noFilesCopy') }}</span></div><div v-if="loading" class="empty-state"><LoaderCircle :size="28" class="spin" /><span>{{ t('files.loading') }}</span></div></div>
       <div v-if="total > pageSize" class="pagination"><button class="secondary-button" :disabled="page === 1" @click="page--; loadFiles()"><ChevronLeft :size="16" /> {{ t('common.previous') }}</button><span>{{ t('common.page', { page }) }}</span><button class="secondary-button" :disabled="page * pageSize >= total" @click="page++; loadFiles()">{{ t('common.next') }} <ChevronRight :size="16" /></button></div><BrandFooter />
@@ -19,6 +19,7 @@
     <div v-if="activeConflict" class="modal-backdrop" @click.self="chooseConflict('cancel')"><section class="modal-panel" role="dialog" aria-modal="true"><div class="panel-heading"><div><p class="eyebrow">{{ t('files.conflictEyebrow') }}</p><h2>{{ t('files.conflictHeading') }}</h2></div><button class="icon-button" :title="t('common.close')" @click="chooseConflict('cancel')"><X :size="18" /></button></div><p class="modal-copy">{{ t('files.conflictCopy', { name: activeConflict.existing?.name }) }}</p><div class="conflict-details">{{ formatBytes(activeConflict.existing?.size || 0) }} · {{ formatDate(activeConflict.existing?.createdAt) }}</div><div v-if="conflictQueue.length > 1" class="conflict-queue-hint">{{ t('files.conflictQueue', { count: conflictQueue.length }) }}</div><div class="modal-actions"><button class="secondary-button" @click="chooseConflict('rename')"><FileEdit :size="16" /> {{ t('files.rename') }}<span>{{ t('files.renameHint') }}</span></button><button class="primary-button" @click="chooseConflict('overwrite')"><Replace :size="16" /> {{ t('files.overwrite') }}<span>{{ t('files.overwriteHint') }}</span></button></div></section></div>
     <div v-if="shareFile" class="modal-backdrop" @click.self="closeShare"><section class="modal-panel share-panel" role="dialog" aria-modal="true"><div class="panel-heading"><div><p class="eyebrow">{{ t('files.shareDialog') }}</p><h2>{{ shareFile.name }}</h2></div><button class="icon-button" :title="t('common.close')" @click="closeShare"><X :size="18" /></button></div><form v-if="!shareResult" @submit.prevent="createShare"><label class="form-label">{{ t('files.shareExpiresHours') }}<input v-model.number="shareForm.expiresInHours" type="number" min="1" required /></label><label class="form-label">{{ t('files.shareMaxDownloads') }}<input v-model.number="shareForm.maxDownloads" type="number" min="0" max="100000" required /></label><p v-if="shareError" class="alert error">{{ shareError }}</p><button class="primary-button submit-button" :disabled="shareLoading"><span>{{ shareLoading ? t('common.loading') : t('files.share') }}</span><Share2 :size="17" /></button></form><div v-else class="share-result"><label class="form-label">{{ t('files.shareUrl') }}<div class="share-url"><input :value="shareAbsoluteUrl" readonly /><button type="button" class="icon-button" :title="t('files.shareCopied')" @click="copyShare"><Copy :size="16" /></button></div></label><p class="muted">{{ t('share.expiresAt') }} {{ formatDate(shareResult.expiresAt) }}<span v-if="shareResult.maxDownloads"> · {{ t('share.availableDownloads', { count: shareResult.maxDownloads - shareResult.downloadCount }) }}</span></p><div class="modal-actions"><button class="secondary-button" @click="openSharePage"><ExternalLink :size="16" /> {{ t('files.openShare') }}</button><button class="secondary-button danger-action" @click="revokeShare"><Trash2 :size="16" /> {{ t('files.revokeShares') }}</button></div><p v-if="shareNotice" class="alert success">{{ shareNotice }}</p></div></section></div>
     <div v-if="previewFile" class="modal-backdrop" @click.self="closePreview"><section class="modal-panel preview-panel" role="dialog" aria-modal="true"><div class="panel-heading"><div><p class="eyebrow">{{ t('files.preview') }}</p><h2>{{ previewFile.name }}</h2></div><button class="icon-button" :title="t('common.close')" @click="closePreview"><X :size="18" /></button></div><div v-if="previewLoading" class="empty-state preview-state"><LoaderCircle :size="28" class="spin" /><span>{{ t('files.previewLoading') }}</span></div><p v-else-if="previewError" class="alert error">{{ previewError }}</p><img v-else-if="previewKind === 'image'" class="preview-content preview-image" :src="previewUrl" :alt="previewFile.name" /><video v-else-if="previewKind === 'video'" class="preview-content" :src="previewUrl" controls></video><iframe v-else-if="previewKind === 'pdf'" class="preview-content preview-frame" :src="previewUrl" :title="previewFile.name"></iframe><pre v-else class="preview-text">{{ previewText }}</pre></section></div>
+    <div v-if="batchShareOpen" class="modal-backdrop" @click.self="closeBatchShare"><section class="modal-panel batch-share-panel" role="dialog" aria-modal="true"><div class="panel-heading"><div><p class="eyebrow">{{ t('files.batchShare') }}</p><h2>{{ t('files.batchShareTitle', { count: batchShareCount }) }}</h2></div><button class="icon-button" :title="t('common.close')" @click="closeBatchShare"><X :size="18" /></button></div><form v-if="!batchShareResults.length" @submit.prevent="createBatchShare"><label class="form-label">{{ t('files.shareExpiresHours') }}<input v-model.number="batchShareForm.expiresInHours" type="number" min="1" required /></label><label class="form-label">{{ t('files.shareMaxDownloads') }}<input v-model.number="batchShareForm.maxDownloads" type="number" min="0" max="100000" required /></label><p v-if="batchShareError" class="alert error">{{ batchShareError }}</p><button class="primary-button submit-button" :disabled="batchSharing"><span>{{ batchSharing ? t('common.loading') : t('files.batchShareCreate') }}</span><Share2 :size="17" /></button></form><div v-else class="batch-share-results"><p class="muted">{{ t('files.batchShareCreated', { count: batchShareResults.length }) }}</p><div v-for="item in batchShareResults" :key="item.fileId" class="batch-share-result"><strong :title="item.fileName">{{ item.fileName }}</strong><div class="share-url"><input :value="absoluteBatchShareUrl(item)" readonly /><button type="button" class="icon-button" :title="t('files.shareCopied')" @click="copyBatchShare(item)"><Copy :size="16" /></button></div></div><p v-if="batchShareNotice" class="alert success">{{ batchShareNotice }}</p><div class="modal-actions"><button class="primary-button" @click="closeBatchShare">{{ t('common.close') }}</button></div></div></section></div>
     <div v-if="folderPrompt" class="modal-backdrop" @click.self="folderPrompt = null"><section class="modal-panel" role="dialog" aria-modal="true"><div class="panel-heading"><div><p class="eyebrow">FOLDER</p><h2>{{ folderPrompt.rename ? t('files.renameFolder') : t('files.newFolder') }}</h2></div><button class="icon-button" :title="t('common.close')" @click="folderPrompt = null"><X :size="18" /></button></div><form @submit.prevent="submitFolder"><label class="form-label">{{ t('files.folderName') }}<input v-model.trim="folderPrompt.name" maxlength="255" required autofocus /></label><p v-if="folderError" class="alert error">{{ folderError }}</p><div class="modal-actions"><button class="primary-button" :disabled="folderSaving"><Save :size="16" /> {{ t('common.save') }}</button><button type="button" class="secondary-button" @click="folderPrompt = null">{{ t('common.cancel') }}</button></div></form></section></div>
     <div v-if="collectionCreateOpen" class="modal-backdrop" @click.self="collectionCreateOpen = false"><section class="modal-panel share-panel" role="dialog" aria-modal="true"><div class="panel-heading"><div><p class="eyebrow">{{ t('collection.create') }}</p><h2>{{ t('collection.createTitle') }}</h2></div><button class="icon-button" :title="t('common.close')" @click="collectionCreateOpen = false"><X :size="18" /></button></div><form @submit.prevent="createCollection"><label class="form-label">{{ t('collection.name') }}<input v-model.trim="collectionForm.name" maxlength="255" required /></label><label class="form-label">{{ t('collection.expiresInHours') }}<input v-model.number="collectionForm.expiresInHours" type="number" min="1" required /></label><label class="form-label">{{ t('collection.maxUploads') }}<input v-model.number="collectionForm.maxUploads" type="number" min="0" required /></label><label class="form-label">{{ t('collection.maxFileBytesMB') }}<input v-model.number="collectionForm.maxFileBytesMB" type="number" min="0" required /></label><p v-if="collectionError" class="alert error">{{ collectionError }}</p><button class="primary-button submit-button" :disabled="collectionSaving"><span>{{ collectionSaving ? t('common.loading') : t('collection.create') }}</span><UploadCloud :size="17" /></button></form></section></div>
     <div v-if="collectionResult" class="modal-backdrop" @click.self="collectionResult = null"><section class="modal-panel share-panel" role="dialog" aria-modal="true"><div class="panel-heading"><div><p class="eyebrow">{{ t('collection.create') }}</p><h2>{{ collectionResult.name }}</h2></div><button class="icon-button" :title="t('common.close')" @click="collectionResult = null"><X :size="18" /></button></div><label class="form-label">{{ t('collection.link') }}<div class="share-url"><input :value="absoluteCollectionUrl(collectionResult)" readonly /><button type="button" class="icon-button" :title="t('collection.copy')" @click="copyCollection(collectionResult)"><Copy :size="16" /></button></div></label><p v-if="collectionNotice" class="alert success">{{ collectionNotice }}</p></section></div>
@@ -32,7 +33,7 @@
         <div v-for="item in uploads" :key="item.id" class="transfer-row" :class="{ 'transfer-failed': item.failed }"><FileUp :size="16" class="transfer-icon" /><div class="transfer-main"><div class="transfer-name"><strong :title="item.relPath || item.file.name">{{ item.relPath || item.file.name }}</strong><span :class="{ 'transfer-error-text': item.failed }">{{ item.failed ? item.error || item.status : item.status }}</span></div><div class="progress-track"><span :style="{ width: item.progress + '%' }"></span></div></div><span class="transfer-percent">{{ item.failed ? '' : item.progress + '%' }}</span><button v-if="item.paused" class="icon-button" :title="t('files.resume')" @click="resumeUpload(item)"><Play :size="15" /></button><button v-else-if="item.running" class="icon-button" :title="t('files.pause')" @click="pauseUpload(item)"><Pause :size="15" /></button><button v-if="item.canContinue || item.failed" class="icon-button" :title="t('files.retry')" @click="retryUpload(item)"><RefreshCw :size="15" /></button><button v-if="item.failed" class="icon-button" :title="t('files.dismiss')" @click="dismissUpload(item)"><X :size="15" /></button></div>
         <h3 class="transfers-section">{{ t('files.downloads') }}<span class="transfers-count">{{ downloads.length }}</span></h3>
         <div v-if="!downloads.length" class="transfers-empty">{{ t('files.noTransfers') }}</div>
-        <div v-for="item in downloads" :key="item.id" class="transfer-row"><Download :size="16" class="transfer-icon" /><div class="transfer-main"><div class="transfer-name"><strong :title="item.name">{{ item.name }}</strong><span>{{ item.status }}</span></div><div class="progress-track"><span :style="{ width: (item.progress < 0 ? 0 : item.progress) + '%' }"></span></div></div><span class="transfer-percent">{{ item.progress < 0 ? '' : item.progress + '%' }}</span></div>
+        <div v-for="item in downloads" :key="item.id" class="transfer-row" :class="{ 'transfer-failed': item.failed }"><Download :size="16" class="transfer-icon" /><div class="transfer-main"><div class="transfer-name"><strong :title="item.name">{{ item.name }}</strong><span :class="{ 'transfer-error-text': item.failed }">{{ item.status }}</span></div><div class="progress-track"><span :style="{ width: (item.progress < 0 ? 0 : item.progress) + '%' }"></span></div><div class="transfer-detail"><span>{{ t('download.detail.transferred', { loaded: formatBytes(item.loadedBytes), total: item.size > 0 ? formatBytes(item.size) : t('download.detail.unknown') }) }}</span><span>{{ item.progress < 0 ? t('download.detail.unknown') : item.progress + '%' }}</span><span>{{ t('download.detail.rate', { rate: formatRate(item.rate) }) }}</span></div></div><span class="transfer-percent">{{ item.progress < 0 ? '' : item.progress + '%' }}</span><button v-if="item.running" class="icon-button" :title="t('common.cancel')" @click="cancelDownload(item)"><X :size="15" /></button></div>
       </div>
     </aside>
   </main>
@@ -58,10 +59,44 @@ const selectedIds = reactive(new Set())
 const batchDownloading = ref(false)
 const batchDeleting = ref(false)
 let batchDownloadController = null
+let batchDownloadItem = null
 const allSelected = computed(() => files.value.length > 0 && files.value.every(file => selectedIds.has(file.id)))
 const readOnly = computed(() => user.value.readOnly === true)
+const batchShareOpen = ref(false)
+const batchSharing = ref(false)
+const batchShareError = ref('')
+const batchShareNotice = ref('')
+const batchShareResults = ref([])
+const batchShareForm = ref({ expiresInHours: 24, maxDownloads: 0 })
+const batchShareCount = ref(0)
 function toggleSelect(id) { if (selectedIds.has(id)) selectedIds.delete(id); else selectedIds.add(id) }
 function toggleSelectAll() { if (allSelected.value) files.value.forEach(file => selectedIds.delete(file.id)); else files.value.forEach(file => selectedIds.add(file.id)) }
+function openBatchShare() { if (readOnly.value) return; batchShareCount.value = selectedIds.size; batchShareOpen.value = true; batchShareError.value = ''; batchShareNotice.value = ''; batchShareResults.value = []; batchShareForm.value = { expiresInHours: 24, maxDownloads: 0 } }
+function closeBatchShare() { if (!batchSharing.value) batchShareOpen.value = false }
+async function createBatchShare() {
+  if (readOnly.value) { batchShareError.value = t('readOnly.error'); return }
+  const fileIds = [...selectedIds]
+  if (!fileIds.length) return
+  batchSharing.value = true
+  batchShareError.value = ''
+  try {
+    const body = await api('/api/files/batch-share', { method: 'POST', body: JSON.stringify({ fileIds, ...batchShareForm.value }) })
+    batchShareResults.value = body.data?.items || []
+    batchShareResults.value.forEach(item => sharedIds.add(item.fileId))
+    localStorage.setItem('filebox_shared_ids', JSON.stringify([...sharedIds]))
+    selectedIds.clear()
+  } catch (err) {
+    batchShareError.value = err.message
+  } finally {
+    batchSharing.value = false
+  }
+}
+function absoluteBatchShareUrl(item) { return item?.url ? new URL(item.url, window.location.origin).href : '' }
+async function copyBatchShare(item) {
+  const value = absoluteBatchShareUrl(item)
+  try { await navigator.clipboard.writeText(value) } catch { const input = document.createElement('textarea'); input.value = value; document.body.appendChild(input); input.select(); document.execCommand('copy'); input.remove() }
+  batchShareNotice.value = t('files.shareCopied')
+}
 async function batchDownload() {
   const ids = [...selectedIds]
   if (!ids.length) return
@@ -69,16 +104,20 @@ async function batchDownload() {
   error.value = ''
   const controller = new AbortController()
   batchDownloadController = controller
+  const item = { id: `dl-batch-${Date.now()}`, name: t('download.detail.batchName'), size: 0, loadedBytes: 0, progress: 0, rate: 0, status: t('files.downloading'), failed: false, cancelled: false, running: true, error: '', controller }
+  batchDownloadItem = item
+  downloads.value.push(item)
+  transfersOpen.value = true
   try {
-    const response = await fetch('/api/files/batch-download', { method: 'POST', headers: { Authorization: `Bearer ${localStorage.getItem('filebox_token')}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ ids }), signal: controller.signal })
-    if (!response.ok) { let body = null; try { body = await response.json() } catch {} throw new Error(localizeError({ status: response.status, data: body?.data, backendMessage: body?.message })) }
-    const blob = await response.blob()
-    const link = document.createElement('a'); link.href = URL.createObjectURL(blob); link.download = 'filebox-batch-download.zip'; link.click(); URL.revokeObjectURL(link.href)
+    await streamDownload(item, () => fetch('/api/files/batch-download', { method: 'POST', headers: { Authorization: `Bearer ${localStorage.getItem('filebox_token')}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ ids }), signal: controller.signal }), 'filebox-batch-download.zip')
     selectedIds.clear()
     notice.value = t('files.batchDownloadDone', { count: ids.length })
-  } catch (err) { if (err.name !== 'AbortError') error.value = `${err.message}` } finally { if (batchDownloadController === controller) batchDownloadController = null; batchDownloading.value = false }
+  } catch (err) {
+    if (err.name === 'AbortError' || item.cancelled) { item.status = t('download.detail.cancelled'); item.progress = item.progress < 0 ? 0 : item.progress } else { item.failed = true; item.error = err.message; item.status = err.message; error.value = `${err.message}` }
+  } finally { item.running = false; if (batchDownloadController === controller) batchDownloadController = null; if (batchDownloadItem === item) batchDownloadItem = null; batchDownloading.value = false; setTimeout(() => { downloads.value = downloads.value.filter(entry => entry !== item) }, 4000) }
 }
-function cancelBatchDownload() { batchDownloadController?.abort() }
+function cancelBatchDownload() { if (batchDownloadItem) batchDownloadItem.cancelled = true; batchDownloadController?.abort() }
+function cancelDownload(item) { item.cancelled = true; item.controller?.abort() }
 // batchDelete 确认并删除选中文件，随后刷新配额和当前目录列表。
 // batchDelete confirms and removes the selected files, then refreshes quota and the current directory.
 async function batchDelete() {
@@ -133,7 +172,7 @@ function formatRate(bytesPerSecond = 0) {
 }
 // activeTransferCount 顶栏角标：进行中或待处理的上传 + 未完成的下载数量。
 // activeTransferCount is the topbar badge: running/pending uploads plus unfinished downloads.
-const activeTransferCount = computed(() => uploads.value.filter(u => u.running || u.failed || u.paused).length + downloads.value.filter(d => d.progress < 100 && !d.failed).length)
+const activeTransferCount = computed(() => uploads.value.filter(u => u.running || u.failed || u.paused).length + downloads.value.filter(d => d.running && !d.failed && !d.cancelled).length)
 function persistMd5() { localStorage.setItem('filebox_show_md5', showMd5.value ? '1' : '0') }
 // breadcrumbs 把当前目录路径拆成可点击的分段（根 / a / b）。
 // breadcrumbs splits the current directory path into clickable segments (root / a / b).
@@ -276,29 +315,57 @@ async function copyShare() { try { await navigator.clipboard.writeText(shareAbso
 function openSharePage() { window.open(shareAbsoluteUrl.value, '_blank', 'noopener') }
 async function revokeShare() { if (readOnly.value) { shareError.value = t('readOnly.error'); return } try { await api(`/api/files/${shareFile.value.id}/shares`, { method: 'DELETE' }); sharedIds.delete(shareFile.value.id); localStorage.setItem('filebox_shared_ids', JSON.stringify([...sharedIds])); shareResult.value = null; shareNotice.value = t('files.revokeShares') } catch (err) { shareError.value = err.message } }
 function isShared(file) { return sharedIds.has(file.id) }
-// download streams the file and reports progress in the transfers drawer, then triggers the browser save.
-// download 流式下载并在传输面板显示进度，随后触发浏览器保存。
+// streamDownload reads each response chunk so both file and ZIP downloads expose byte-level progress.
+// streamDownload 逐块读取响应，让单文件和 ZIP 下载都能展示字节级进度。
+async function streamDownload(item, request, downloadName) {
+  const response = await request()
+  if (!response.ok) {
+    let body = null
+    try { body = await response.json() } catch {}
+    throw Object.assign(new Error(localizeError({ status: response.status, data: body?.data, backendMessage: body?.message })), { status: response.status })
+  }
+  if (!response.body) throw new Error(t('error.downloadFailed'))
+  const headerSize = Number(response.headers.get('Content-Length'))
+  if (Number.isFinite(headerSize) && headerSize > 0) item.size = headerSize
+  const reader = response.body.getReader()
+  const parts = []
+  const startedAt = performance.now()
+  let received = 0
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    parts.push(value)
+    received += value.byteLength
+    item.loadedBytes = received
+    item.progress = item.size > 0 ? Math.min(100, Math.round(received / item.size * 100)) : -1
+    const elapsed = (performance.now() - startedAt) / 1000
+    item.rate = elapsed > 0 ? received / elapsed : 0
+  }
+  item.loadedBytes = received
+  item.progress = 100
+  item.rate = received / Math.max((performance.now() - startedAt) / 1000, 0.001)
+  const blob = new Blob(parts, { type: response.headers.get('Content-Type') || 'application/octet-stream' })
+  const link = document.createElement('a')
+  const objectUrl = URL.createObjectURL(blob)
+  link.href = objectUrl
+  link.download = downloadName
+  link.click()
+  setTimeout(() => URL.revokeObjectURL(objectUrl), 0)
+  item.status = t('files.completed')
+}
+
+// download streams the file and reports detailed progress in the transfers drawer.
+// download 流式下载并在传输面板显示详细进度。
 async function download(file) {
-  const item = { id: `dl-${Date.now()}-${file.id}`, name: file.name, size: file.size || 0, progress: 0, status: t('files.downloading'), failed: false, error: '' }
+  const controller = new AbortController()
+  const item = { id: `dl-${Date.now()}-${file.id}`, name: file.name, size: file.size || 0, loadedBytes: 0, progress: 0, rate: 0, status: t('files.downloading'), failed: false, cancelled: false, running: true, error: '', controller }
   downloads.value.push(item); transfersOpen.value = true
   try {
-    const response = await fetch(`/api/files/${file.id}/download`, { headers: { Authorization: `Bearer ${localStorage.getItem('filebox_token')}` } })
-    if (!response.ok) { let body = null; try { body = await response.json() } catch {} throw Object.assign(new Error(localizeError({ status: response.status, data: body?.data, backendMessage: body?.message })), { status: response.status }) }
-    const total = Number(response.headers.get('Content-Length')) || item.size || 0
-    const reader = response.body.getReader()
-    const parts = []
-    let received = 0
-    for (;;) {
-      const { done, value } = await reader.read()
-      if (done) break
-      parts.push(value); received += value.length
-      item.progress = total ? Math.min(100, Math.round(received / total * 100)) : -1
-    }
-    const blob = new Blob(parts, { type: response.headers.get('Content-Type') || 'application/octet-stream' })
-    const link = document.createElement('a'); link.href = URL.createObjectURL(blob); link.download = file.name; link.click(); URL.revokeObjectURL(link.href)
-    item.progress = 100; item.status = t('files.completed')
+    await streamDownload(item, () => fetch(`/api/files/${file.id}/download`, { headers: { Authorization: `Bearer ${localStorage.getItem('filebox_token')}` }, signal: controller.signal }), file.name)
   } catch (err) {
-    const mapped = friendlyError(err); item.failed = true; item.error = mapped.message; item.status = mapped.message; error.value = `${file.name}: ${mapped.message}`
+    if (err.name === 'AbortError' || item.cancelled) { item.status = t('download.detail.cancelled'); item.progress = item.progress < 0 ? 0 : item.progress } else { const mapped = friendlyError(err); item.failed = true; item.error = mapped.message; item.status = mapped.message; error.value = `${file.name}: ${mapped.message}` }
+  } finally {
+    item.running = false
   }
   setTimeout(() => { downloads.value = downloads.value.filter(entry => entry !== item) }, 4000)
 }
@@ -377,5 +444,5 @@ function connectProgressStream() {
 }
 function closeProgressStream() { progressController?.abort(); progressController = null }
 onMounted(() => { loadMe(); loadFiles(); loadFolders(); loadCollections(); rateTimer = setInterval(sampleOverallRate, 1000); connectProgressStream() })
-onBeforeUnmount(() => { if (rateTimer) clearInterval(rateTimer); closeProgressStream(); cancelBatchDownload(); uploads.value.forEach(item => item.controllers.forEach(controller => controller.abort())); if (previewUrl.value) URL.revokeObjectURL(previewUrl.value) })
+onBeforeUnmount(() => { if (rateTimer) clearInterval(rateTimer); closeProgressStream(); cancelBatchDownload(); downloads.value.filter(item => item.running).forEach(cancelDownload); uploads.value.forEach(item => item.controllers.forEach(controller => controller.abort())); if (previewUrl.value) URL.revokeObjectURL(previewUrl.value) })
 </script>

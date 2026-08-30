@@ -156,6 +156,21 @@ Object.assign(zhCN, { 'logs.shareExtend': '分享延期', 'logs.shareIncrease': 
 Object.assign(zhTW, { 'logs.shareExtend': '分享延長', 'logs.shareIncrease': '分享增加次數', 'logs.shareRevoke': '撤銷分享' })
 Object.assign(en, { 'logs.shareExtend': 'Share extended', 'logs.shareIncrease': 'Share limit increased', 'logs.shareRevoke': 'Share revoked' })
 
+// Batch-share and detailed download keys stay aligned across all locales.
+// 批量分享和详细下载进度键在三种语言中保持一致。
+Object.assign(zhCN, {
+  'files.batchShare': '批量分享（{count}）', 'files.batchShareTitle': '批量创建分享链接（{count} 个文件）', 'files.batchShareCreate': '创建分享链接', 'files.batchShareCreated': '已创建 {count} 个独立分享链接',
+  'download.detail.transferred': '已传输 {loaded} / {total}', 'download.detail.rate': '速率 {rate}', 'download.detail.unknown': '未知', 'download.detail.batchName': '批量下载 ZIP', 'download.detail.cancelled': '已取消', 'logs.batchShare': '批量分享'
+})
+Object.assign(zhTW, {
+  'files.batchShare': '批次分享（{count}）', 'files.batchShareTitle': '批次建立分享連結（{count} 個檔案）', 'files.batchShareCreate': '建立分享連結', 'files.batchShareCreated': '已建立 {count} 個獨立分享連結',
+  'download.detail.transferred': '已傳輸 {loaded} / {total}', 'download.detail.rate': '速率 {rate}', 'download.detail.unknown': '未知', 'download.detail.batchName': '批次下載 ZIP', 'download.detail.cancelled': '已取消', 'logs.batchShare': '批次分享'
+})
+Object.assign(en, {
+  'files.batchShare': 'Share batch ({count})', 'files.batchShareTitle': 'Create share links ({count} files)', 'files.batchShareCreate': 'Create share links', 'files.batchShareCreated': 'Created {count} independent share links',
+  'download.detail.transferred': 'Transferred {loaded} / {total}', 'download.detail.rate': 'Rate {rate}', 'download.detail.unknown': 'Unknown', 'download.detail.batchName': 'Batch download ZIP', 'download.detail.cancelled': 'Cancelled', 'logs.batchShare': 'Batch share'
+})
+
 export const dictionaries = { 'zh-CN': zhCN, 'zh-TW': zhTW, en }
 export const currentLocale = ref('zh-CN')
 export const systemLocale = ref('zh-CN')

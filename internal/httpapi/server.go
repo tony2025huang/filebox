@@ -272,6 +272,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/files/{taskID}/complete", s.requireAuth(s.completeUpload))
 	mux.HandleFunc("GET /api/files/{id}/download", s.requireAuth(s.download))
 	mux.HandleFunc("POST /api/files/batch-download", s.requireAuth(s.batchDownload))
+	mux.HandleFunc("POST /api/files/batch-share", s.requireAuth(s.batchShare))
 	mux.HandleFunc("POST /api/files/batch-delete", s.requireAuth(s.batchDelete))
 	mux.HandleFunc("GET /api/files/progress/stream", s.requireAuth(s.uploadProgressStream))
 	mux.HandleFunc("GET /api/files/{id}/preview", s.requireAuth(s.preview))
@@ -2039,9 +2040,17 @@ func (s *Server) batchDownload(w http.ResponseWriter, r *http.Request) {
 		}
 		files = append(files, file)
 	}
-	w.Header().Set("Content-Type", "application/zip")
-	w.Header().Set("Content-Disposition", contentDisposition("filebox-batch-download.zip"))
-	zw := zip.NewWriter(w)
+	// Build the archive before writing headers so the client receives a reliable Content-Length.
+	// 先生成临时 ZIP 再写响应头，确保客户端能拿到可靠的 Content-Length。
+	temp, err := os.CreateTemp(filepath.Join(s.config.DataDir, "tmp"), "batch-download-*.zip")
+	if err != nil {
+		log.Printf("create batch download archive: %v", err)
+		writeError(w, http.StatusInternalServerError, "创建下载文件失败")
+		return
+	}
+	tempPath := temp.Name()
+	defer os.Remove(tempPath)
+	zw := zip.NewWriter(temp)
 	// zip 内同名文件追加序号（不同目录的同名文件避免互相覆盖）。
 	// Same-name files inside the zip get a numeric suffix so they do not overwrite each other.
 	entryNames := make(map[string]struct{})
@@ -2050,6 +2059,8 @@ func (s *Server) batchDownload(w http.ResponseWriter, r *http.Request) {
 		handle, err := os.Open(path)
 		if err != nil {
 			zw.Close()
+			temp.Close()
+			writeError(w, http.StatusNotFound, "文件内容不存在")
 			return
 		}
 		entryName := uniqueZipEntryName(file.Name, entryNames)
@@ -2057,16 +2068,44 @@ func (s *Server) batchDownload(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			handle.Close()
 			zw.Close()
+			temp.Close()
+			writeError(w, http.StatusInternalServerError, "创建下载文件失败")
 			return
 		}
 		_, copyErr := io.Copy(entry, handle)
 		handle.Close()
 		if copyErr != nil {
 			zw.Close()
+			temp.Close()
+			writeError(w, http.StatusInternalServerError, "读取文件内容失败")
 			return
 		}
 	}
 	if err := zw.Close(); err != nil {
+		temp.Close()
+		writeError(w, http.StatusInternalServerError, "创建下载文件失败")
+		return
+	}
+	if err := temp.Close(); err != nil {
+		writeError(w, http.StatusInternalServerError, "创建下载文件失败")
+		return
+	}
+	info, err := os.Stat(tempPath)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "读取下载文件失败")
+		return
+	}
+	archive, err := os.Open(tempPath)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "读取下载文件失败")
+		return
+	}
+	defer archive.Close()
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Disposition", contentDisposition("filebox-batch-download.zip"))
+	w.Header().Set("Content-Length", strconv.FormatInt(info.Size(), 10))
+	if _, err := io.Copy(w, archive); err != nil {
+		log.Printf("stream batch download archive: %v", err)
 		return
 	}
 	names := make([]string, 0, len(files))
@@ -2075,6 +2114,101 @@ func (s *Server) batchDownload(w http.ResponseWriter, r *http.Request) {
 	}
 	s.recordAudit(r, &user.ID, user.Username, "download", strings.Join(names, ","), "success", "batch")
 	s.serviceEvent(r, "download", user.Username, "name=%s count=%d result=success reason=batch", strings.Join(names, ","), len(names))
+}
+
+// batchShare creates one independent share link per selected file after validating the whole batch.
+// batchShare 先校验整批文件，再为每个文件创建一个独立分享链接，避免产生部分越权结果。
+func (s *Server) batchShare(w http.ResponseWriter, r *http.Request) {
+	user := currentUser(r.Context())
+	if s.rejectReadOnly(w, r, user, "batch_share", "batch") {
+		return
+	}
+	result, reason := "failure", "invalid_request"
+	target := "batch"
+	defer func() {
+		s.recordAudit(r, &user.ID, user.Username, "batch_share", target, result, reason)
+		s.serviceEvent(r, "batch_share", user.Username, "target=%s result=%s reason=%s", target, result, reason)
+	}()
+	var input struct {
+		FileIDs        []int64 `json:"fileIds"`
+		ExpiresInHours int     `json:"expiresInHours"`
+		MaxDownloads   int     `json:"maxDownloads"`
+	}
+	if !decodeJSON(w, r, &input) || len(input.FileIDs) == 0 {
+		writeError(w, http.StatusBadRequest, "请选择要分享的文件")
+		return
+	}
+	if input.ExpiresInHours < 1 {
+		writeError(w, http.StatusBadRequest, "分享有效期无效")
+		return
+	}
+	if input.MaxDownloads < 0 || input.MaxDownloads > 100000 {
+		writeError(w, http.StatusBadRequest, "分享次数限制无效")
+		return
+	}
+
+	// Deduplicate while preserving request order; reject the entire batch on any forbidden file.
+	// 去重并保留请求顺序；任一文件无权访问时整体拒绝。
+	seen := make(map[int64]struct{}, len(input.FileIDs))
+	files := make([]store.File, 0, len(input.FileIDs))
+	fileIDs := make([]string, 0, len(input.FileIDs))
+	for _, id := range input.FileIDs {
+		if _, exists := seen[id]; exists {
+			continue
+		}
+		seen[id] = struct{}{}
+		file, err := s.store.FindFile(r.Context(), id)
+		if err != nil || file.Status != "ready" || (file.UserID != user.ID && user.Role != "admin") {
+			writeError(w, http.StatusNotFound, "文件不存在")
+			return
+		}
+		files = append(files, file)
+		fileIDs = append(fileIDs, strconv.FormatInt(id, 10))
+	}
+
+	target = strings.Join(fileIDs, ",")
+	reason = "create_failed"
+
+	expiresAt := time.Now().UTC().Add(time.Duration(input.ExpiresInHours) * time.Hour)
+	items := make([]map[string]any, 0, len(files))
+	for _, file := range files {
+		var share store.Share
+		created := false
+		for attempt := 0; attempt < 5; attempt++ {
+			token, err := randomShareToken()
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "创建分享链接失败")
+				return
+			}
+			err = s.store.CreateShare(r.Context(), file.ID, user.ID, token, expiresAt, input.MaxDownloads)
+			if errors.Is(err, store.ErrConflict) {
+				continue
+			}
+			if err != nil {
+				log.Printf("create batch share: %v", err)
+				writeError(w, http.StatusInternalServerError, "创建分享链接失败")
+				return
+			}
+			share, err = s.store.GetShareByToken(r.Context(), token)
+			if err != nil {
+				log.Printf("load batch share: %v", err)
+				writeError(w, http.StatusInternalServerError, "创建分享链接失败")
+				return
+			}
+			created = true
+			break
+		}
+		if !created {
+			writeError(w, http.StatusInternalServerError, "创建分享链接失败")
+			return
+		}
+		items = append(items, map[string]any{
+			"fileId": share.FileID, "fileName": file.Name, "token": share.Token, "url": "/" + share.Token,
+			"expiresAt": share.ExpiresAt, "maxDownloads": share.MaxDownloads,
+		})
+	}
+	result, reason = "success", "batch"
+	writeData(w, http.StatusCreated, "批量分享链接已创建", map[string]any{"items": items})
 }
 
 // batchDelete 以单事务删除选中文件，提交后再清理物理文件内容。
@@ -3301,7 +3435,7 @@ func (s *Server) logActions(w http.ResponseWriter, r *http.Request) {
 	// (deduplicated by recency), so regular users are not offered filters they never triggered.
 	all := []string{
 		"login", "register", "upload", "upload_init", "upload_chunk", "download", "delete", "share", "share_view", "share_download",
-		"share_extend", "share_increase", "share_revoke",
+		"share_extend", "share_increase", "share_revoke", "batch_share",
 		"settings_update", "brand_update", "language_update", "password_change", "password_reset",
 		"user_create", "user_update", "user_disabled", "totp_update", "ip_acl_update",
 		"folder_create", "folder_list", "folder_rename", "folder_delete", "collection", "upload_collect", "upload_collect_fail",

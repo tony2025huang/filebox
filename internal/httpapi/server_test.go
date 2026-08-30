@@ -600,6 +600,66 @@ func TestSharingLifecycleAndAtomicDownloadLimit(t *testing.T) {
 	}
 }
 
+func TestBatchShareCreatesIndependentLinksAndRejectsUnauthorizedBatch(t *testing.T) {
+	db, handler := newTestServer(t)
+	adminToken := testAdminToken(t, handler)
+	first := uploadTestFile(t, handler, adminToken, "batch-share-one.txt", "text/plain", []byte("one"))
+	second := uploadTestFile(t, handler, adminToken, "batch-share-two.txt", "text/plain", []byte("two"))
+	firstID := int64(first["id"].(float64))
+	secondID := int64(second["id"].(float64))
+	batchDownload := testBinaryRequest(t, handler, http.MethodPost, "/api/files/batch-download", adminToken, []byte(`{"ids":[`+strconv.FormatInt(firstID, 10)+`,`+strconv.FormatInt(secondID, 10)+`]}`))
+	if batchDownload.Code != http.StatusOK || batchDownload.Header().Get("Content-Length") != strconv.Itoa(batchDownload.Body.Len()) {
+		t.Fatalf("batch download content length = %d/%q", batchDownload.Code, batchDownload.Header().Get("Content-Length"))
+	}
+	body := `{"fileIds":[` + strconv.FormatInt(firstID, 10) + `,` + strconv.FormatInt(secondID, 10) + `],"expiresInHours":24,"maxDownloads":3}`
+	created := testJSONRequest(t, handler, http.MethodPost, "/api/files/batch-share", adminToken, body)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("batch share status = %d: %s", created.Code, created.Body.String())
+	}
+	items := responseData(t, created)["items"].([]any)
+	if len(items) != 2 {
+		t.Fatalf("batch share item count = %d", len(items))
+	}
+	tokens := make(map[string]bool)
+	for _, raw := range items {
+		item := raw.(map[string]any)
+		token, ok := item["token"].(string)
+		if !ok || len(token) != 64 || tokens[token] || item["url"] != "/"+token || item["fileId"] == nil || item["fileName"] == nil {
+			t.Fatalf("batch share item = %#v", item)
+		}
+		tokens[token] = true
+	}
+	shares := testJSONRequest(t, handler, http.MethodGet, "/api/shares", adminToken, "")
+	if shares.Code != http.StatusOK || len(responseData(t, shares)["items"].([]any)) != 2 {
+		t.Fatalf("batch shares management list = %d: %s", shares.Code, shares.Body.String())
+	}
+	var auditResult, auditReason string
+	if err := db.DB.QueryRow("SELECT result, reason FROM audit_logs WHERE action = 'batch_share' ORDER BY id DESC LIMIT 1").Scan(&auditResult, &auditReason); err != nil || auditResult != "success" || auditReason != "batch" {
+		t.Fatalf("batch share audit = %q/%q, %v", auditResult, auditReason, err)
+	}
+
+	other := testJSONRequest(t, handler, http.MethodPost, "/api/admin/users", adminToken, `{"username":"batch-share-other","password":"Batch123!","role":"user","quotaBytes":1048576}`)
+	if other.Code != http.StatusCreated {
+		t.Fatalf("create batch share test user = %d: %s", other.Code, other.Body.String())
+	}
+	login := testJSONRequest(t, handler, http.MethodPost, "/api/auth/login", "", `{"username":"batch-share-other","password":"Batch123!"}`)
+	if login.Code != http.StatusOK {
+		t.Fatalf("batch share test user login = %d: %s", login.Code, login.Body.String())
+	}
+	otherToken := responseData(t, login)["token"].(string)
+	forbidden := testJSONRequest(t, handler, http.MethodPost, "/api/files/batch-share", otherToken, `{"fileIds":[`+strconv.FormatInt(firstID, 10)+`,`+strconv.FormatInt(secondID, 10)+`],"expiresInHours":24}`)
+	if forbidden.Code != http.StatusNotFound {
+		t.Fatalf("unauthorized batch share status = %d: %s", forbidden.Code, forbidden.Body.String())
+	}
+	sharesAfter := testJSONRequest(t, handler, http.MethodGet, "/api/shares", adminToken, "")
+	if sharesAfter.Code != http.StatusOK || len(responseData(t, sharesAfter)["items"].([]any)) != 2 {
+		t.Fatalf("unauthorized batch share created a link: %s", sharesAfter.Body.String())
+	}
+	if err := db.DB.QueryRow("SELECT result FROM audit_logs WHERE action = 'batch_share' AND user_id = (SELECT id FROM users WHERE username = 'batch-share-other') ORDER BY id DESC LIMIT 1").Scan(&auditResult); err != nil || auditResult != "failure" {
+		t.Fatalf("unauthorized batch share audit = %q, %v", auditResult, err)
+	}
+}
+
 func TestShareManagementAndOwnerDownloadLogs(t *testing.T) {
 	db, handler := newTestServer(t)
 	token := testAdminToken(t, handler)
