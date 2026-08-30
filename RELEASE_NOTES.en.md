@@ -4,6 +4,22 @@ Stage 2 release notes
 
 [中文](RELEASE_NOTES.md)
 
+## v0.2.0-v012 (new-feature batch) release notes
+
+v012 is the batch of 11 new feature requests (developed by codex, re-verified and tested by dsh), released in the v0.2.0 single binary:
+
+- **Batch delete and per-user statistics (features 1/2)**: file multi-select batch delete (`POST /api/files/batch-delete`); the admin user list shows per-user folder/file counts and used bytes.
+- **Create-user security settings (feature 3)**: the create-user dialog directly configures TOTP (one-time secret returned for handoff), TOTP re-enrollment, and the IP allowlist without a second edit.
+- **Brand layout optimization (feature 4)**: the theme color no longer occupies its own row; the brand grid is more compact.
+- **Batch sharing and download progress (feature 5)**: `POST /api/files/batch-share` creates independent links for multiple selected files; single-file and zip downloads stream with bytes/percentage/rate and cancellation.
+- **Per-user read-only window (feature 6a)**: an admin sets a one-time window during which the user can only view/download; all write operations return `403 READ_ONLY`; admins are exempt.
+- **External upload collections (feature 6b)**: public `/u/:token` page where external visitors upload without an account (expiry/upload-count/per-file-size limits); files land under the creator's directory and count against quota.
+- **Explicit download-exhausted message (feature 7)**: exhausted share downloads return a structured `403 SHARE_DOWNLOAD_LIMIT` with a clear UI message instead of a browser permission error.
+- **Share management (feature 8)**: the `/shares` page centrally manages shares — list/detail, extend expiry, increase the download limit (never lower), soft revoke, copy links, and download logs.
+- **Share download logs and failure reasons (feature 9)**: sharers see their own share download logs (`share_owner_id`); failure reasons split into `share_not_found/expired/revoked/limit/denied`.
+- **Public-proxy XFF trust toggle (feature 10)**: the `trustProxy` setting (default off) parses `X-Forwarded-For` only when enabled and the direct peer matches `--trusted-proxies`.
+- **Sync feature (feature 11)**: per-user remote systems (SFTP password/key incl. passphrase, AES-GCM encrypted) and sync tasks — push/pull bidirectional, auto-created target directories, three conflict policies, one-shot/cron periodic scheduling, detailed logs (30-day retention); end-to-end verified on a real Linux SFTP server.
+
 ## v0.1.1 (v011 validation-feedback fixes) release notes
 
 v011 is a **validation-feedback fix batch independent of the Stage 2 feature work** (source: user acceptance feedback from the local validation environment, 20 items, authoritative record in `docs/validation-feedback-v011.md`), released together with v0.2.0 (Stage 2). All fixes and enhancements are merged into the v0.2.0 single binary (`filebox-v011.exe` / `filebox-windows-amd64.exe`).

@@ -2,7 +2,7 @@
 
 [English](README.en.md)
 
-FileBox 是一个可自托管的文件传输与管理系统，使用单个 Go 二进制文件跨 Windows/Linux 部署。阶段一提供多用户隔离、JWT 登录、单文件上传、Range 下载、双哈希校验、配额、磁盘保护、审计日志、品牌定制和多语言界面；阶段二（v0.2.0）在此基础上加入分片断点续传、秒传、文件夹上传、分享链接、在线预览、上传限速、开放注册开关和系统统计补全。
+FileBox 是一个可自托管的文件传输与管理系统，使用单个 Go 二进制文件跨 Windows/Linux 部署。阶段一提供多用户隔离、JWT 登录、单文件上传、Range 下载、双哈希校验、配额、磁盘保护、审计日志、品牌定制和多语言界面；阶段二（v0.2.0）在此基础上加入分片断点续传、秒传、文件夹上传、分享链接、在线预览、上传限速、开放注册开关和系统统计补全；v012 批次进一步提供批量操作、外部用户上传收集、用户只读时段、分享管理、SFTP 双向同步等能力。
 
 ## 功能清单
 
@@ -22,6 +22,18 @@ FileBox 是一个可自托管的文件传输与管理系统，使用单个 Go �
 - 并发上传容错（v011 反馈批次）：同名冲突弹窗改为队列处理（含 60 秒超时取消），多个同名文件依次处理不互相覆盖，杜绝卡「准备中」；上传失败/取消项保留在传输面板显示失败原因并可重试/移除；上传初始化与分片上传每个拒绝分支记录审计与服务日志（原因细分）。
 - 配额与超限提示（v011 反馈批次）：整体配额不足返回 `QUOTA_EXCEEDED` 明细（已用/配额/文件大小），界面展示差额提示；单文件超限返回 `413 FILE_TOO_LARGE` 明确提示上限，不再混淆为文件名无效。
 - 整体传输速率（v011 反馈批次）：传输侧边栏顶部实时显示所有进行中上传的合计速率（单位自适应，1 秒采样 + 3 点滑动平均平滑），无传输时自动隐藏。
+- 多选批量操作（v012）：文件列表复选后支持批量删除（`POST /api/files/batch-delete`）与批量下载（zip 打包，`POST /api/files/batch-download`）；管理后台用户列表展示每个用户的目录数、文件数与已用空间。
+- 创建用户直接设置安全项（v012）：新建用户弹窗可直接配置 TOTP（生成一次性 secret 供转交）、下次重绑 TOTP、IP 白名单，无需创建后再编辑；品牌设置「界面主色」不再独占一行，布局更紧凑。
+- 公网代理 XFF 信任开关（v012）：`trustProxy` 设置（默认关闭）——仅当管理员开启**且**请求直连 IP 落在 `--trusted-proxies` 白名单内时才解析 `X-Forwarded-For`，避免伪造来源 IP。
+- 外部上传收集链接（v012）：任何登录用户可创建「上传收集链接」（`/u/:token`），外部访客无需登录即可多文件上传（复用分片/秒传链路）；限制含有效期、总上传次数、单文件大小上限，文件落入创建者 `uploads/<token>/` 目录并计入其配额；支持撤销、上传者备注、匿名 IP 限速与审计。
+- 用户只读时段（v012）：管理员可为单个用户设置一次性只读窗口，窗口内该用户仅可查看/下载，全部写操作（上传/删除/重命名/建目录/分享）返回 `403 READ_ONLY`，管理员不受限；前端禁用写操作入口并提示。
+- 分享管理（v012）：`/shares` 页面集中管理我的分享——查看列表/详情（剩余时间、已下载/上限）、延期、增加下载次数（不允许降低）、单条撤销（软撤销，匿名访问返回 403 已撤销）、复制链接；每条分享的下载日志（时间/IP/结果/失败原因）创建者可见。
+- 分享失败原因细分（v012）：`share_not_found` / `share_expired` / `share_revoked` / `share_limit` / `share_denied` 明确区分权限不足、次数用尽、过期与撤销。
+- 批量分享（v012）：`POST /api/files/batch-share` 一次为多个选中文件创建独立分享链接（整批校验归属，任一越权整体拒绝），前端弹窗展示逐文件链接并可复制。
+- 下载详细进度（v012）：单文件与批量 zip 下载均流式读取，传输面板显示已下载字节/总字节/百分比与实时速率（B/KB/MB/GB/s），支持取消。
+- 同步功能（v012）：按用户配置「目标系统」（SFTP 主机，密码/密钥含 passphrase，凭据 AES-GCM 加密存储）与「同步任务」——push（FileBox→SFTP）与 pull（SFTP→FileBox）双向，自动创建目标目录，冲突策略覆盖/跳过/重命名，一次性或 cron 周期执行（服务端调度，同任务互斥防重叠），每次执行记录详细日志（文件数/字节/错误，默认保留 30 天）。
+- 废弃上传任务定时清理（v012 补充批次）：后台每小时清理超过 24 小时未完成的 pending 上传任务及其分片/tmp 目录（事务删除，防清理竞态）。
+- 服务端主动推送上传进度（v012 补充批次）：`GET /api/files/progress/stream` SSE 端点每秒推送当前用户所有进行中任务进度；前端用带 Bearer 认证且可取消的流式 fetch 订阅，刷新/多标签页同步恢复。
 - 同名冲突：同一用户当月目录存在同名文件时，初始化返回 `409`，前端可选择覆盖或重命名；覆盖事务性替换，重命名分配最小可用数字后缀。
 - 文件名安全：上传前拒绝路径分隔符、控制字符、Windows 非法字符、点号遍历标记、空名/`.`/`..` 和超过 255 字节的名称；落盘名保留原名语义并替换部分非法字符。
 - 配额：初始化时预留待上传字节，默认配额为 100 GiB；覆盖时先扣除旧文件占用。
@@ -219,7 +231,7 @@ systemd、Windows NSSM/sc 和 Nginx 反向代理的完整示例与安全说明�
 
 ## API 摘要
 
-JSON 响应格式为 `{ "code": number, "message": string, "data": any }`；受保护接口需要 `Authorization: Bearer <token>`。主要路径包括：认证 `/api/auth/login`、`/api/auth/register`、`/api/auth/totp`、`/api/auth/totp-qrcode`、`/api/auth/change-password`、`/api/auth/logout`、`/api/auth/me`、`/api/auth/language`；公开品牌 `/api/brand` 和 `/brand/{asset}`；文件 `/api/files`、`/api/files/upload-init`、`/api/files/check`、`/api/files/{taskID}/chunks/{index}`、`/api/files/{taskID}/status`、`/api/files/{taskID}/complete`、`/api/files/{id}/download`、`/api/files/batch-download`、`/api/files/{id}/preview`、`/api/files/{id}/share`、`/api/files/batch-share`、`/api/files/{id}/shares`、`/api/files/shared/{token}/meta`、`/api/files/shared/{token}/download`、`/api/files/{id}`；日志 `/api/logs`、`/api/logs/actions`；管理员 `/api/admin/users[/{id}]`、`/api/admin/users/{id}/totp`、`/api/admin/users/{id}/ip-acl`、`/api/admin/stats`、`/api/admin/settings`、`/api/admin/brand`、`/api/admin/locks`。
+JSON 响应格式为 `{ "code": number, "message": string, "data": any }`；受保护接口需要 `Authorization: Bearer <token>`。主要路径包括：认证 `/api/auth/login`、`/api/auth/register`、`/api/auth/totp`、`/api/auth/totp-qrcode`、`/api/auth/change-password`、`/api/auth/logout`、`/api/auth/me`、`/api/auth/language`；公开品牌 `/api/brand` 和 `/brand/{asset}`；文件 `/api/files`、`/api/files/upload-init`、`/api/files/check`、`/api/files/{taskID}/chunks/{index}`、`/api/files/{taskID}/status`、`/api/files/{taskID}/complete`、`/api/files/{id}/download`、`/api/files/batch-download`、`/api/files/batch-delete`、`/api/files/batch-share`、`/api/files/{id}/preview`、`/api/files/{id}/share`、`/api/files/{id}/shares`、`/api/files/shared/{token}/meta`、`/api/files/shared/{token}/download`、`/api/files/progress/stream`、`/api/files/{id}`；分享管理 `/api/shares`、`/api/shares/{token}`、`/api/shares/{token}/extend|increase|logs`；外部上传收集 `/api/collections`、`/api/collections/{id}`、`/api/collections/{token}/meta|upload-init|upload-chunk|upload-complete`；同步 `/api/sync/systems[/{id}]`、`/api/sync/systems/{id}/browse|mkdir`、`/api/sync/tasks[/{id}]`、`/api/sync/tasks/{id}/run|logs`；日志 `/api/logs`、`/api/logs/actions`；管理员 `/api/admin/users[/{id}]`、`/api/admin/users/{id}/totp`、`/api/admin/users/{id}/ip-acl`、`/api/admin/users/{id}/read-only`、`/api/admin/stats`、`/api/admin/settings`、`/api/admin/brand`、`/api/admin/locks`。
 
 文件列表、用户列表和日志列表默认 `pageSize=20`，服务端最大 100。管理员可查看全部文件和日志，普通用户按账户隔离。下载支持 Range；登出不建立 JWT 服务端黑名单。
 
@@ -229,14 +241,14 @@ JSON 响应格式为 `{ "code": number, "message": string, "data": any }`；受�
 
 ## 数据存储说明
 
-`--data` 下包含 `filebox.db`；默认配置对应 `data/files/<userID>/<yy>/<mm>[/<相对目录>]/<stored-name>`、`data/tmp/<taskID>/<分片索引>` 和 `data/brand/<favicon|login-logo|main-logo>.<ext>`。SQLite 保存元数据、所有权、配额、审计日志、分片记录（`chunks`）和分享记录（`shares`）。上传分片先写入临时目录，`complete` 校验齐备后流式合并到用户/年份/月份目录（相对目录可保留文件夹结构）。用户看到的原始名保存为 `name`，落盘名保存为 `stored_name`；冲突时使用 `name (1).ext`、`name (2).ext` 等最小可用后缀。删除先标记 `deleted`、扣减配额，再清理物理内容；被删除记录占用的存储路径可在重传时自动复用。
+`--data` 下包含 `filebox.db`；默认配置对应 `data/files/<userID>[/<自定义目录>/]<stored-name>`、`data/tmp/<taskID>/<分片索引>` 和 `data/brand/<favicon|login-logo|main-logo>.<ext>`。SQLite 保存元数据、所有权、配额、审计日志、分片记录（`chunks`）、分享记录（`shares`，含软撤销标记）、上传收集（`upload_collections`/`upload_collection_files`）、目标系统与同步任务（`remote_systems`/`sync_tasks`/`sync_logs`）。上传分片先写入临时目录，`complete` 校验齐备后流式合并到用户目录（相对目录可保留文件夹结构）。用户看到的原始名保存为 `name`，落盘名保存为 `stored_name`；冲突时使用 `name (1).ext`、`name (2).ext` 等最小可用后缀。删除先标记 `deleted`、扣减配额，再清理物理内容；被删除记录占用的存储路径可在重传时自动复用。外部上传收集文件落入 `data/files/<ownerID>/uploads/<token>/`，同步 pull 的文件按任务目标目录落库并计入属主配额。
 
 ## 已知限制
 
 - 秒传仅在同一用户范围内匹配（跨用户不做内容去重）。
 - 分享 token 随机生成；`meta` 接口公开文件名/大小/次数等元数据，请勿分享含敏感信息的文件。
 - 限速按用户令牌桶生效于分片写入；速率变更在下一请求生效。
-- 未实现的优化项：废弃上传任务的定时清理、服务端主动推送上传进度。
+- 同步功能（SFTP push/pull）依赖目标服务器提供 SSH/SFTP 服务；周期任务在服务运行期间触发，服务完全停止期间不会补跑错过的周期。
 
 ## 许可与致谢
 
