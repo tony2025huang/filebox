@@ -8,6 +8,7 @@ import ShareView from './views/ShareView.vue'
 import UploadView from './views/UploadView.vue'
 import SharesView from './views/SharesView.vue'
 import SyncView from './views/SyncView.vue'
+import BatchShareView from './views/BatchShareView.vue'
 
 const router = createRouter({
   history: createWebHistory(),
@@ -20,6 +21,7 @@ const router = createRouter({
     { path: '/sync', component: SyncView, meta: { titleKey: 'page.sync' } },
     { path: '/admin', component: AdminView, meta: { admin: true, titleKey: 'page.admin' } },
     { path: '/u/:token', component: UploadView, meta: { public: true, uploadCollection: true, titleKey: 'collection.upload' } },
+    { path: '/g/:token', component: BatchShareView, meta: { public: true, share: true, titleKey: 'batchShare.heading' } },
     { path: '/:token', component: ShareView, meta: { public: true, share: true, titleKey: 'share.heading' } },
     { path: '/:pathMatch(.*)*', redirect: '/' }
   ]

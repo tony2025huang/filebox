@@ -17,6 +17,21 @@ func TestOperationsResetPasswordAndClearLocks(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
+	// v013 #15：确认 WAL + synchronous=NORMAL 已生效（向后兼容打开老库同样适用）。
+	// v013 #15: verify WAL + synchronous=NORMAL are active (applies to legacy databases opened the same way).
+	var journalMode, synchronous string
+	if err := db.DB.QueryRow("PRAGMA journal_mode").Scan(&journalMode); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.DB.QueryRow("PRAGMA synchronous").Scan(&synchronous); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.EqualFold(journalMode, "wal") {
+		t.Fatalf("journal_mode = %q, want wal", journalMode)
+	}
+	if synchronous != "1" && synchronous != "normal" {
+		t.Fatalf("synchronous = %q, want normal(1)", synchronous)
+	}
 	if err := db.EnsureAdmin("admin", "admin123", 1024); err != nil {
 		t.Fatal(err)
 	}

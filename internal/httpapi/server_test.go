@@ -232,6 +232,100 @@ func TestUploadCollectionUpdate(t *testing.T) {
 	}
 }
 
+func TestBatchShareGroupLifecycle(t *testing.T) {
+	db, handler := newTestServer(t)
+	token := testAdminToken(t, handler)
+	// 上传两个小文件作为聚合分享成员。
+	fileIDs := make([]int64, 0, 2)
+	for index, name := range []string{"a.txt", "b.txt"} {
+		initData := initUpload(t, handler, token, name, 1, 1, "")
+		taskID := initData["taskId"].(string)
+		if chunk := testJSONRequest(t, handler, http.MethodPut, "/api/files/"+taskID+"/chunks/0", token, "x"); chunk.Code != http.StatusOK {
+			t.Fatalf("chunk %d = %d: %s", index, chunk.Code, chunk.Body.String())
+		}
+		complete := testJSONRequest(t, handler, http.MethodPost, "/api/files/"+taskID+"/complete", token, "{}")
+		if complete.Code != http.StatusOK {
+			t.Fatalf("complete %d = %d: %s", index, complete.Code, complete.Body.String())
+		}
+		fileIDs = append(fileIDs, int64(responseData(t, complete)["id"].(float64)))
+	}
+	// 创建聚合分享（2 个文件，整体上限 2 次）。
+	create := testJSONRequest(t, handler, http.MethodPost, "/api/files/batch-share-group", token, `{"fileIds":[`+strconv.FormatInt(fileIDs[1], 10)+`,`+strconv.FormatInt(fileIDs[0], 10)+`],"expiresInHours":24,"maxDownloads":2}`)
+	if create.Code != http.StatusCreated {
+		t.Fatalf("create share group = %d: %s", create.Code, create.Body.String())
+	}
+	created := responseData(t, create)
+	groupToken := created["token"].(string)
+	if created["url"] != "/g/"+groupToken {
+		t.Fatalf("share group url = %#v", created["url"])
+	}
+	items := created["items"].([]any)
+	if len(items) != 2 {
+		t.Fatalf("share group items = %d, want 2", len(items))
+	}
+	// 公开元数据：返回 2 个成员文件。
+	meta := testJSONRequest(t, handler, http.MethodGet, "/api/shared-groups/"+groupToken+"/meta", "", "")
+	if meta.Code != http.StatusOK {
+		t.Fatalf("share group meta = %d: %s", meta.Code, meta.Body.String())
+	}
+	metaData := responseData(t, meta)
+	files := metaData["files"].([]any)
+	if len(files) != 2 || metaData["maxDownloads"] != float64(2) || metaData["downloadCount"] != float64(0) {
+		t.Fatalf("share group meta = %#v", metaData)
+	}
+	// 单文件下载消耗 1 次。
+	single := testJSONRequest(t, handler, http.MethodGet, "/api/shared-groups/"+groupToken+"/download/"+strconv.FormatInt(fileIDs[0], 10), "", "")
+	if single.Code != http.StatusOK {
+		t.Fatalf("share group single download = %d: %s", single.Code, single.Body.String())
+	}
+	// ZIP 下载消耗 1 次 → 之后达到上限。
+	zipBody := testJSONRequest(t, handler, http.MethodPost, "/api/shared-groups/"+groupToken+"/batch-download", "", `{"ids":[`+strconv.FormatInt(fileIDs[0], 10)+`,`+strconv.FormatInt(fileIDs[1], 10)+`]}`)
+	if zipBody.Code != http.StatusOK || zipBody.Header().Get("Content-Type") != "application/zip" {
+		t.Fatalf("share group zip = %d: %s", zipBody.Code, zipBody.Body.String())
+	}
+	blocked := testJSONRequest(t, handler, http.MethodGet, "/api/shared-groups/"+groupToken+"/download/"+strconv.FormatInt(fileIDs[1], 10), "", "")
+	if blocked.Code != http.StatusForbidden {
+		t.Fatalf("share group limit = %d: %s", blocked.Code, blocked.Body.String())
+	}
+	// 管理列表可见；撤销后公开元数据为 revoked。
+	groupList := testJSONRequest(t, handler, http.MethodGet, "/api/shares/groups", token, "")
+	if groupList.Code != http.StatusOK || len(responseData(t, groupList)["items"].([]any)) != 1 {
+		t.Fatalf("share group list = %d: %s", groupList.Code, groupList.Body.String())
+	}
+	revoked := testJSONRequest(t, handler, http.MethodDelete, "/api/shared-groups/"+groupToken, token, "")
+	if revoked.Code != http.StatusOK {
+		t.Fatalf("revoke share group = %d: %s", revoked.Code, revoked.Body.String())
+	}
+	revokedMeta := testJSONRequest(t, handler, http.MethodGet, "/api/shared-groups/"+groupToken+"/meta", "", "")
+	if revokedMeta.Code != http.StatusForbidden {
+		t.Fatalf("revoked share group meta = %d: %s", revokedMeta.Code, revokedMeta.Body.String())
+	}
+	// 越权：其他用户无法撤销该聚合分享。
+	other := testJSONRequest(t, handler, http.MethodPost, "/api/admin/users", token, `{"username":"group-other","password":"Other123!","role":"user","quotaBytes":1024}`)
+	if other.Code != http.StatusCreated {
+		t.Fatalf("create other user = %d: %s", other.Code, other.Body.String())
+	}
+	otherLogin := testJSONRequest(t, handler, http.MethodPost, "/api/auth/login", "", `{"username":"group-other","password":"Other123!"}`)
+	otherToken := responseData(t, otherLogin)["token"].(string)
+	if cross := testJSONRequest(t, handler, http.MethodDelete, "/api/shared-groups/"+groupToken, otherToken, ""); cross.Code != http.StatusNotFound {
+		t.Fatalf("cross-owner revoke group = %d: %s", cross.Code, cross.Body.String())
+	}
+	// 已删除文件从公开列表中隐藏。
+	created2 := testJSONRequest(t, handler, http.MethodPost, "/api/files/batch-share-group", token, `{"fileIds":[`+strconv.FormatInt(fileIDs[0], 10)+`],"expiresInHours":24,"maxDownloads":0}`)
+	if created2.Code != http.StatusCreated {
+		t.Fatalf("create second group = %d: %s", created2.Code, created2.Body.String())
+	}
+	secondToken := responseData(t, created2)["token"].(string)
+	if _, err := db.DeleteFile(context.Background(), fileIDs[0], 1, true); err != nil {
+		t.Fatal(err)
+	}
+	meta2 := testJSONRequest(t, handler, http.MethodGet, "/api/shared-groups/"+secondToken+"/meta", "", "")
+	meta2Data := responseData(t, meta2)
+	if len(meta2Data["files"].([]any)) != 0 {
+		t.Fatalf("deleted file not hidden: %#v", meta2Data["files"])
+	}
+}
+
 func testBinaryRequest(t *testing.T, handler http.Handler, method, path, token string, body []byte) *httptest.ResponseRecorder {
 	t.Helper()
 	request := httptest.NewRequest(method, path, bytes.NewReader(body))

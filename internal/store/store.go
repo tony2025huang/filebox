@@ -304,7 +304,11 @@ func Open(dataDir string) (*Store, error) {
 		return nil, fmt.Errorf("create brand directory: %w", err)
 	}
 	dbPath := filepath.Join(dataDir, "filebox.db")
-	db, err := sql.Open("sqlite", dbPath+"?_pragma=busy_timeout(5000)")
+	// v013 #15 速率优化：开启 WAL + synchronous=NORMAL，降低每分片 autocommit 的等待，
+	// 接受"断电可能丢失最近少量提交、但数据库始终一致"的持久性权衡（文档默认建议）。
+	// v013 #15 rate optimization: WAL + synchronous=NORMAL reduces per-chunk autocommit stalls,
+	// accepting the documented trade-off that a power loss may drop the latest commits while the DB stays consistent.
+	db, err := sql.Open("sqlite", dbPath+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)")
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
@@ -434,6 +438,9 @@ CREATE TABLE IF NOT EXISTS ip_failures (
 		return err
 	}
 	if err := s.migrateSharesSchema(); err != nil {
+		return err
+	}
+	if err := s.migrateShareGroupsSchema(); err != nil {
 		return err
 	}
 	if err := s.migrateAuditLogsSchema(); err != nil {
