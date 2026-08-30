@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 )
@@ -63,6 +64,55 @@ func TestOperationsResetPasswordAndClearLocks(t *testing.T) {
 	cleared, err = db.ClearUserLock(context.Background(), user.ID)
 	if err != nil || cleared {
 		t.Fatalf("ClearUserLock(unlocked user) = %v, %v; want false, nil", cleared, err)
+	}
+}
+
+func TestUploadTaskProgressAndConditionalDelete(t *testing.T) {
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.EnsureAdmin("admin", "admin123", 1024); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	task := UploadTask{ID: "pending-task", UserID: 1, Name: "large.bin", Size: 4, ChunkSize: 4, TotalChunks: 1, Status: "pending", Mime: "application/octet-stream"}
+	if err := db.CreateUploadTask(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetChunk(ctx, task.ID, 0, 4, "chunk-hash"); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().UTC().Add(-25 * time.Hour).Format(time.RFC3339)
+	if _, err := db.DB.Exec("UPDATE upload_tasks SET created_at = ? WHERE id = ?", old, task.ID); err != nil {
+		t.Fatal(err)
+	}
+	progress, err := db.ListPendingTaskProgress(ctx, 1)
+	if err != nil || len(progress) != 1 || progress[0].Uploaded != 1 {
+		t.Fatalf("pending progress = %+v, %v", progress, err)
+	}
+	if _, err := db.DB.Exec("UPDATE upload_tasks SET status = 'complete' WHERE id = ?", task.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.DeleteUploadTask(ctx, task.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("delete completed task = %v, want ErrNotFound", err)
+	}
+	var chunks int
+	if err := db.DB.QueryRow("SELECT COUNT(*) FROM chunks WHERE task_id = ?", task.ID).Scan(&chunks); err != nil {
+		t.Fatal(err)
+	}
+	if chunks != 1 {
+		t.Fatalf("completed task chunks = %d, want 1", chunks)
+	}
+	if _, err := db.DB.Exec("UPDATE upload_tasks SET status = 'pending' WHERE id = ?", task.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.DeleteUploadTask(ctx, task.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.GetUploadTask(ctx, task.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("deleted task lookup = %v, want ErrNotFound", err)
 	}
 }
 

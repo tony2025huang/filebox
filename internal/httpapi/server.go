@@ -1618,11 +1618,20 @@ func (s *Server) uploadProgressStream(w http.ResponseWriter, r *http.Request) {
 		flusher.Flush()
 	}
 	send()
+	nextAuthCheck := time.Now().Add(30 * time.Second)
 	for {
 		select {
 		case <-r.Context().Done():
 			return
 		case <-ticker.C:
+			if time.Now().After(nextAuthCheck) {
+				nextAuthCheck = time.Now().Add(30 * time.Second)
+				if _, err := s.authenticate(r); err != nil {
+					_, _ = fmt.Fprint(w, "event: auth-error\ndata: {\"status\":401}\n\n")
+					flusher.Flush()
+					return
+				}
+			}
 			send()
 		}
 	}
@@ -1646,6 +1655,19 @@ func (s *Server) checkInstantUpload(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "文件校验值缺失")
 		return
 	}
+	if input.Size > s.config.MaxFileSize {
+		s.recordAudit(r, &user.ID, user.Username, "upload", input.Name, "failure", "too_large")
+		s.serviceEvent(r, "upload", user.Username, "name=%s size=%d result=failure reason=too_large", input.Name, input.Size)
+		writeErrorData(w, http.StatusRequestEntityTooLarge, "文件超过单文件大小上限", map[string]any{"code": "FILE_TOO_LARGE", "maxFileSize": s.config.MaxFileSize})
+		return
+	}
+	dir, dirErr := validateUploadDir(input.Dir)
+	if dirErr != nil {
+		s.recordAudit(r, &user.ID, user.Username, "upload", input.Name, "failure", "invalid_dir")
+		s.serviceEvent(r, "upload", user.Username, "name=%s size=%d result=failure reason=invalid_dir", input.Name, input.Size)
+		writeError(w, http.StatusBadRequest, "目录无效")
+		return
+	}
 	file, err := s.store.FindInstantMatch(r.Context(), user.ID, input.MD5, input.SHA256, input.Size)
 	if errors.Is(err, store.ErrNotFound) {
 		writeData(w, http.StatusOK, "检查完成", map[string]any{"instant": false})
@@ -1663,10 +1685,6 @@ func (s *Server) checkInstantUpload(w http.ResponseWriter, r *http.Request) {
 	// same-name ready file in the target directory means this upload would normally get a 409
 	// conflict choice (overwrite/rename). Returning instant here would silently skip that flow.
 	// We therefore surface conflict so the frontend can prompt.
-	dir, dirErr := validateUploadDir(input.Dir)
-	if dirErr != nil {
-		dir = ""
-	}
 	relativeDir := filepath.Join("files", strconv.FormatInt(user.ID, 10), dir)
 	name, nameErr := sanitizeName(validateOrEmpty(input.Name))
 	if nameErr != nil || name == "" {
@@ -1936,7 +1954,7 @@ func (s *Server) batchDownload(w http.ResponseWriter, r *http.Request) {
 	zw := zip.NewWriter(w)
 	// zip 内同名文件追加序号（不同目录的同名文件避免互相覆盖）。
 	// Same-name files inside the zip get a numeric suffix so they do not overwrite each other.
-	entryNames := make(map[string]int)
+	entryNames := make(map[string]struct{})
 	for _, file := range files {
 		path := filepath.Join(s.config.DataDir, file.StoragePath)
 		handle, err := os.Open(path)
@@ -1944,13 +1962,7 @@ func (s *Server) batchDownload(w http.ResponseWriter, r *http.Request) {
 			zw.Close()
 			return
 		}
-		entryName := file.Name
-		if entryNames[entryName] > 0 {
-			extension := filepath.Ext(entryName)
-			stem := strings.TrimSuffix(entryName, extension)
-			entryName = fmt.Sprintf("%s (%d)%s", stem, entryNames[entryName], extension)
-		}
-		entryNames[file.Name]++
+		entryName := uniqueZipEntryName(file.Name, entryNames)
 		entry, err := zw.Create(entryName)
 		if err != nil {
 			handle.Close()
@@ -1973,6 +1985,25 @@ func (s *Server) batchDownload(w http.ResponseWriter, r *http.Request) {
 	}
 	s.recordAudit(r, &user.ID, user.Username, "download", strings.Join(names, ","), "success", "batch")
 	s.serviceEvent(r, "download", user.Username, "name=%s count=%d result=success reason=batch", strings.Join(names, ","), len(names))
+}
+
+func uniqueZipEntryName(name string, used map[string]struct{}) string {
+	key := strings.ToLower(name)
+	if _, exists := used[key]; !exists {
+		used[key] = struct{}{}
+		return name
+	}
+	extension := filepath.Ext(name)
+	stem := strings.TrimSuffix(name, extension)
+	for suffix := 1; ; suffix++ {
+		candidate := fmt.Sprintf("%s (%d)%s", stem, suffix, extension)
+		key = strings.ToLower(candidate)
+		if _, exists := used[key]; exists {
+			continue
+		}
+		used[key] = struct{}{}
+		return candidate
+	}
 }
 
 // createShare validates ownership and creates a random, time-limited sharing link.

@@ -273,12 +273,33 @@ func TestInstantUploadCheckHitAndMiss(t *testing.T) {
 	if miss.Code != http.StatusOK || responseData(t, miss)["instant"] != false {
 		t.Fatalf("instant miss = %d: %s", miss.Code, miss.Body.String())
 	}
+	overLimit := testJSONRequest(t, handler, http.MethodPost, "/api/files/check", token, `{"sha256":"no-match","size":33554433}`)
+	if overLimit.Code != http.StatusRequestEntityTooLarge || !strings.Contains(overLimit.Body.String(), "FILE_TOO_LARGE") {
+		t.Fatalf("instant over-limit = %d: %s", overLimit.Code, overLimit.Body.String())
+	}
+	badDir := testJSONRequest(t, handler, http.MethodPost, "/api/files/check", token, `{"sha256":"no-match","size":22,"dir":"../"}`)
+	if badDir.Code != http.StatusBadRequest || !strings.Contains(badDir.Body.String(), "目录无效") {
+		t.Fatalf("instant invalid dir = %d: %s", badDir.Code, badDir.Body.String())
+	}
 	var after int
 	if err := db.DB.QueryRow("SELECT COUNT(id) FROM files WHERE status = 'ready'").Scan(&after); err != nil {
 		t.Fatal(err)
 	}
 	if before != after {
 		t.Fatalf("file count changed after instant check: %d -> %d", before, after)
+	}
+}
+
+func TestUniqueZipEntryNameAvoidsExistingSuffixes(t *testing.T) {
+	used := make(map[string]struct{})
+	for _, want := range []string{"report (1).txt", "report.txt", "report (2).txt", "REPORT (3).TXT"} {
+		got := uniqueZipEntryName(strings.ReplaceAll(want, "REPORT", "report"), used)
+		if _, exists := used[strings.ToLower(got)]; !exists {
+			t.Fatalf("entry %q was not recorded", got)
+		}
+	}
+	if got := uniqueZipEntryName("report.txt", used); got != "report (4).txt" {
+		t.Fatalf("uniqueZipEntryName() = %q, want report (4).txt", got)
 	}
 }
 

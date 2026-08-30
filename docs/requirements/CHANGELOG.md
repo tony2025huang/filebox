@@ -4,7 +4,7 @@
 
 - **问题 8（拖拽补强）**：`/api/brand` 公开返回 `maxFileSize`；`queueFiles` 前置校验——超过单文件大小上限的文件跳过并提示（「N 个文件超过单文件大小上限 M，已跳过」），批量 >50 文件时确认提示（「共 N 个文件，确定全部上传吗？」）；多文件/多目录拖拽（webkitGetAsEntry 递归）原有能力保留。
 - **优化项 1（废弃上传任务定时清理）**：后台协程每小时清理超过 24 小时未完成的 pending 上传任务（`ListExpiredUploadTasks` 按 created_at 过期 + `DeleteUploadTask` 事务删除任务与分片记录 + 移除 tmp 目录），优雅关闭时停止；已验证（构造 25h 旧任务 → 找到并删除 → 清空）。
-- **优化项 2（服务端主动推送上传进度）**：`GET /api/files/progress/stream` SSE 端点每秒推送当前用户所有 pending 任务进度（taskId/name/totalChunks/uploaded/status）；前端 FilesView `EventSource` 订阅，刷新后/多标签页同步恢复进度，随组件卸载关闭连接。
+- **优化项 2（服务端主动推送上传进度）**：`GET /api/files/progress/stream` SSE 端点每秒推送当前用户所有 pending 任务进度（taskId/name/totalChunks/uploaded/status）；前端 FilesView 使用带 Bearer 认证且可取消的流式 fetch 订阅，刷新后/多标签页同步恢复进度，随组件卸载关闭连接。
 - **二次检视修复（e811c8e）**：FilesView `reactive` 导入（阻断）、resume/retry 走并发闸门、fileIcon 分支顺序（FileCode/FileSpreadsheet 前移）、batchDownload zip 同名序号、秒传审计 target 用本次上传名。
 
 ## 2026-08-30 - v012 用户反馈批次（问题 2-12 + codex 安全检视修复）

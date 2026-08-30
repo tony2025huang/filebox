@@ -317,6 +317,8 @@ CREATE TABLE IF NOT EXISTS upload_tasks (
   updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_upload_tasks_user_status ON upload_tasks(user_id, status);
+CREATE INDEX IF NOT EXISTS idx_upload_tasks_user_status_created ON upload_tasks(user_id, status, created_at);
+CREATE INDEX IF NOT EXISTS idx_upload_tasks_status_created ON upload_tasks(status, created_at);
 CREATE TABLE IF NOT EXISTS chunks (
   task_id TEXT NOT NULL REFERENCES upload_tasks(id) ON DELETE CASCADE,
   idx INTEGER NOT NULL,
@@ -1276,19 +1278,22 @@ func (s *Store) ListChunks(ctx context.Context, taskID string) (map[int]ChunkInf
 // TaskProgress 描述一个进行中上传任务的实时进度，供服务端推送（SSE）。
 // TaskProgress describes the live progress of an in-flight upload task for server push (SSE).
 type TaskProgress struct {
-	TaskID       string `json:"taskId"`
-	Name         string `json:"name"`
-	TotalChunks  int    `json:"totalChunks"`
-	Uploaded     int    `json:"uploaded"`
-	Status       string `json:"status"`
+	TaskID      string `json:"taskId"`
+	Name        string `json:"name"`
+	TotalChunks int    `json:"totalChunks"`
+	Uploaded    int    `json:"uploaded"`
+	Status      string `json:"status"`
 }
 
 // ListPendingTaskProgress 返回指定用户的所有 pending 上传任务及其已上传分片数。
 // ListPendingTaskProgress returns all pending upload tasks for a user with their uploaded-chunk counts.
 func (s *Store) ListPendingTaskProgress(ctx context.Context, userID int64) ([]TaskProgress, error) {
-	rows, err := s.DB.QueryContext(ctx, `SELECT t.id, t.name, t.total_chunks, t.status,
-		(SELECT COUNT(*) FROM chunks c WHERE c.task_id = t.id) AS uploaded
-		FROM upload_tasks t WHERE t.user_id = ? AND t.status = 'pending' ORDER BY t.created_at`, userID)
+	rows, err := s.DB.QueryContext(ctx, `SELECT t.id, t.name, t.total_chunks, t.status, COUNT(c.task_id) AS uploaded
+		FROM upload_tasks t
+		LEFT JOIN chunks c ON c.task_id = t.id
+		WHERE t.user_id = ? AND t.status = 'pending'
+		GROUP BY t.id, t.name, t.total_chunks, t.status, t.created_at
+		ORDER BY t.created_at`, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -1338,13 +1343,26 @@ func (s *Store) DeleteUploadTask(ctx context.Context, taskID string) error {
 	if err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, "DELETE FROM chunks WHERE task_id = ?", taskID); err != nil {
+	// Keep the expiration check and deletion in one write transaction. A task can
+	// finish between ListExpiredUploadTasks and this call, and must then be kept.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM chunks
+		WHERE task_id = ? AND EXISTS (SELECT 1 FROM upload_tasks WHERE id = ? AND status = 'pending')`, taskID, taskID); err != nil {
 		tx.Rollback()
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, "DELETE FROM upload_tasks WHERE id = ?", taskID); err != nil {
+	result, err := tx.ExecContext(ctx, "DELETE FROM upload_tasks WHERE id = ? AND status = 'pending'", taskID)
+	if err != nil {
 		tx.Rollback()
 		return err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		tx.Rollback()
+		return err
+	}
+	if count != 1 {
+		tx.Rollback()
+		return ErrNotFound
 	}
 	return tx.Commit()
 }

@@ -56,7 +56,7 @@
 - **限速**：1MB @ 64KB/s 实测 17.9s（令牌桶生效），恢复 0 后 1.8s。
 - **分享原子计数**：maxDownloads=1 时第 2 次匿名下载 403「分享次数已用完」；过期 meta 404 / download 403。
 - **Linux 真机部署实测（202.6.205.59:8022，Ubuntu 24.04 x86_64，无 go/node）**：上传静态 `filebox-linux-amd64`（12MB）→ chmod +x → 启动 18084 → root 200；`/api/brand` 返回含 `maxFileSize`；登录+强制改密 → 上传 complete 200 → 列表可见；秒传协调（同名→conflict、异名→instant）；聚合下载 zip（magic PK、155B）；`migrate-v010-paths` 对运行中数据目录幂等执行（备份 filebox.db.bak-v011 + 0 目录迁移 + success）；SSE 上传进度（上传分片前 uploaded:0 → 后 uploaded:1）。
-- **v012 优化项验证**：① 废弃上传任务定时清理——构造 25h 旧 pending 任务 → `ListExpiredUploadTasks` 命中 → `DeleteUploadTask` 删除（含 chunks）→ 再查为空；② SSE 推送——`GET /api/files/progress/stream` 每秒推送当前用户 pending 任务（taskId/name/totalChunks/uploaded），前端 EventSource 订阅。
+- **v012 优化项验证**：① 废弃上传任务定时清理——构造 25h 旧 pending 任务 → `ListExpiredUploadTasks` 命中 → `DeleteUploadTask` 删除（含 chunks）→ 再查为空；② SSE 推送——`GET /api/files/progress/stream` 每秒推送当前用户 pending 任务（taskId/name/totalChunks/uploaded），前端使用带 Bearer 认证的流式 fetch 订阅。
 - **秒传不落盘**：同文件二次 check 磁盘文件数不增；跨用户不命中（归属隔离）。
 - **回归全绿**：阶段一 26 项（含 TOTP 相关路径的登录/锁定/审计/CLI）无回归。
 

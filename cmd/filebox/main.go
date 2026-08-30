@@ -168,26 +168,44 @@ func runServe(args []string) error {
 	go func() { serverErrors <- httpServer.ListenAndServe() }()
 	// 后台清理：每小时清理超过 24 小时未完成的废弃上传任务及其临时分片目录。
 	// Background cleanup: hourly, remove abandoned upload tasks older than 24 hours and their temp chunk directories.
-	cleanupStop := make(chan struct{})
+	cleanupContext, stopCleanup := context.WithCancel(context.Background())
+	cleanupDone := make(chan struct{})
+	defer func() {
+		stopCleanup()
+		<-cleanupDone
+	}()
 	go func() {
+		defer close(cleanupDone)
 		ticker := time.NewTicker(time.Hour)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-ticker.C:
-				expired, err := db.ListExpiredUploadTasks(context.Background(), 24*time.Hour)
+				expired, err := db.ListExpiredUploadTasks(cleanupContext, 24*time.Hour)
 				if err != nil {
+					if errors.Is(cleanupContext.Err(), context.Canceled) {
+						return
+					}
 					logger.Event("cleanup", "operator=system ip=- command=expire-uploads result=failure reason=%s", err.Error())
 					continue
 				}
+				deletedCount := 0
 				for _, taskID := range expired {
-					_ = db.DeleteUploadTask(context.Background(), taskID)
-					_ = os.RemoveAll(filepath.Join(*dataDir, "tmp", taskID))
+					if err := db.DeleteUploadTask(cleanupContext, taskID); err != nil {
+						if !errors.Is(err, store.ErrNotFound) && !errors.Is(cleanupContext.Err(), context.Canceled) {
+							logger.Event("cleanup", "operator=system ip=- command=expire-upload task=%s result=failure reason=%s", taskID, err.Error())
+						}
+						continue
+					}
+					if err := os.RemoveAll(filepath.Join(*dataDir, "tmp", taskID)); err != nil {
+						logger.Event("cleanup", "operator=system ip=- command=expire-upload task=%s result=failure reason=%s", taskID, err.Error())
+					}
+					deletedCount++
 				}
-				if len(expired) > 0 {
-					logger.Event("cleanup", "operator=system ip=- command=expire-uploads result=success count=%d", len(expired))
+				if deletedCount > 0 {
+					logger.Event("cleanup", "operator=system ip=- command=expire-uploads result=success count=%d", deletedCount)
 				}
-			case <-cleanupStop:
+			case <-cleanupContext.Done():
 				return
 			}
 		}
@@ -198,7 +216,7 @@ func runServe(args []string) error {
 	select {
 	case signalValue := <-signals:
 		logger.Event("shutdown", "operator=system ip=- signal=%s result=graceful", signalValue)
-		close(cleanupStop)
+		stopCleanup()
 		shutdownContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if err := httpServer.Shutdown(shutdownContext); err != nil {
@@ -761,7 +779,11 @@ func envSet(key string) bool { return os.Getenv(key) != "" }
 // flagWasSet reports whether a flag was explicitly provided on the command line.
 func flagWasSet(flags *flag.FlagSet, name string) bool {
 	found := false
-	flags.Visit(func(flag *flag.Flag) { if flag.Name == name { found = true } })
+	flags.Visit(func(flag *flag.Flag) {
+		if flag.Name == name {
+			found = true
+		}
+	})
 	return found
 }
 

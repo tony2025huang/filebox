@@ -9,7 +9,7 @@
       <div class="dir-bar"><div class="breadcrumb"><button class="breadcrumb-link" :class="{ active: !currentDir }" @click="navigateDir('')">{{ t('files.root') }}</button><template v-for="(seg, i) in breadcrumbs" :key="seg"><span class="breadcrumb-sep">/</span><button class="breadcrumb-link" :class="{ active: i === breadcrumbs.length - 1 }" @click="navigateDir(breadcrumbPath(i))">{{ seg }}</button></template></div><button class="secondary-button" @click="openNewFolder"><FolderPlus :size="17" /> {{ t('files.newFolder') }}</button></div>
       <div v-if="childFolders.length" class="folder-list"><div v-for="folder in childFolders" :key="folder.id" class="folder-row"><button class="folder-entry" @click="navigateDir(folder.path)"><Folder :size="17" /> <strong>{{ folder.name }}</strong></button><div class="folder-actions"><button class="icon-button" :title="t('files.renameFolder')" @click="openRenameFolder(folder)"><Pencil :size="15" /></button><button class="icon-button danger-icon" :title="t('files.deleteFolder')" @click="removeFolder(folder)"><Trash2 :size="15" /></button></div></div></div>
       <div class="upload-zone" :class="{ dragging }" @dragover.prevent="dragging = true" @dragleave.prevent="dragging = false" @drop.prevent="handleDrop"><UploadCloud :size="26" /><div><strong>{{ t('files.dropTitle') }}</strong><span>{{ t('files.dropCopy') }}</span></div><button class="secondary-button" @click="fileInput?.click()"><Upload :size="17" /> {{ t('files.choose') }}</button><button class="secondary-button" @click="folderInput?.click()"><FolderUp :size="17" /> {{ t('files.uploadFolder') }}</button><input ref="fileInput" type="file" multiple hidden @change="handleInput" /><input ref="folderInput" type="file" webkitdirectory directory multiple hidden @change="handleFolderInput" /></div>
-      <div class="toolbar"><div class="search-box"><Search :size="17" /><input v-model="searchInput" :placeholder="t('files.searchPlaceholder')" @keyup.enter="search" /><button v-if="searchInput" :title="t('files.clearSearch')" @click="searchInput = ''; search()"><X :size="15" /></button></div><button v-if="selectedIds.size" class="secondary-button batch-download-button" :disabled="batchDownloading" @click="batchDownload"><Archive :size="16" /> {{ t('files.batchDownload', { count: selectedIds.size }) }}</button><label class="check-label md5-toggle"><input v-model="showMd5" type="checkbox" @change="persistMd5" /> {{ t('files.showMd5') }}</label><button class="refresh-button" :title="t('files.refresh')" @click="loadFiles"><RefreshCw :size="17" :class="{ spin: loading }" /></button><span class="result-count">{{ t('common.files', { count: total }) }}</span></div>
+      <div class="toolbar"><div class="search-box"><Search :size="17" /><input v-model="searchInput" :placeholder="t('files.searchPlaceholder')" @keyup.enter="search" /><button v-if="searchInput" :title="t('files.clearSearch')" @click="searchInput = ''; search()"><X :size="15" /></button></div><button v-if="selectedIds.size" class="secondary-button batch-download-button" :disabled="batchDownloading" @click="batchDownload"><Archive :size="16" /> {{ t('files.batchDownload', { count: selectedIds.size }) }}</button><button v-if="batchDownloading" class="icon-button" :title="t('common.cancel')" @click="cancelBatchDownload"><X :size="16" /></button><label class="check-label md5-toggle"><input v-model="showMd5" type="checkbox" @change="persistMd5" /> {{ t('files.showMd5') }}</label><button class="refresh-button" :title="t('files.refresh')" @click="loadFiles"><RefreshCw :size="17" :class="{ spin: loading }" /></button><span class="result-count">{{ t('common.files', { count: total }) }}</span></div>
       <div v-if="notice" class="alert success">{{ notice }}</div><div v-if="error" class="alert error">{{ error }}</div>
       <div class="file-table-wrap"><table class="file-table"><thead><tr><th class="select-col"><input type="checkbox" :checked="allSelected" :aria-label="t('files.selectAll')" @change="toggleSelectAll" /></th><th>{{ t('files.name') }}</th><th>{{ t('files.size') }}</th><th>{{ t('files.type') }}</th><th>{{ t('files.integrity') }}</th><th>{{ t('files.uploadedAt') }}</th><th></th></tr></thead><tbody><tr v-for="file in files" :key="file.id" :class="{ 'row-selected': selectedIds.has(file.id) }"><td class="select-col"><input type="checkbox" :checked="selectedIds.has(file.id)" :aria-label="t('files.selectFile', { name: file.name })" @change="toggleSelect(file.id)" /></td><td><div class="file-title"><span class="file-icon"><component :is="fileIcon(file.mime, file.name)" :size="17" /></span><strong>{{ file.name }}</strong><span v-if="isShared(file)" class="shared-mark" :title="t('files.shared')"><Share2 :size="14" /></span></div></td><td>{{ formatBytes(file.size) }}</td><td><span class="mime-label" :class="{ 'preview-mime': canPreview(file.mime) }">{{ shortMime(file.mime) }}</span></td><td><code v-if="showMd5" class="md5-cell" :title="`MD5 ${file.md5}\nSHA-256 ${file.sha256}`">{{ file.md5 }}</code><span v-else class="hash-label" :title="`MD5 ${file.md5}\nSHA-256 ${file.sha256}`"><CheckCircle2 :size="15" /> {{ t('files.hashes') }}</span></td><td>{{ formatDate(file.createdAt) }}</td><td><div class="row-actions"><button v-if="canPreview(file.mime)" class="icon-button" :title="t('files.preview')" @click="openPreview(file)"><Eye :size="17" /></button><button class="icon-button" :title="t('files.share')" @click="openShare(file)"><Share2 :size="17" /></button><button class="icon-button" :title="t('files.download')" @click="download(file)"><Download :size="17" /></button><button class="icon-button danger-icon" :title="t('files.delete')" @click="remove(file)"><Trash2 :size="17" /></button></div></td></tr></tbody></table><div v-if="!loading && !files.length" class="empty-state"><FolderOpen :size="34" /><strong>{{ keyword ? t('files.noMatch') : t('files.noFiles') }}</strong><span>{{ keyword ? t('files.noMatchCopy') : t('files.noFilesCopy') }}</span></div><div v-if="loading" class="empty-state"><LoaderCircle :size="28" class="spin" /><span>{{ t('files.loading') }}</span></div></div>
       <div v-if="total > pageSize" class="pagination"><button class="secondary-button" :disabled="page === 1" @click="page--; loadFiles()"><ChevronLeft :size="16" /> {{ t('common.previous') }}</button><span>{{ t('common.page', { page }) }}</span><button class="secondary-button" :disabled="page * pageSize >= total" @click="page++; loadFiles()">{{ t('common.next') }} <ChevronRight :size="16" /></button></div><BrandFooter />
@@ -51,6 +51,7 @@ const shareFile = ref(null); const shareForm = ref({ expiresInHours: 24, maxDown
 // Batch-download selection: selectedIds holds the chosen file ids and survives page/search changes.
 const selectedIds = reactive(new Set())
 const batchDownloading = ref(false)
+let batchDownloadController = null
 const allSelected = computed(() => files.value.length > 0 && files.value.every(file => selectedIds.has(file.id)))
 function toggleSelect(id) { if (selectedIds.has(id)) selectedIds.delete(id); else selectedIds.add(id) }
 function toggleSelectAll() { if (allSelected.value) files.value.forEach(file => selectedIds.delete(file.id)); else files.value.forEach(file => selectedIds.add(file.id)) }
@@ -59,15 +60,18 @@ async function batchDownload() {
   if (!ids.length) return
   batchDownloading.value = true
   error.value = ''
+  const controller = new AbortController()
+  batchDownloadController = controller
   try {
-    const response = await fetch('/api/files/batch-download', { method: 'POST', headers: { Authorization: `Bearer ${localStorage.getItem('filebox_token')}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ ids }) })
+    const response = await fetch('/api/files/batch-download', { method: 'POST', headers: { Authorization: `Bearer ${localStorage.getItem('filebox_token')}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ ids }), signal: controller.signal })
     if (!response.ok) { let body = null; try { body = await response.json() } catch {} throw new Error(localizeError({ status: response.status, data: body?.data, backendMessage: body?.message })) }
     const blob = await response.blob()
     const link = document.createElement('a'); link.href = URL.createObjectURL(blob); link.download = 'filebox-batch-download.zip'; link.click(); URL.revokeObjectURL(link.href)
     selectedIds.clear()
     notice.value = t('files.batchDownloadDone', { count: ids.length })
-  } catch (err) { error.value = `${err.message}` } finally { batchDownloading.value = false }
+  } catch (err) { if (err.name !== 'AbortError') error.value = `${err.message}` } finally { if (batchDownloadController === controller) batchDownloadController = null; batchDownloading.value = false }
 }
+function cancelBatchDownload() { batchDownloadController?.abort() }
 const quotaPercent = computed(() => Math.min(100, user.value.quotaBytes ? Math.round((user.value.usedBytes / user.value.quotaBytes) * 100) : 0))
 // 整体上传速率：1s 采样所有进行中上传的合计 loadedBytes，3 秒滑动平均平滑。
 // Overall upload rate: sample the total loadedBytes of active uploads every second and smooth with a 3-second moving average.
@@ -148,7 +152,7 @@ function friendlyError(err) { if (err && (err.name === 'TypeError' || err.messag
 // Upload gate: at most 3 files enter checksum/init concurrently so bulk folder uploads do not
 // exhaust the browser's same-origin connection limit and fail with a misleading network error.
 let uploadInFlight = 0
-function queueFiles(list) { if (list.length) transfersOpen.value = true; const maxSize = brand.maxFileSize || 100 * 1024 * 1024 * 1024; const oversized = list.filter(value => (value.file || value).size > maxSize); const keep = list.filter(value => (value.file || value).size <= maxSize); if (oversized.length) { error.value = t('files.tooManyTooLarge', { count: oversized.length, max: formatBytes(maxSize) }) } if (keep.length > 50 && !window.confirm(t('files.bulkConfirm', { count: keep.length }))) return; keep.forEach(value => { const file = value.file || value; const path = value.relPath || file.webkitRelativePath || file.name; const parts = path.split('/').filter(Boolean); const dirParts = parts.length > 1 ? parts.slice(0, -1) : []; if (dirParts.length > 1) dirParts.shift(); const base = currentDir.value ? currentDir.value + '/' : ''; const relDir = dirParts.length ? dirParts.join('/') : ''; const item = { id: `${Date.now()}-${Math.random()}-${file.name}`, file, relPath: path !== file.name ? path : '', dir: relDir ? `${base}${relDir}` : base.replace(/\/$/, ''), progress: 0, loadedBytes: 0, status: t('files.uploadPreparing'), taskId: '', uploaded: [], paused: false, chunksTotal: 0, chunkSize: 0, error: '', failed: false, canContinue: false, running: false, sha256: '', pending: new Set(), controllers: new Map(), resolve: '' }; uploads.value.push(item); runGated(item) }) }
+function queueFiles(list) { if (list.length) transfersOpen.value = true; const configuredMax = Number(brand.maxFileSize); const maxSize = Number.isFinite(configuredMax) && configuredMax > 0 ? configuredMax : 100 * 1024 * 1024 * 1024; const oversized = list.filter(value => (value.file || value).size > maxSize); const keep = list.filter(value => (value.file || value).size <= maxSize); if (oversized.length) { error.value = t('files.tooManyTooLarge', { count: oversized.length, max: formatBytes(maxSize) }) } if (keep.length > 50 && !window.confirm(t('files.bulkConfirm', { count: keep.length }))) return; keep.forEach(value => { const file = value.file || value; const path = value.relPath || file.webkitRelativePath || file.name; const parts = path.split('/').filter(Boolean); const dirParts = parts.length > 1 ? parts.slice(0, -1) : []; if (dirParts.length > 1) dirParts.shift(); const base = currentDir.value ? currentDir.value + '/' : ''; const relDir = dirParts.length ? dirParts.join('/') : ''; const item = { id: `${Date.now()}-${Math.random()}-${file.name}`, file, relPath: path !== file.name ? path : '', dir: relDir ? `${base}${relDir}` : base.replace(/\/$/, ''), progress: 0, loadedBytes: 0, status: t('files.uploadPreparing'), taskId: '', uploaded: [], paused: false, chunksTotal: 0, chunkSize: 0, error: '', failed: false, canContinue: false, running: false, sha256: '', pending: new Set(), controllers: new Map(), resolve: '' }; uploads.value.push(item); runGated(item) }) }
 async function runGated(item) { if (item.paused || item.failed) return; while (uploadInFlight >= 3) { if (item.paused || item.failed) return; await new Promise(resolve => setTimeout(resolve, 120)) } uploadInFlight++; try { await startUpload(item) } finally { uploadInFlight-- } }
 function wakeWorkers() { const wake = workerWake; workerWake = null; wake?.() }
 function removeQueued(item) { for (let i = chunkQueue.length - 1; i >= 0; i--) if (chunkQueue[i].item === item) chunkQueue.splice(i, 1) }
@@ -214,11 +218,11 @@ function fileIcon(mime = '', name = '') {
   if (value.startsWith('audio/') || ['mp3', 'wav', 'ogg', 'flac', 'm4a', 'aac'].includes(ext)) return Music
   if (value === 'application/pdf' || ext === 'pdf') return FileText
   if (value === 'application/json' || ['json', 'jsonl'].includes(ext)) return FileJson
-  if (['zip', 'rar', '7z', 'tar', 'gz', 'bz2', 'xz'].includes(ext)) return FileArchive
+  if (['application/zip', 'application/x-7z-compressed', 'application/x-rar-compressed', 'application/x-tar', 'application/gzip', 'application/x-bzip2', 'application/x-xz'].includes(value) || ['zip', 'rar', '7z', 'tar', 'gz', 'bz2', 'xz'].includes(ext)) return FileArchive
   // 代码与表格类优先于通用 text 分支，避免被 text/ 提前命中。
   // Code and spreadsheet extensions are checked before the generic text branch.
-  if (['js', 'ts', 'jsx', 'tsx', 'vue', 'css', 'scss', 'go', 'rs', 'py', 'java', 'c', 'h', 'cpp', 'sh', 'bat', 'ps1', 'sql', 'html', 'htm', 'xml', 'yaml', 'yml', 'toml', 'ini', 'conf'].includes(ext)) return FileCode
-  if (['xls', 'xlsx', 'tsv'].includes(ext) || value === 'text/csv' || ['csv'].includes(ext)) return FileSpreadsheet
+  if (['application/javascript', 'text/javascript', 'application/x-sh', 'application/xml', 'text/css', 'application/sql', 'application/x-yaml'].includes(value) || ['js', 'ts', 'jsx', 'tsx', 'vue', 'css', 'scss', 'go', 'rs', 'py', 'java', 'c', 'h', 'cpp', 'sh', 'bat', 'ps1', 'sql', 'html', 'htm', 'xml', 'yaml', 'yml', 'toml', 'ini', 'conf'].includes(ext)) return FileCode
+  if (['application/vnd.ms-excel', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'].includes(value) || ['xls', 'xlsx', 'tsv'].includes(ext) || value === 'text/csv' || ['csv'].includes(ext)) return FileSpreadsheet
   if (value.startsWith('text/') || ['txt', 'md', 'log', 'csv'].includes(ext)) return FileText
   if (['doc', 'docx', 'rtf', 'odt'].includes(ext)) return FileText
   if (['ppt', 'pptx', 'odp'].includes(ext)) return FileText
@@ -267,27 +271,75 @@ async function logout() { try { await api('/api/auth/logout', { method: 'POST' }
 function formatBytes(bytes = 0) { if (bytes < 1024) return `${bytes} B`; const units = ['KB', 'MB', 'GB', 'TB']; let value = bytes; let unit = -1; do { value /= 1024; unit++ } while (value >= 1024 && unit < units.length - 1); return `${value.toFixed(value >= 10 ? 0 : 1)} ${units[unit]}` }
 function formatDate(value) { return value ? new Date(value).toLocaleString(currentLocale.value === 'en' ? 'en-US' : currentLocale.value, { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '-' }
 function shortMime(value = '') { return value.split('/').pop()?.toUpperCase() || 'FILE' }
-// progressSource 通过 SSE 订阅服务端推送的进行中上传进度，用于刷新后恢复/多标签同步。
-// progressSource subscribes to server-pushed upload progress for refresh recovery and multi-tab sync.
-let progressSource = null
-function connectProgressStream() {
-  try { progressSource?.close() } catch { /* ignore */ }
-  if (!localStorage.getItem('filebox_token')) return
-  progressSource = new EventSource('/api/files/progress/stream')
-  progressSource.onmessage = event => {
-    try {
-      const tasks = JSON.parse(event.data)
-      for (const task of tasks) {
-        const item = uploads.value.find(entry => entry.taskId === task.taskId)
-        if (!item) continue
-        const ratio = task.totalChunks ? task.uploaded / task.totalChunks : 0
-        if (ratio > 0) { item.progress = Math.max(item.progress, Math.round(25 + ratio * 75)); syncLoadedBytes(item) }
-      }
-    } catch { /* ignore malformed events */ }
+// progressController keeps the authenticated SSE fetch cancellable on navigation or logout.
+// progressController 让带认证的 SSE fetch 可在离开页面或退出登录时取消。
+let progressController = null
+function applyProgress(tasks) {
+  if (!Array.isArray(tasks)) return
+  for (const task of tasks) {
+    const item = uploads.value.find(entry => entry.taskId === task.taskId)
+    if (!item) continue
+    const ratio = task.totalChunks ? task.uploaded / task.totalChunks : 0
+    if (ratio > 0) { item.progress = Math.max(item.progress, Math.round(25 + ratio * 75)); syncLoadedBytes(item) }
   }
-  progressSource.onerror = () => { try { progressSource?.close() } catch { /* ignore */ } progressSource = null }
 }
-function closeProgressStream() { try { progressSource?.close() } catch { /* ignore */ } progressSource = null }
+function handleProgressEvent(block) {
+  const lines = block.split(/\r?\n/)
+  const eventName = lines.find(line => line.startsWith('event:'))?.slice(6).trim()
+  const data = lines.filter(line => line.startsWith('data:')).map(line => line.slice(5).trimStart()).join('\n')
+  if (!data) return
+  try {
+    const payload = JSON.parse(data)
+    if (eventName === 'auth-error' || payload?.status === 401) {
+      clearSession()
+      if (router.currentRoute.value.path !== '/login') router.push({ path: '/login', query: { redirect: router.currentRoute.value.fullPath } })
+      return
+    }
+    applyProgress(payload)
+  } catch { /* ignore malformed events */ }
+}
+function connectProgressStream() {
+  closeProgressStream()
+  const token = localStorage.getItem('filebox_token')
+  if (!token) return
+  const controller = new AbortController()
+  progressController = controller
+  void (async () => {
+    try {
+      const response = await fetch('/api/files/progress/stream', { headers: { Authorization: `Bearer ${token}` }, signal: controller.signal })
+      if (!response.ok) {
+        if (response.status === 401) {
+          clearSession()
+          if (router.currentRoute.value.path !== '/login') router.push({ path: '/login', query: { redirect: router.currentRoute.value.fullPath } })
+        } else if (response.status === 403) {
+          let body = null
+          try { body = await response.json() } catch { /* ignore non-JSON response */ }
+          if (body?.data?.code === 'PASSWORD_CHANGE_REQUIRED') router.push('/change-password')
+        }
+        return
+      }
+      if (!response.body) return
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+      for (;;) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        const blocks = buffer.split(/\r?\n\r?\n/)
+        buffer = blocks.pop() || ''
+        blocks.forEach(handleProgressEvent)
+      }
+      buffer += decoder.decode()
+      if (buffer.trim()) handleProgressEvent(buffer)
+    } catch (err) {
+      if (err.name !== 'AbortError') return
+    } finally {
+      if (progressController === controller) progressController = null
+    }
+  })()
+}
+function closeProgressStream() { progressController?.abort(); progressController = null }
 onMounted(() => { loadMe(); loadFiles(); loadFolders(); rateTimer = setInterval(sampleOverallRate, 1000); connectProgressStream() })
-onBeforeUnmount(() => { if (rateTimer) clearInterval(rateTimer); closeProgressStream(); uploads.value.forEach(item => item.controllers.forEach(controller => controller.abort())); if (previewUrl.value) URL.revokeObjectURL(previewUrl.value) })
+onBeforeUnmount(() => { if (rateTimer) clearInterval(rateTimer); closeProgressStream(); cancelBatchDownload(); uploads.value.forEach(item => item.controllers.forEach(controller => controller.abort())); if (previewUrl.value) URL.revokeObjectURL(previewUrl.value) })
 </script>
