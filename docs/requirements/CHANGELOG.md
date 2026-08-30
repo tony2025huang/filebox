@@ -1,5 +1,14 @@
 # Requirement Change Log
 
+## 2026-08-30 - v013（三轮修复 + 15 项需求批次）
+
+- **第三轮安全加固（G1-G14，commit `7032402`）**：SFTP 指纹严格解码（拒绝 base64 padding-bit 损坏、常量时间比较）；sharePreview 匿名限速 30/min；collectionUploadChunk 补 owner 只读检查；覆盖上传原子替换（旧文件保留至 complete 成功，消除路径复用竞态）；RenameFolder 预检+失败反向修正+per-user 目录锁；限速器三桶容量上限 10000；backup 外层 0600+O_EXCL、restore 解压限额+拒绝重复条目；`--jwt-secret` 空值/短密钥校验；keys.json 明文警告；syncLocks 清理；前端 api() 统一 401 跳登录。
+- **v013 需求批次（commit `e0b0051`/`3712dfb`/`080d21c`，依 `docs/requirements/TODO-v013.md`）**：
+  - P0：#8 分享次数双提示去重；#1 传输失败提示 title 完整显示；#9 收集配额错误脱敏（`COLLECTION_QUOTA_EXCEEDED` 不泄露明细）；#4 同步目录上级导航（SFTP 根 `/` + filebox 逐级上级）；#2 传输记录 sessionStorage 持久化 + 重选文件续传。
+  - P1：#3 同步源支持选文件（sourceKind）；#6 表单控件统一 40px；#10 外部上传日志带 owner/目录（token 脱敏）；#11 收集编辑 `PUT /api/collections/{id}`（到期/次数/上限，撤销不可编辑、下调须≥已用）；#12/13/14 AuthenticatedTopbar 共享顶栏统一全部视图。
+  - P2：#5 filebox↔filebox 同步（kind/url + HTTP adapter + SSRF 防护，MVP）；#7 批量分享聚合链接（share_groups + `/g/:token` 公开页 + 单文件/ZIP 匿名下载）；#15 SQLite WAL + synchronous=NORMAL 速率优化。
+- DSH 复核：go test 全量 + go test -race（httpapi/store）全绿；实测聚合分享（meta/单文件/ZIP）、收集配额脱敏、收集编辑均通过。
+
 ## 2026-08-30 - v012 批次 G（功能 11：同步功能 filebox↔sftp）
 
 - **目标系统（remote_systems）**：独立配置（名称/主机/端口/用户名/密码或密钥含 passphrase），凭据 AES-GCM 加密存储（密钥派生自 JWTSecret）；CRUD；被任务引用时拒绝删除；`/systems/{id}/browse` 远端目录浏览、`/mkdir` 建目录（复用已存凭据）。

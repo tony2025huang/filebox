@@ -1,6 +1,6 @@
 # FileBox Requirement State
 
-Updated: 2026-08-30 (v012 批次 B：功能 3/4/10 已交付；功能 6 设计已确认待开发)
+Updated: 2026-08-30 (v013：三轮安全加固 + 15 项需求全部交付)
 
 | Requirement | State | Notes |
 |---|---|---|

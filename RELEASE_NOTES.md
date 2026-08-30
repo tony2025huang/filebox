@@ -4,6 +4,15 @@
 
 [English](RELEASE_NOTES.en.md)
 
+## v0.2.0-v013（修复与新功能批次）发布说明
+
+v013 是三轮修复 + 15 项需求批次（codex 开发 + dsh 复核测试），随 v0.2.0 单二进制发布：
+
+- **安全加固（第三轮 G1-G14）**：SFTP 指纹严格解码（拒绝 base64 padding-bit 损坏指纹，常量时间比较）；sharePreview 匿名限速；collectionUploadChunk 只读检查；覆盖上传原子替换（旧文件保留到 complete 成功）；RenameFolder 预检+失败反向修正+目录锁；限速器容量上限；backup 0600 权限/restore 解压限额；`--jwt-secret` 空值/过短校验；前端统一 401 跳登录。
+- **P0 缺陷修复**：分享次数用完重复提示去重（单错误出口）；传输面板失败提示 title 悬浮完整显示；收集配额错误脱敏（`COLLECTION_QUOTA_EXCEEDED`，不泄露配额明细）；同步目录选择支持上级导航（SFTP 根 `/` + filebox 逐级上级）；传输记录 sessionStorage 持久化 + 重选文件续传。
+- **P1 体验**：同步源支持选择文件；表单控件统一 40px 高度；外部上传日志带 owner/目录（token 脱敏）；收集编辑 `PUT /api/collections/{id}`（到期/次数/单文件上限）；共享顶栏组件 AuthenticatedTopbar 统一全部视图（文件/分享/同步/日志/收集/管理后台）。
+- **P2 新功能**：filebox↔filebox 同步（kind/url + HTTP adapter，SSRF 防护，MVP 限制见提交说明）；批量分享聚合链接（share_groups 表 + `/g/:token` 公开页 + 单文件/选中 ZIP 匿名下载）；SQLite WAL + synchronous=NORMAL 速率优化。
+
 ## v0.2.0-v012（新功能批次）发布说明
 
 v012 是 11 项新功能需求批次（codex 开发 + dsh 复核测试），随 v0.2.0 单二进制发布：

@@ -4,6 +4,15 @@ Stage 2 release notes
 
 [中文](RELEASE_NOTES.md)
 
+## v0.2.0-v013 (fixes and new features) release notes
+
+v013 is the batch of three fix rounds plus 15 feature requests (developed by codex, re-verified by dsh), released in the v0.2.0 single binary:
+
+- **Security hardening (round 3, G1-G14)**: strict SFTP fingerprint decoding (rejects base64 padding-bit-corrupted pins, constant-time compare); sharePreview anonymous rate limit; collectionUploadChunk read-only check; atomic overwrite upload (old file kept until complete succeeds); RenameFolder pre-check + rollback + per-directory lock; rate-limiter capacity cap; backup 0600 permissions / restore extraction limits; `--jwt-secret` empty/short validation; unified frontend 401 redirect.
+- **P0 defect fixes**: deduplicated share-exhausted message (single error output); transfer-panel failure tips get `title` tooltip for full text; collection quota errors sanitized (`COLLECTION_QUOTA_EXCEEDED`, no quota details leaked); sync directory picker supports navigating up (SFTP root `/` + filebox per-level parent); transfer records persisted to sessionStorage with re-select resume.
+- **P1 UX**: sync source can select files; form controls unified to 40px; external upload logs include owner/dir (token masked); collection editing `PUT /api/collections/{id}` (expiry/count/per-file limit); shared `AuthenticatedTopbar` component unifies all views (files/shares/sync/logs/collections/admin).
+- **P2 new features**: filebox↔filebox sync (kind/url + HTTP adapter with SSRF protection; MVP limits noted in the commit); batch-share aggregate link (share_groups table + `/g/:token` public page + single-file/selected ZIP anonymous download); SQLite WAL + synchronous=NORMAL performance optimization.
+
 ## v0.2.0-v012 (new-feature batch) release notes
 
 v012 is the batch of 11 new feature requests (developed by codex, re-verified and tested by dsh), released in the v0.2.0 single binary:
