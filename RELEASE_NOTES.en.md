@@ -53,6 +53,13 @@ Stage 2 release notes
 
 - Admin statistics add the active share count and cumulative share downloads alongside users/files/bytes/disk.
 
+### User-feedback batch (delivered with v0.2.0)
+
+- The login page no longer shows the "default admin: admin / admin123" hint (removed from all three dictionaries).
+- A topbar "Transfers" button opens an independent transfer drawer separating uploads and downloads; downloads now stream with progress.
+- The file-list integrity column shows `md5` directly by default, with a persistent "Show MD5" toolbar switch.
+- Both the folder-picker button and directory drag-and-drop upload folders; invalid drops (such as empty folders) show a clear message instead of a misleading network error.
+
 ### Stage 1 features preserved
 
 Login/logout, file CRUD, quotas, dual hashes, disk protection, conflict overwrite/rename, filename validation, audit logs, login locking, TOTP, IP allowlists, branding, multilingual UI, theme color, forced password change, maintenance CLI, service logging, and service/reverse-proxy deployment all remain available and pass regression testing.

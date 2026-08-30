@@ -41,3 +41,7 @@ Updated: 2026-08-29 (Stage 2 delivered as v0.2.0)
 | Stage 2 upload rate limiting | done | Per-user token bucket (`golang.org/x/time/rate`), configurable `uploadRateLimit` in bytes/sec (0 = unlimited), applied before chunk writes. |
 | Stage 2 registration switch | done | `settings.registerEnabled` (default off, `--register-enabled` first-run seed), `POST /api/auth/register` with password policy and direct login, public `brand.registerEnabled`, login-page entry. |
 | Stage 2 system statistics | done | Admin stats include active share count and cumulative share downloads alongside users/files/bytes/disk. |
+| Login page hides default credentials (user feedback) | done | The `admin / admin123` hint was removed from the login page and from all three dictionaries. |
+| Transfer progress panel (user feedback) | done | A topbar badge opens a right-side drawer separating uploads and downloads; downloads stream with progress, uploads keep pause/resume/retry. |
+| MD5 column with display toggle (user feedback) | done | The integrity column shows `file.md5` directly by default with a localStorage-persisted toolbar switch. |
+| Directory upload entries (user feedback) | done | Both the folder-picker button and directory drag-and-drop upload folders; empty/invalid drops show a clear Chinese message instead of a network error. |

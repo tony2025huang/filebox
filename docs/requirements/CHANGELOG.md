@@ -1,5 +1,13 @@
 # Requirement Change Log
 
+## 2026-08-30 - 用户实测反馈批次（并入阶段二 v0.2.0 交付）
+
+- 登录页不再展示初始默认账号提示：移除 LoginView 的 `login-foot` 渲染，并删除 zh-CN/zh-TW/en 三字典中的 `login.defaultAdmin` 键（不再引用，无残留）。
+- 新增独立传输面板：顶栏「传输」按钮（带进行中数量角标）展开右侧抽屉，区分「上传」与「下载」两组；上传项保留暂停/继续/重试，下载项新增流式进度（按 Content-Length 计算百分比），面板可随时展开/收起。
+- 文件列表 md5 直接展示 + 开关：完整性列默认直接显示 `file.md5` 值（悬停 title 含完整 MD5/SHA-256）；工具栏「显示 MD5」勾选开关控制该列展示方式，选择持久化到 `localStorage(filebox_show_md5)`，默认显示。
+- 上传目录入口补齐 + 拖拽容错：点击「上传文件夹」与拖拽目录两条入口均走目录上传（webkitdirectory / webkitGetAsEntry 递归，回退 webkitRelativePath）；拖拽内容不含可上传文件（如空目录）时给出明确中文提示「拖拽内容不包含可上传的文件」，不再静默；上传/下载错误区分真实网络失败（映射「网络连接失败」）与业务错误，避免误导。
+- 新建用户流程复核：按钮→表单→提交→API→列表刷新的前端链路完整，无 JS 错误；后端 `POST /api/admin/users` 已由 DSH 用例（S04/S05/F500，201）覆盖验证。（用户初始「无反应」为浏览器缓存旧页面所致，非代码缺陷。）
+
 ## 2026-08-29 - Stage 2 (v0.2.0) batches
 
 ### Batch A - resumable chunked upload, instant upload, folder upload (backend)
