@@ -39,6 +39,18 @@ import (
 
 const version = "dev"
 
+// restore 解压限额：防止压缩炸弹耗尽磁盘（条目数 / 单文件 / 总量）。
+// Restore extraction limits guard against decompression bombs exhausting disk (entries / single file / total).
+const (
+	restoreMaxEntries     = 200000
+	restoreMaxSingleBytes = 200 << 30 // 200 GiB
+	restoreMaxTotalBytes  = 4 << 40   // 4 TiB
+)
+
+// minJWTSecretBytes 是 --jwt-secret / FILEBOX_JWT_SECRET 的最小长度，空或过短直接拒绝。
+// minJWTSecretBytes is the minimum length for --jwt-secret / FILEBOX_JWT_SECRET; empty or too short is rejected.
+const minJWTSecretBytes = 16
+
 type cliFailure struct {
 	code    int
 	err     error
@@ -492,17 +504,35 @@ func existingJWTSecret(dataDir string) (string, error) {
 	return "", err
 }
 
+// validateJWTSecret 拒绝空串与过短的 JWT 密钥（空串会静默退化成极弱的 HMAC key）。
+// validateJWTSecret rejects empty and too-short JWT secrets (an empty string silently becomes a degenerate HMAC key).
+func validateJWTSecret(secret string) error {
+	if secret == "" {
+		return errors.New("JWT secret must not be empty")
+	}
+	if len([]byte(secret)) < minJWTSecretBytes {
+		return fmt.Errorf("JWT secret must be at least %d bytes (got %d)", minJWTSecretBytes, len([]byte(secret)))
+	}
+	return nil
+}
+
 // resolveJWTSecret 按优先级解析 JWT 签名密钥：
 // 显式 --jwt-secret > FILEBOX_JWT_SECRET > <dataDir>/config/secrets.json > 首次运行生成（仅全新数据目录）。
 // resolveJWTSecret resolves the JWT signing secret with this priority:
 // explicit --jwt-secret > FILEBOX_JWT_SECRET > <dataDir>/config/secrets.json > first-run generation (new data dirs only).
 func resolveJWTSecret(dataDir string, flagSet, envSet bool, explicitValue string, allowGenerate bool) (string, string, error) {
 	if flagSet || envSet {
+		if err := validateJWTSecret(explicitValue); err != nil {
+			return "", "", fmt.Errorf("invalid JWT secret: %w", err)
+		}
 		return explicitValue, "flag-or-env", nil
 	}
 	secretFile := filepath.Join(dataDir, "config", "secrets.json")
 	payload, readErr := readSecretsFile(secretFile)
 	if readErr == nil {
+		if payload.JWTSecret == "" {
+			return "", "", fmt.Errorf("JWT secret in %s is empty: re-run with --jwt-secret or recreate the file", secretFile)
+		}
 		return payload.JWTSecret, "secrets.json", nil
 	}
 	if !os.IsNotExist(readErr) {
@@ -705,7 +735,14 @@ func runAdminBackup(args []string) int {
 	if manifest.KeysEncrypted {
 		fmt.Fprintln(os.Stdout, "keys.json encrypted with AES-256-GCM (PBKDF2 from --passphrase-file)")
 	} else {
-		fmt.Fprintln(os.Stdout, "keys.json is plaintext; use --passphrase-file or a secure channel for production backups")
+		// G12：明文备份必须醒目提示——归档内含明文 JWT secret，泄露归档等于泄露全部凭据。
+		// G12: plaintext backups need a prominent warning — the archive holds the raw JWT
+		// secret, so losing the archive means losing every credential derived from it.
+		fmt.Fprintf(os.Stderr, "\n!!! WARNING: keys.json is stored in PLAINTEXT inside the archive !!!\n")
+		fmt.Fprintf(os.Stderr, "!!! The archive contains your raw JWT signing secret (jwt fingerprint %s) !!!\n", manifest.JWTFingerprint)
+		fmt.Fprintf(os.Stderr, "!!! Anyone with this archive can forge sessions and decrypt sync credentials. !!!\n")
+		fmt.Fprintf(os.Stderr, "!!! PRODUCTION MUST use --passphrase-file to encrypt keys.json and keep the archive on a secure channel. !!!\n")
+		fmt.Fprintf(os.Stderr, "!!! The manifest marks this archive as unencrypted (keysEncrypted=false). !!!\n\n")
 	}
 	return 0
 }
@@ -772,8 +809,16 @@ func buildBackupArchive(dataDir, outPath, secret, passphrase string) (backupMani
 	if err != nil {
 		return manifest, err
 	}
-	tmp := outPath + ".tmp"
-	file, err := os.Create(tmp)
+	// 外层归档使用随机临时名 + O_EXCL：固定 .tmp 名可能被符号链接劫持，O_EXCL 保证
+	// 目标不存在；权限 0600，防止其他本地用户读取含密钥的备份文件。
+	// The outer archive uses a random temp name with O_EXCL (a fixed .tmp name could be
+	// symlinked) and 0600 permissions so other local users cannot read the key-bearing backup.
+	suffix := make([]byte, 8)
+	if _, err := rand.Read(suffix); err != nil {
+		return manifest, err
+	}
+	tmp := outPath + ".tmp-" + hex.EncodeToString(suffix)
+	file, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return manifest, err
 	}
@@ -872,7 +917,14 @@ func runAdminRestore(args []string) int {
 	defer archive.Close()
 	target := filepath.Clean(*dataDir)
 	timestamp := time.Now().UTC().Format("20060102T150405")
-	staging := target + ".staging-" + timestamp
+	stagingSuffix := make([]byte, 8)
+	if _, err := rand.Read(stagingSuffix); err != nil {
+		fmt.Fprintf(os.Stderr, "generate staging suffix: %v\n", err)
+		return 1
+	}
+	// staging 使用随机名，避免可预测的固定名被符号链接劫持。
+	// The staging directory uses a random name so a predictable fixed name cannot be symlinked.
+	staging := target + ".staging-" + timestamp + "-" + hex.EncodeToString(stagingSuffix)
 	if err := os.MkdirAll(staging, 0o700); err != nil {
 		fmt.Fprintf(os.Stderr, "create staging directory: %v\n", err)
 		return 1
@@ -886,6 +938,7 @@ func runAdminRestore(args []string) int {
 	defer gz.Close()
 	tr := tar.NewReader(gz)
 	extracted := map[string]bool{}
+	var extractedCount, extractedBytes int64
 	for {
 		header, err := tr.Next()
 		if err == io.EOF {
@@ -907,23 +960,51 @@ func runAdminRestore(args []string) int {
 			fmt.Fprintf(os.Stderr, "archive entry %q has unsupported type\n", name)
 			return 1
 		}
+		if extracted[name] {
+			fmt.Fprintf(os.Stderr, "archive contains duplicate entry %q\n", name)
+			return 1
+		}
+		if extractedCount >= restoreMaxEntries {
+			fmt.Fprintf(os.Stderr, "archive exceeds the entry limit (%d)\n", restoreMaxEntries)
+			return 1
+		}
+		if header.Size < 0 || header.Size > restoreMaxSingleBytes {
+			fmt.Fprintf(os.Stderr, "archive entry %q is too large (%d bytes)\n", name, header.Size)
+			return 1
+		}
+		if extractedBytes+header.Size > restoreMaxTotalBytes {
+			fmt.Fprintf(os.Stderr, "archive exceeds the total size limit (%d bytes)\n", restoreMaxTotalBytes)
+			return 1
+		}
 		dest := filepath.Join(staging, filepath.FromSlash(name))
 		if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 			fmt.Fprintf(os.Stderr, "create directory for %q: %v\n", name, err)
 			return 1
 		}
-		out, err := os.Create(dest)
+		// O_EXCL：目标必须不存在，防止归档条目覆盖既有 staging 文件或符号链接。
+		// O_EXCL requires a fresh target so an entry cannot overwrite an existing file or symlink.
+		out, err := os.OpenFile(dest, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "extract %q: %v\n", name, err)
 			return 1
 		}
-		if _, err := io.Copy(out, tr); err != nil {
+		written, copyErr := io.Copy(out, tr)
+		if copyErr != nil {
 			out.Close()
-			fmt.Fprintf(os.Stderr, "extract %q: %v\n", name, err)
+			fmt.Fprintf(os.Stderr, "extract %q: %v\n", name, copyErr)
 			return 1
 		}
-		out.Close()
+		if closeErr := out.Close(); closeErr != nil {
+			fmt.Fprintf(os.Stderr, "extract %q: %v\n", name, closeErr)
+			return 1
+		}
+		if written != header.Size {
+			fmt.Fprintf(os.Stderr, "extract %q: size mismatch (got %d, want %d)\n", name, written, header.Size)
+			return 1
+		}
 		extracted[name] = true
+		extractedCount++
+		extractedBytes += header.Size
 	}
 	manifestData, err := os.ReadFile(filepath.Join(staging, "manifest.json"))
 	if err != nil {

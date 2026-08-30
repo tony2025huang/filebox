@@ -470,6 +470,15 @@ func (s *Server) collectionUploadChunk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	expectedSize := expectedUploadChunkSize(task, index)
+	// 只读时段检查：收集者处于只读窗口时拒绝写临时分片（与 upload-init 的拦截一致），
+	// 检查放在任何磁盘/数据库写入之前，避免留下无文件的分片记录。
+	// Read-only check: refuse to write temp chunks while the collector is in a read-only window
+	// (consistent with the upload-init guard); it runs before any disk/database write so no
+	// orphan chunk records are left behind.
+	if s.userReadOnly(owner) {
+		s.collectionFailure(w, r, task.Name, "read_only", http.StatusForbidden, "收集者处于只读时段，暂不接受上传", map[string]string{"code": "READ_ONLY"})
+		return
+	}
 	if r.ContentLength >= 0 && r.ContentLength > expectedSize {
 		s.collectionFailure(w, r, task.Name, "too_large", http.StatusRequestEntityTooLarge, "上传内容超过声明大小", nil)
 		return
@@ -524,7 +533,6 @@ func (s *Server) collectionUploadChunk(w http.ResponseWriter, r *http.Request) {
 		s.collectionFailure(w, r, task.Name, "save_failed", http.StatusInternalServerError, "保存上传分片失败", nil)
 		return
 	}
-	_ = owner
 	writeData(w, http.StatusOK, "分片上传成功", map[string]any{"index": index, "size": written})
 }
 
@@ -708,15 +716,17 @@ func (s *Server) collectionUploadComplete(w http.ResponseWriter, r *http.Request
 		_ = os.RemoveAll(tmpDir)
 	}()
 	fileRecord := store.File{UserID: task.UserID, Name: task.Name, StoredName: storedName, Size: task.Size, Mime: task.Mime, SHA256: shaHex, MD5: md5Hex, StoragePath: task.StorageDir}
-	completed, err := s.store.CompleteCollectionFileWithPlacement(r.Context(), task, fileRecord, func(storagePath string) error {
+	completed, err := s.store.CompleteCollectionFileWithPlacement(r.Context(), task, fileRecord, func(storagePath string, replace bool) error {
 		finalPath = filepath.Join(s.config.DataDir, storagePath)
 		if err := os.MkdirAll(filepath.Dir(finalPath), 0o755); err != nil {
 			return err
 		}
-		if _, err := os.Stat(finalPath); err == nil {
-			return fmt.Errorf("storage path already exists")
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return err
+		if !replace {
+			if _, err := os.Stat(finalPath); err == nil {
+				return fmt.Errorf("storage path already exists")
+			} else if !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
 		}
 		return os.Rename(mergedPath, finalPath)
 	}, task.Name, task.Remark)

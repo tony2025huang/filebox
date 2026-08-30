@@ -5,12 +5,12 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -82,6 +82,10 @@ var themeColorPattern = regexp.MustCompile(`^#[0-9a-fA-F]{3}([0-9a-fA-F]{3})?$`)
 type Store struct {
 	DB      *sql.DB
 	DataDir string
+	// folderMu/folderLocks 按用户串行化目录重命名，防止并发重命名的路径改写交错。
+	// folderMu/folderLocks serialize folder renames per user so concurrent renames cannot interleave path rewrites.
+	folderMu    sync.Mutex
+	folderLocks map[int64]*sync.Mutex
 }
 
 // User 表示账户、角色、配额和登录锁定状态。
@@ -1408,6 +1412,9 @@ func (s *Store) BatchDeleteFiles(ctx context.Context, fileIDs []int64, userID in
 func (s *Store) CreateUploadTask(ctx context.Context, task UploadTask) error {
 	// CreateUploadTask 在事务中计算现有、待上传和覆盖替换占用，确保配额预留不超限。
 	// CreateUploadTask transactionally accounts for existing, pending, and replaced bytes before reserving quota.
+	// 覆盖上传不在任务创建时删除旧文件：旧内容保留到 complete 成功，上传失败/放弃不丢数据（G6）。
+	// Overwrite uploads never delete the old file at task creation: it survives until complete
+	// succeeds, so aborted or failed uploads cannot lose the previous content (G6).
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -1421,7 +1428,6 @@ func (s *Store) CreateUploadTask(ctx context.Context, task UploadTask) error {
 		tx.Rollback()
 		return err
 	}
-	var oldDiskPath string
 	if task.Resolve == "overwrite" {
 		_ = tx.QueryRowContext(ctx, "SELECT size FROM files WHERE user_id = ? AND status = 'ready' AND storage_path = ?", task.UserID, filepath.Join(task.StorageDir, task.Name)).Scan(&replacingSize)
 	}
@@ -1429,42 +1435,13 @@ func (s *Store) CreateUploadTask(ctx context.Context, task UploadTask) error {
 		tx.Rollback()
 		return &QuotaError{UsedBytes: used, QuotaBytes: quota, FileSize: task.Size}
 	}
-	if task.Resolve == "overwrite" {
-		var oldID, oldSize int64
-		var oldPath string
-		err := tx.QueryRowContext(ctx, "SELECT id, size, storage_path FROM files WHERE user_id = ? AND status = 'ready' AND storage_path = ?", task.UserID, filepath.Join(task.StorageDir, task.Name)).Scan(&oldID, &oldSize, &oldPath)
-		if err == nil {
-			if _, err := tx.ExecContext(ctx, "DELETE FROM files WHERE id = ?", oldID); err != nil {
-				tx.Rollback()
-				return err
-			}
-			if _, err := tx.ExecContext(ctx, "UPDATE users SET used_bytes = MAX(0, used_bytes - ?), updated_at = ? WHERE id = ?", oldSize, time.Now().UTC().Format(time.RFC3339), task.UserID); err != nil {
-				tx.Rollback()
-				return err
-			}
-			oldDiskPath = filepath.Join(s.DataDir, oldPath)
-		} else if !errors.Is(err, sql.ErrNoRows) {
-			tx.Rollback()
-			return err
-		}
-	}
 	now := time.Now().UTC().Format(time.RFC3339)
 	_, err = tx.ExecContext(ctx, "INSERT INTO upload_tasks(id, user_id, collection_id, remark, name, size, mime, chunk_size, total_chunks, status, storage_dir, resolve, created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)", task.ID, task.UserID, task.CollectionID, task.Remark, task.Name, task.Size, task.Mime, task.ChunkSize, task.TotalChunks, task.StorageDir, task.Resolve, now, now)
 	if err != nil {
 		tx.Rollback()
 		return err
 	}
-	if err := tx.Commit(); err != nil {
-		return err
-	}
-	// 提交成功后再删除被覆盖文件，避免事务回滚造成物理文件丢失。
-	// Remove the overwritten file only after commit so a rollback cannot lose data.
-	if oldDiskPath != "" {
-		if removeErr := os.Remove(oldDiskPath); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
-			log.Printf("remove overwritten file after commit: %v", removeErr)
-		}
-	}
-	return nil
+	return tx.Commit()
 }
 
 func (s *Store) GetUploadTask(ctx context.Context, id string) (UploadTask, error) {
@@ -1639,40 +1616,81 @@ func (s *Store) CompleteUpload(ctx context.Context, task UploadTask, file File) 
 
 // CompleteUploadWithPlacement 在数据库事务打开期间分配最终存储名，再由调用方原子放置文件内容。
 // CompleteUploadWithPlacement allocates the final storage name while the database transaction is open, then lets the caller atomically place the content.
-func (s *Store) CompleteUploadWithPlacement(ctx context.Context, task UploadTask, file File, place func(storagePath string) error) (File, error) {
+// place 的第二个参数 replace=true 表示覆盖上传：调用方必须以原子替换方式落盘（旧文件由 rename 覆盖）。
+// The second place parameter, replace=true, marks an overwrite upload: the caller must place the
+// content atomically (the old file is replaced by the rename itself).
+func (s *Store) CompleteUploadWithPlacement(ctx context.Context, task UploadTask, file File, place func(storagePath string, replace bool) error) (File, error) {
 	return s.completeUpload(ctx, task, file, place)
 }
 
-func (s *Store) completeUpload(ctx context.Context, task UploadTask, file File, place func(storagePath string) error) (File, error) {
+func (s *Store) completeUpload(ctx context.Context, task UploadTask, file File, place func(storagePath string, replace bool) error) (File, error) {
 	return s.completeUploadWithCollection(ctx, task, file, place, "", "")
 }
 
-func (s *Store) completeUploadWithCollection(ctx context.Context, task UploadTask, file File, place func(storagePath string) error, originalName, remark string) (File, error) {
+func (s *Store) completeUploadWithCollection(ctx context.Context, task UploadTask, file File, place func(storagePath string, replace bool) error, originalName, remark string) (File, error) {
 	// completeUpload 在同一事务中协调路径分配、文件放置、元数据写入、配额更新和任务完成。
 	// completeUpload coordinates path allocation, content placement, metadata, quota, and task completion in one transaction.
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return File{}, err
 	}
-	if place != nil {
-		file.StoredName, file.StoragePath, err = allocateStorageName(ctx, tx, file.UserID, file.StoragePath, file.StoredName)
-		if err != nil {
+	// 覆盖上传复用旧文件的存储路径：新内容原子替换后再清理旧记录与配额。
+	// 旧文件在任务创建期间一直保留（G6），路径在替换完成前始终被旧记录占用，
+	// 并发上传不可能复用该路径后再被删除（G5）。
+	// Overwrite uploads reuse the old file's storage path: the new content atomically replaces it
+	// before the old record and quota are removed. The old file stays until the task completes (G6),
+	// and the path stays occupied by the old record until the replacement lands, so a concurrent
+	// upload can never reuse the path and then have it deleted (G5).
+	var oldFile File
+	overwriting := false
+	if task.Resolve == "overwrite" {
+		target := filepath.Join(task.StorageDir, task.Name)
+		oldFile, err = scanFile(tx.QueryRowContext(ctx, "SELECT id, user_id, name, stored_name, size, mime, sha256, md5, status, storage_path, created_at, COALESCE(deleted_at, '') FROM files WHERE user_id = ? AND status = 'ready' AND storage_path = ?", file.UserID, target))
+		if err == nil {
+			overwriting = true
+		} else if !errors.Is(err, ErrNotFound) {
 			tx.Rollback()
 			return File{}, err
 		}
-		// 分配器为同名冲突生成了数字后缀（如 multi (1).txt）时，用户可见名同步跟随，
-		// 否则列表/下载中多个同名文件无法区分。原名不再占用时（如覆盖场景）保持原名。
-		// When the allocator produced a suffixed storage name (e.g. "multi (1).txt"), the
-		// user-visible name follows so concurrent same-name uploads stay distinguishable.
-		if file.StoredName != file.Name {
-			file.Name = file.StoredName
+	}
+	if place != nil {
+		if overwriting {
+			// 覆盖：沿用旧路径；旧文件名与存储名保持一致，无需后缀逻辑。
+			// Overwrite: keep the old path; stored and visible names stay consistent without suffixing.
+			file.StoragePath = oldFile.StoragePath
+			file.StoredName = oldFile.StoredName
+		} else {
+			file.StoredName, file.StoragePath, err = allocateStorageName(ctx, tx, file.UserID, file.StoragePath, file.StoredName)
+			if err != nil {
+				tx.Rollback()
+				return File{}, err
+			}
+			// 分配器为同名冲突生成了数字后缀（如 multi (1).txt）时，用户可见名同步跟随，
+			// 否则列表/下载中多个同名文件无法区分。
+			// When the allocator produced a suffixed storage name (e.g. "multi (1).txt"), the
+			// user-visible name follows so concurrent same-name uploads stay distinguishable.
+			if file.StoredName != file.Name {
+				file.Name = file.StoredName
+			}
 		}
-		if err := place(file.StoragePath); err != nil {
+		if err := place(file.StoragePath, overwriting); err != nil {
 			tx.Rollback()
 			return File{}, err
 		}
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
+	if overwriting {
+		// 新内容已就位，此刻才删除旧记录并释放其配额占用。
+		// The new content is in place, so only now is the old record removed and its quota released.
+		if _, err := tx.ExecContext(ctx, "DELETE FROM files WHERE id = ?", oldFile.ID); err != nil {
+			tx.Rollback()
+			return File{}, err
+		}
+		if _, err := tx.ExecContext(ctx, "UPDATE users SET used_bytes = MAX(0, used_bytes - ?), updated_at = ? WHERE id = ?", oldFile.Size, now, file.UserID); err != nil {
+			tx.Rollback()
+			return File{}, err
+		}
+	}
 	result, err := tx.ExecContext(ctx, "INSERT INTO files(user_id, name, stored_name, size, mime, sha256, md5, status, storage_path, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, 'ready', ?, ?)", file.UserID, file.Name, file.StoredName, file.Size, file.Mime, file.SHA256, file.MD5, file.StoragePath, now)
 	if err != nil {
 		tx.Rollback()
@@ -2257,7 +2275,7 @@ func (s *Store) CompleteCollectionFile(ctx context.Context, task UploadTask, fil
 
 // CompleteCollectionFileWithPlacement commits a collected file and its remark atomically.
 // CompleteCollectionFileWithPlacement 原子提交收集文件内容、元数据和备注。
-func (s *Store) CompleteCollectionFileWithPlacement(ctx context.Context, task UploadTask, file File, place func(storagePath string) error, originalName, remark string) (File, error) {
+func (s *Store) CompleteCollectionFileWithPlacement(ctx context.Context, task UploadTask, file File, place func(storagePath string, replace bool) error, originalName, remark string) (File, error) {
 	completed, err := s.completeUploadWithCollection(ctx, task, file, place, originalName, remark)
 	if err != nil {
 		return File{}, err
@@ -2399,6 +2417,12 @@ func (s *Store) EnsureFolderPath(ctx context.Context, userID int64, path string)
 // RenameFolder 事务性重命名目录：更新自身与全部子孙的 path、批量替换文件 storage_path 前缀，并在提交后移动磁盘目录。
 // RenameFolder transactionally renames a folder: updates the path of itself and descendants, rewrites file storage prefixes, and moves the disk directory after commit.
 func (s *Store) RenameFolder(ctx context.Context, id, userID int64, newName string) error {
+	// 目录级锁：同一用户的重命名串行执行，避免并发重命名互相覆盖路径改写结果。
+	// A per-user lock serializes renames for the same user so concurrent renames cannot clobber each other's path rewrites.
+	lock := s.folderLock(userID)
+	lock.Lock()
+	defer lock.Unlock()
+
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -2424,14 +2448,26 @@ func (s *Store) RenameFolder(ctx context.Context, id, userID int64, newName stri
 	}
 	oldPrefix := oldPath + "/"
 	newPrefix := newPath + "/"
+	filePrefix := filepath.Join("files", strconv.FormatInt(userID, 10), oldPath)
+	newFilePrefix := filepath.Join("files", strconv.FormatInt(userID, 10), newPath)
+	oldDisk := filepath.Join(s.DataDir, filePrefix)
+	newDisk := filepath.Join(s.DataDir, newFilePrefix)
+	// 移动前预检：目标磁盘目录不得已存在（存在时 os.Rename 可能覆盖或失败，且说明路径被占用）；
+	// 源目录缺失可容忍（空目录在磁盘上可能从未创建）。
+	// Pre-check before committing: the target disk directory must not exist already (os.Rename
+	// may overwrite or fail); a missing source directory is tolerated (empty folders may never
+	// have been created on disk).
+	if _, statErr := os.Stat(newDisk); statErr == nil {
+		return ErrConflict
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		return statErr
+	}
 	if _, err := tx.ExecContext(ctx, "UPDATE folders SET name = ?, path = ? WHERE id = ?", newName, newPath, id); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, "UPDATE folders SET path = ? || substr(path, length(?) + 1) WHERE user_id = ? AND path LIKE ? ESCAPE '\\'", newPrefix, oldPrefix, userID, escapeLike(oldPrefix)+"%"); err != nil {
 		return err
 	}
-	filePrefix := filepath.Join("files", strconv.FormatInt(userID, 10), oldPath)
-	newFilePrefix := filepath.Join("files", strconv.FormatInt(userID, 10), newPath)
 	// 软删除记录仍占用旧 storage_path；重命名会把旧前缀下的 ready 文件改写为新前缀，
 	// 与目标前缀下已存在的 deleted 记录（如先删除后重传的同名文件）发生 UNIQUE 冲突。
 	// deleted 记录的内容已物理删除，改写前清除目标前缀下的它们，避免重命名目录 500
@@ -2445,15 +2481,67 @@ func (s *Store) RenameFolder(ctx context.Context, id, userID int64, newName stri
 	if _, err := tx.ExecContext(ctx, "UPDATE files SET storage_path = ? || substr(storage_path, length(?) + 1) WHERE user_id = ? AND status != 'deleted' AND storage_path LIKE ? ESCAPE '\\'", newFilePrefix, filePrefix, userID, escapeLike(filePrefix)+"%"); err != nil {
 		return err
 	}
-	oldDisk := filepath.Join(s.DataDir, filePrefix)
-	newDisk := filepath.Join(s.DataDir, newFilePrefix)
 	if err := tx.Commit(); err != nil {
 		return err
 	}
 	if err := os.Rename(oldDisk, newDisk); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("rename disk directory after commit: %w", err)
+		// 磁盘移动失败时反向修正数据库路径，避免 DB 已指向新路径而磁盘仍是旧路径的不一致。
+		// When the disk move fails, roll the database paths back so the DB never points at a
+		// path the disk does not have.
+		if revErr := s.rollbackRenameFolder(ctx, userID, oldPath, newPath); revErr != nil {
+			return fmt.Errorf("rename disk directory after commit: %w (database rollback also failed: %v)", err, revErr)
+		}
+		return fmt.Errorf("rename disk directory failed, database reverted: %w", err)
 	}
 	return nil
+}
+
+// folderLock 返回用户级目录重命名锁；容量超限时清扫未被持有的锁条目。
+// folderLock returns the per-user folder-rename lock, sweeping entries nobody holds past the cap.
+func (s *Store) folderLock(userID int64) *sync.Mutex {
+	s.folderMu.Lock()
+	defer s.folderMu.Unlock()
+	if s.folderLocks == nil {
+		s.folderLocks = make(map[int64]*sync.Mutex)
+	}
+	lock := s.folderLocks[userID]
+	if lock == nil {
+		if len(s.folderLocks) >= 4096 {
+			for key, candidate := range s.folderLocks {
+				if candidate.TryLock() {
+					candidate.Unlock()
+					delete(s.folderLocks, key)
+				}
+			}
+		}
+		lock = &sync.Mutex{}
+		s.folderLocks[userID] = lock
+	}
+	return lock
+}
+
+// rollbackRenameFolder 将已提交的重命名路径改写回旧前缀（磁盘移动失败后的反向修正）。
+// rollbackRenameFolder reverts committed rename path rewrites to the old prefixes after a disk-move failure.
+func (s *Store) rollbackRenameFolder(ctx context.Context, userID int64, oldPath, newPath string) error {
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	oldPrefix := oldPath + "/"
+	newPrefix := newPath + "/"
+	filePrefix := filepath.Join("files", strconv.FormatInt(userID, 10), oldPath)
+	newFilePrefix := filepath.Join("files", strconv.FormatInt(userID, 10), newPath)
+	if _, err := tx.ExecContext(ctx, "UPDATE folders SET path = ? WHERE user_id = ? AND path = ?", oldPath, userID, newPath); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, "UPDATE folders SET path = ? || substr(path, length(?) + 1) WHERE user_id = ? AND path LIKE ? ESCAPE '\\'", oldPrefix, newPrefix, userID, escapeLike(newPrefix)+"%"); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, "UPDATE files SET storage_path = ? || substr(storage_path, length(?) + 1) WHERE user_id = ? AND status != 'deleted' AND storage_path LIKE ? ESCAPE '\\'", filePrefix, newFilePrefix, userID, escapeLike(newFilePrefix)+"%"); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // DeleteFolder 仅删除空目录（无 ready 文件且无子目录），物理移除并删除记录。

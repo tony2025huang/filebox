@@ -25,6 +25,20 @@ func TestHostKeyFingerprintMatches(t *testing.T) {
 	base64Fingerprint := base64.RawStdEncoding.EncodeToString(bytes)
 	mismatchedBytes := append([]byte(nil), bytes...)
 	mismatchedBytes[0]++
+	// paddingBitCorrupted 仅翻转 43 字符 raw base64 末字符的低 2 bit（padding 位），
+	// 非严格解码结果与原始字节完全相同，严格解码必须拒绝。
+	// paddingBitCorrupted flips only the low 2 bits (padding bits) of the last character
+	// of the 43-char raw base64; non-strict decoding yields identical bytes, strict must reject it.
+	paddingBitCorrupted := base64Fingerprint
+	{
+		last := base64Fingerprint[len(base64Fingerprint)-1]
+		const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+		charIndex := strings.IndexByte(alphabet, last)
+		if charIndex < 0 || charIndex&0x3 != 0 {
+			t.Fatalf("last base64 char %q index = %d, want a zero low-2-bit index", last, charIndex)
+		}
+		paddingBitCorrupted = base64Fingerprint[:len(base64Fingerprint)-1] + string(alphabet[charIndex^0x3])
+	}
 	tests := []struct {
 		name  string
 		got   string
@@ -36,6 +50,8 @@ func TestHostKeyFingerprintMatches(t *testing.T) {
 		{"hex against SHA256 base64", hex.EncodeToString(bytes), "SHA256:" + base64Fingerprint, true},
 		{"wrong length base64", "SHA256:" + base64.RawStdEncoding.EncodeToString(bytes[:31]), base64Fingerprint, false},
 		{"invalid base64", "SHA256:not-valid!", base64Fingerprint, false},
+		{"padding-bit corrupted base64", "SHA256:" + paddingBitCorrupted, base64Fingerprint, false},
+		{"padding-bit corrupted as want", base64Fingerprint, paddingBitCorrupted, false},
 		{"empty strings", "", "", false},
 	}
 	for _, test := range tests {

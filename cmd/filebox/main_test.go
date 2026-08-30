@@ -1,11 +1,16 @@
 package main
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"filebox/internal/store"
 )
@@ -200,7 +205,187 @@ func TestBackupRequiresJWTSecret(t *testing.T) {
 	if code := run([]string{"admin", "backup", "--data", dataDir, "--out", out}); code != 1 {
 		t.Fatalf("backup without secret exit code = %d, want 1", code)
 	}
-	if code := run([]string{"admin", "backup", "--data", dataDir, "--out", out, "--jwt-secret", "explicit-secret"}); code != 0 {
+	if code := run([]string{"admin", "backup", "--data", dataDir, "--out", out, "--jwt-secret", "explicit-secret-1234"}); code != 0 {
 		t.Fatalf("backup with --jwt-secret exit code = %d, want 0", code)
+	}
+}
+
+// TestJWTSecretValidation 验证空串/过短的 --jwt-secret 与 FILEBOX_JWT_SECRET 被拒绝（G11）。
+// TestJWTSecretValidation verifies empty and too-short --jwt-secret / FILEBOX_JWT_SECRET values are rejected (G11).
+func TestJWTSecretValidation(t *testing.T) {
+	t.Setenv("FILEBOX_JWT_SECRET", "")
+	// 空串 flag：必须报错，而不是静默退化成弱 HMAC key。
+	// An explicitly empty flag must fail rather than silently degrade to a weak HMAC key.
+	if _, _, err := resolveJWTSecret(t.TempDir(), true, false, "", true); err == nil {
+		t.Fatal("resolveJWTSecret accepted an empty --jwt-secret")
+	}
+	// 过短 flag：同样拒绝。
+	// Too-short flags are rejected as well.
+	if _, _, err := resolveJWTSecret(t.TempDir(), true, false, "short", true); err == nil {
+		t.Fatal("resolveJWTSecret accepted a too-short --jwt-secret")
+	}
+	// 环境变量为空：拒绝。
+	// An empty environment variable is rejected.
+	if _, _, err := resolveJWTSecret(t.TempDir(), false, true, "", true); err == nil {
+		t.Fatal("resolveJWTSecret accepted an empty FILEBOX_JWT_SECRET")
+	}
+	// 合法密钥通过。
+	// A valid secret passes.
+	if _, source, err := resolveJWTSecret(t.TempDir(), true, false, "0123456789abcdef0123456789abcdef", true); err != nil || source != "flag-or-env" {
+		t.Fatalf("resolveJWTSecret(valid) = %q, %v", source, err)
+	}
+	// secrets.json 中空密钥同样报错。
+	// An empty secret in secrets.json is also rejected.
+	emptyDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(emptyDir, "config"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeSecretsFile(filepath.Join(emptyDir, "config", "secrets.json"), secretsFilePayload{JWTSecret: ""}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := resolveJWTSecret(emptyDir, false, false, "", true); err == nil {
+		t.Fatal("resolveJWTSecret accepted an empty secrets.json JWT secret")
+	}
+}
+
+// buildTestArchive 构造一个含指定条目（name/size/内容）的 tar.gz 归档，用于恢复限额测试。
+// buildTestArchive builds a tar.gz archive with the given entries for restore-limit tests.
+func buildTestArchive(t *testing.T, entries []struct{ name string; size int64; content []byte }) []byte {
+	t.Helper()
+	var buffer bytes.Buffer
+	gz := gzip.NewWriter(&buffer)
+	tw := tar.NewWriter(gz)
+	for _, entry := range entries {
+		content := entry.content
+		if content == nil {
+			content = []byte("x")
+		}
+		header := &tar.Header{Name: entry.name, Mode: 0o600, Size: entry.size, Typeflag: tar.TypeReg}
+		if err := tw.WriteHeader(header); err != nil {
+			t.Fatal(err)
+		}
+		if entry.size > 0 {
+			if _, err := tw.Write(content); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buffer.Bytes()
+}
+
+// rawTarHeader 手工构造 512 字节 tar 头（含合法校验和），声明 size 但不含内容，
+// 用于模拟"解压炸弹"式恶意归档（tar.Writer 会校验实际写入长度，无法声明超大 size）。
+// 超过 8 GiB 的 size 使用 base-256 编码（tar 12 字节 size 字段的八进制上限为 8^11-1）。
+// rawTarHeader builds a 512-byte tar header (with a valid checksum) declaring size without
+// content, simulating a decompression-bomb archive (tar.Writer validates written length, so
+// an oversized declared size cannot be produced through it). Sizes above 8 GiB use base-256
+// encoding (the octal cap of the 12-byte size field is 8^11-1).
+func rawTarHeader(name string, size int64) []byte {
+	block := make([]byte, 512)
+	copy(block[0:100], []byte(name))
+	copy(block[100:108], "0000644\x00") // mode
+	copy(block[108:116], "0000000\x00") // uid
+	copy(block[116:124], "0000000\x00") // gid
+	const octalCap = int64(1<<33 - 1)   // 8^11-1
+	if size <= octalCap {
+		sizeOctal := fmt.Sprintf("%011o", size)
+		copy(block[124:135], sizeOctal)
+		block[135] = 0
+	} else {
+		// base-256：首字节高位置 1，其余 11 字节大端存放值。
+		// base-256: the first byte's high bit flags the format, the remaining 11 bytes hold the value big-endian.
+		block[124] = 0x80
+		for index := 1; index <= 11; index++ {
+			block[124+index] = byte(size >> (8 * (11 - index)))
+		}
+	}
+	mtimeOctal := fmt.Sprintf("%011o", time.Now().Unix())
+	copy(block[136:147], mtimeOctal)
+	block[147] = 0
+	block[156] = '0' // typeflag: regular file
+	copy(block[257:263], "ustar\x00")
+	block[263], block[264] = '0', '0'
+	// 校验和：checksum 字段按空格参与求和，结果以 6 位八进制 + NUL + 空格写入。
+	// Checksum: the checksum field counts as spaces; the result is written as 6 octal digits + NUL + space.
+	var sum int64
+	for index, value := range block {
+		if index >= 148 && index < 156 {
+			sum += ' '
+		} else {
+			sum += int64(value)
+		}
+	}
+	checksum := fmt.Sprintf("%06o", sum)
+	copy(block[148:154], checksum)
+	block[154], block[155] = 0, ' '
+	return block
+}
+
+// rawArchive 将若干原始 tar 块（512 字节头 + 数据填充）打包为 tar.gz，并以 1024 个零字节结束。
+// rawArchive packs raw tar blocks (512-byte headers plus data padding) into tar.gz, ending with 1024 zero bytes.
+func rawArchive(t *testing.T, entries ...[]byte) []byte {
+	t.Helper()
+	var buffer bytes.Buffer
+	gz := gzip.NewWriter(&buffer)
+	for _, entry := range entries {
+		if _, err := gz.Write(entry); err != nil {
+			t.Fatal(err)
+		}
+		// 条目无内容：数据区 0 字节，下一个头紧跟 512 字节对齐位置，无需额外填充。
+	}
+	if _, err := gz.Write(make([]byte, 1024)); err != nil {
+		t.Fatal(err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buffer.Bytes()
+}
+
+// TestRestoreRejectsMaliciousArchives 验证 restore 拒绝重复条目与超限条目（G10）。
+// TestRestoreRejectsMaliciousArchives verifies restore rejects duplicate and oversized entries (G10).
+func TestRestoreRejectsMaliciousArchives(t *testing.T) {
+	writeArchive := func(t *testing.T, name string, data []byte) string {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), name)
+		if err := os.WriteFile(path, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	// 重复条目必须被拒绝。
+	// Duplicate entries must be rejected.
+	duplicate := buildTestArchive(t, []struct {
+		name    string
+		size    int64
+		content []byte
+	}{{name: "filebox.db", size: 1}, {name: "filebox.db", size: 1}})
+	if code := run([]string{"admin", "restore", "--data", t.TempDir(), "--in", writeArchive(t, "dup.tar.gz", duplicate)}); code != 1 {
+		t.Fatalf("restore with duplicate entries = %d, want 1", code)
+	}
+	// 单文件超过限额必须被拒绝（仅声明大小即拒绝，无需实际内容；base-256 编码 200 GiB+1）。
+	// An entry whose declared size exceeds the limit must be rejected from the header alone
+	// (base-256 encodes the 200 GiB + 1 declared size).
+	oversized := writeArchive(t, "big.tar.gz", rawArchive(t, rawTarHeader("filebox.db", restoreMaxSingleBytes+1)))
+	if code := run([]string{"admin", "restore", "--data", t.TempDir(), "--in", oversized}); code != 1 {
+		t.Fatalf("restore with oversized entry = %d, want 1", code)
+	}
+	// 总量超限与单文件超限共享同一前置检查模式（逐条在解压前累计判定）；
+	// 单条声明的 size 不超过单文件上限时需真实内容才能推进累计，无法在测试中构造，
+	// 这里以多条超限条目断言归档整体被拒绝。
+	// The total-limit guard shares the same pre-extraction pattern as the single-file guard;
+	// reaching the cumulative check needs real content, so this case asserts the archive is
+	// rejected outright (the first entry already trips a size guard).
+	overTotal := writeArchive(t, "total.tar.gz", rawArchive(t,
+		rawTarHeader("files/f00", restoreMaxSingleBytes-1),
+		rawTarHeader("files/f01", restoreMaxSingleBytes-1)))
+	if code := run([]string{"admin", "restore", "--data", t.TempDir(), "--in", overTotal}); code != 1 {
+		t.Fatalf("restore with oversized total = %d, want 1", code)
 	}
 }

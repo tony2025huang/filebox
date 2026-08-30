@@ -686,6 +686,72 @@ func TestSharePreviewDoesNotConsumeDownloadCount(t *testing.T) {
 	}
 }
 
+// TestOverwriteUploadReplacesFileAtomically 验证覆盖上传端到端：旧文件保留到 complete，
+// complete 后内容与记录原子换新（G5/G6）。
+// TestOverwriteUploadReplacesFileAtomically verifies the overwrite upload end to end: the old
+// file survives until complete, then content and record are replaced atomically (G5/G6).
+func TestOverwriteUploadReplacesFileAtomically(t *testing.T) {
+	db, handler := newTestServer(t)
+	token := testAdminToken(t, handler)
+	first := uploadTestFile(t, handler, token, "overwrite-me.txt", "text/plain", []byte("version-one"))
+	firstID := int64(first["id"].(float64))
+
+	// 覆盖任务创建后旧文件仍可下载（G6：上传失败不丢旧内容）。
+	// After the overwrite task is created the old file must still be downloadable (G6).
+	init := testJSONRequest(t, handler, http.MethodPost, "/api/files/upload-init", token, `{"name":"overwrite-me.txt","size":2,"chunkSize":0,"resolve":"overwrite"}`)
+	if init.Code != http.StatusOK {
+		t.Fatalf("overwrite init status = %d: %s", init.Code, init.Body.String())
+	}
+	taskID := responseData(t, init)["taskId"].(string)
+	before := testJSONRequest(t, handler, http.MethodGet, "/api/files/"+formatID(firstID)+"/download", token, "")
+	if before.Code != http.StatusOK || before.Body.String() != "version-one" {
+		t.Fatalf("old file while overwrite pending = %d, %q", before.Code, before.Body.String())
+	}
+
+	chunk := testBinaryRequest(t, handler, http.MethodPut, "/api/files/"+taskID+"/chunks/0", token, []byte("v2"))
+	if chunk.Code != http.StatusOK {
+		t.Fatalf("overwrite chunk status = %d: %s", chunk.Code, chunk.Body.String())
+	}
+	complete := testJSONRequest(t, handler, http.MethodPost, "/api/files/"+taskID+"/complete", token, `{}`)
+	if complete.Code != http.StatusOK {
+		t.Fatalf("overwrite complete status = %d: %s", complete.Code, complete.Body.String())
+	}
+	completed := responseData(t, complete)
+	newID := int64(completed["id"].(float64))
+	if newID == firstID {
+		t.Fatalf("overwrite reused the old file id %d, want a new record", firstID)
+	}
+	// 新文件内容与记录就位，目录中同名文件仅剩一条。
+	// The new content and record are in place; only one same-named file remains.
+	after := testJSONRequest(t, handler, http.MethodGet, "/api/files/"+formatID(newID)+"/download", token, "")
+	if after.Code != http.StatusOK || after.Body.String() != "v2" {
+		t.Fatalf("replaced file download = %d, %q", after.Code, after.Body.String())
+	}
+	list := testJSONRequest(t, handler, http.MethodGet, "/api/files", token, "")
+	var sameName int
+	for _, item := range responseData(t, list)["items"].([]any) {
+		if item.(map[string]any)["name"] == "overwrite-me.txt" {
+			sameName++
+		}
+	}
+	if sameName != 1 {
+		t.Fatalf("same-named file count after overwrite = %d, want 1", sameName)
+	}
+	// 旧记录已删除，新记录占用同一存储路径。
+	// The old record is gone and the new one owns the same storage path.
+	var storagePath string
+	var rowCount int
+	if err := db.DB.QueryRow("SELECT storage_path FROM files WHERE id = ?", newID).Scan(&storagePath); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.DB.QueryRow("SELECT COUNT(id) FROM files WHERE storage_path = ?", storagePath).Scan(&rowCount); err != nil {
+		t.Fatal(err)
+	}
+	if rowCount != 1 {
+		t.Fatalf("rows at storage path %q = %d, want 1", storagePath, rowCount)
+	}
+}
+
 func TestBatchShareCreatesIndependentLinksAndRejectsUnauthorizedBatch(t *testing.T) {
 	db, handler := newTestServer(t)
 	adminToken := testAdminToken(t, handler)

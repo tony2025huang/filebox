@@ -182,6 +182,48 @@ func TestReadOnlyBlocksSyncAndCollectionWrites(t *testing.T) {
 	}
 }
 
+func TestReadOnlyBlocksCollectionChunkUpload(t *testing.T) {
+	db, handler := newTestServer(t)
+	adminToken := testAdminToken(t, handler)
+	created := testJSONRequest(t, handler, http.MethodPost, "/api/admin/users", adminToken, `{"username":"ro-collect","password":"Readonly123!","role":"user","quotaBytes":1048576}`)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create user = %d: %s", created.Code, created.Body.String())
+	}
+	userID := int64(responseData(t, created)["id"].(float64))
+	login := testJSONRequest(t, handler, http.MethodPost, "/api/auth/login", "", `{"username":"ro-collect","password":"Readonly123!"}`)
+	if login.Code != http.StatusOK {
+		t.Fatalf("login = %d: %s", login.Code, login.Body.String())
+	}
+	userToken := responseData(t, login)["token"].(string)
+	collection := testJSONRequest(t, handler, http.MethodPost, "/api/collections", userToken, `{"name":"c","expiresInHours":1}`)
+	if collection.Code != http.StatusCreated {
+		t.Fatalf("create collection = %d: %s", collection.Code, collection.Body.String())
+	}
+	collectionToken := responseData(t, collection)["token"].(string)
+	init := testJSONRequest(t, handler, http.MethodPost, "/api/collections/"+collectionToken+"/upload-init", "", `{"name":"a.txt","size":1,"chunkSize":0}`)
+	if init.Code != http.StatusOK {
+		t.Fatalf("collection init = %d: %s", init.Code, init.Body.String())
+	}
+	taskID := responseData(t, init)["taskId"].(string)
+	if chunk := testBinaryRequest(t, handler, http.MethodPut, "/api/collections/"+collectionToken+"/upload-chunk/"+taskID+"/0", "", []byte("x")); chunk.Code != http.StatusOK {
+		t.Fatalf("collection chunk before window = %d: %s", chunk.Code, chunk.Body.String())
+	}
+	from := time.Now().UTC().Add(-time.Minute).Format(time.RFC3339)
+	until := time.Now().UTC().Add(time.Minute).Format(time.RFC3339)
+	setWindow := testJSONRequest(t, handler, http.MethodPut, "/api/admin/users/"+formatID(userID)+"/read-only", adminToken, `{"from":"`+from+`","until":"`+until+`"}`)
+	if setWindow.Code != http.StatusOK {
+		t.Fatalf("set read-only window = %d: %s", setWindow.Code, setWindow.Body.String())
+	}
+	blocked := testBinaryRequest(t, handler, http.MethodPut, "/api/collections/"+collectionToken+"/upload-chunk/"+taskID+"/0", "", []byte("y"))
+	if blocked.Code != http.StatusForbidden || responseCode(t, blocked) != "READ_ONLY" {
+		t.Fatalf("collection chunk in read-only window = %d code=%q body=%s", blocked.Code, responseCode(t, blocked), blocked.Body.String())
+	}
+	var auditCount int
+	if err := db.DB.QueryRow("SELECT COUNT(*) FROM audit_logs WHERE reason = 'read_only' AND action = 'upload_collect_fail'").Scan(&auditCount); err != nil || auditCount < 1 {
+		t.Fatalf("read-only collection chunk audit count = %d, %v; want >= 1", auditCount, err)
+	}
+}
+
 func TestUserReadOnlyAtUsesInclusiveBoundariesAndRejectsInvalidWindows(t *testing.T) {
 	from := time.Date(2026, 8, 30, 10, 0, 0, 0, time.UTC)
 	until := from.Add(time.Hour)

@@ -99,6 +99,10 @@ function formatErrorBytes(bytes = 0) {
   return `${value.toFixed(value >= 10 ? 0 : 1)} ${units[unit]}`
 }
 
+// sessionExpiredRedirected 防止令牌失效后多个并发请求各自触发跳转。
+// sessionExpiredRedirected prevents every concurrent 401 from triggering its own redirect.
+let sessionExpiredRedirected = false
+
 // api 统一附加 Bearer token、JSON 请求头，并将非 2xx 响应转换为本地化错误。
 // api centralizes Bearer-token and JSON headers, and turns non-2xx responses into localized errors.
 export async function api(path, options = {}) {
@@ -120,9 +124,30 @@ export async function api(path, options = {}) {
     if (error.data?.code === 'PASSWORD_CHANGE_REQUIRED' && window.location.pathname !== '/change-password') {
       window.location.assign('/change-password')
     }
+    // 令牌失效（401）：清除本地会话并跳转登录，避免 /sync、/shares、/admin 等页面
+    // 继续携带旧 token 反复请求；登录接口的 401（密码错误）与公开收集页除外。
+    // Token expiry (401): clear the local session and redirect to login so /sync, /shares,
+    // /admin and friends stop hammering with a stale token; login 401s (wrong password) and
+    // the public collection page are excluded.
+    if (response.status === 401 && token && !path.startsWith('/api/auth/login')) {
+      redirectOnSessionExpired()
+    }
     throw error
   }
   return body
+}
+
+// redirectOnSessionExpired 清除会话并跳转登录页（保留当前地址供登录后回跳；与 router 守卫协作避免重复跳转）。
+// redirectOnSessionExpired clears the session and redirects to login, preserving the current
+// location for post-login return; it cooperates with the router guard to avoid double redirects.
+function redirectOnSessionExpired() {
+  if (sessionExpiredRedirected) return
+  sessionExpiredRedirected = true
+  clearSession()
+  const current = window.location.pathname + window.location.search
+  if (!window.location.pathname.startsWith('/login') && !window.location.pathname.startsWith('/u/')) {
+    window.location.assign('/login?redirect=' + encodeURIComponent(current))
+  }
 }
 
 // clearSession 清除本地保存的认证令牌和用户快照。
@@ -135,6 +160,7 @@ export function clearSession() {
 // saveSession 持久化登录响应中的 JWT 和公开用户信息。
 // saveSession persists the JWT and public user information from the login response.
 export function saveSession(body) {
+  sessionExpiredRedirected = false
   localStorage.setItem('filebox_token', body.data.token)
   localStorage.setItem('filebox_user', JSON.stringify(body.data.user))
 }

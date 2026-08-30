@@ -533,9 +533,10 @@ func TestShareManagementPreservesRevocationAndOwnership(t *testing.T) {
 	}
 }
 
-// TestOverwriteUploadRemovesOldPhysicalFileAfterCommit verifies overwrite cleanup happens after commit.
-// TestOverwriteUploadRemovesOldPhysicalFileAfterCommit 验证覆盖上传只在事务提交后清理旧物理文件。
-func TestOverwriteUploadRemovesOldPhysicalFileAfterCommit(t *testing.T) {
+// TestOverwriteUploadKeepsOldFileUntilComplete verifies the overwrite flow preserves the old
+// file until the replacement lands, then swaps content atomically (G5/G6).
+// TestOverwriteUploadKeepsOldFileUntilComplete 验证覆盖上传在替换落盘前保留旧文件，随后原子换新（G5/G6）。
+func TestOverwriteUploadKeepsOldFileUntilComplete(t *testing.T) {
 	db, err := Open(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -569,24 +570,85 @@ func TestOverwriteUploadRemovesOldPhysicalFileAfterCommit(t *testing.T) {
 	if err := db.CreateUploadTask(ctx, task); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(oldPhysicalPath); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("overwritten physical file still exists: %v", err)
+	// 任务创建后旧文件与旧记录必须原样保留：上传失败/放弃不丢数据（G6）。
+	// After task creation the old file and record must remain intact: an aborted upload loses nothing (G6).
+	if _, err := os.Stat(oldPhysicalPath); err != nil {
+		t.Fatalf("old physical file removed at task creation: %v", err)
 	}
-	var count int
-	if err := db.DB.QueryRow("SELECT COUNT(id) FROM files WHERE storage_path = ?", oldStoragePath).Scan(&count); err != nil {
+	var oldRowCount int
+	if err := db.DB.QueryRow("SELECT COUNT(id) FROM files WHERE storage_path = ? AND status = 'ready'", oldStoragePath).Scan(&oldRowCount); err != nil {
 		t.Fatal(err)
 	}
-	if count != 0 {
-		t.Fatalf("overwritten file row count = %d, want 0", count)
+	if oldRowCount != 1 {
+		t.Fatalf("old file row count = %d, want 1", oldRowCount)
+	}
+	var usedBefore int64
+	if err := db.DB.QueryRow("SELECT used_bytes FROM users WHERE id = ?", admin.ID).Scan(&usedBefore); err != nil {
+		t.Fatal(err)
+	}
+	if usedBefore != 3 {
+		t.Fatalf("used bytes at task creation = %d, want 3", usedBefore)
+	}
+
+	// 完成覆盖：新内容原子替换旧文件，旧记录删除、配额更新为新文件大小（G5）。
+	// Completing the overwrite atomically replaces the old file, drops the old record, and
+	// updates quota to the new size (G5).
+	newContent := []byte("new-content")
+	newPhysicalPath := filepath.Join(db.DataDir, "tmp", "ow-1-new")
+	if err := os.MkdirAll(filepath.Dir(newPhysicalPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(newPhysicalPath, newContent, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(newPhysicalPath)
+	file := File{UserID: admin.ID, Name: "old.txt", StoredName: "old.txt", Size: int64(len(newContent)), Mime: "text/plain", SHA256: "sha-new", MD5: "md5-new", StoragePath: userDir}
+	completed, err := db.CompleteUploadWithPlacement(ctx, task, file, func(storagePath string, replace bool) error {
+		if !replace {
+			t.Fatalf("overwrite placement replace flag = false, want true")
+		}
+		if storagePath != oldStoragePath {
+			t.Fatalf("overwrite storage path = %q, want %q", storagePath, oldStoragePath)
+		}
+		return os.Rename(newPhysicalPath, filepath.Join(db.DataDir, storagePath))
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if completed.StoragePath != oldStoragePath {
+		t.Fatalf("completed storage path = %q, want %q", completed.StoragePath, oldStoragePath)
+	}
+	content, err := os.ReadFile(oldPhysicalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != string(newContent) {
+		t.Fatalf("replaced physical content = %q, want %q", content, newContent)
+	}
+	oldRowCount = 0
+	if err := db.DB.QueryRow("SELECT COUNT(id) FROM files WHERE storage_path = ? AND status = 'ready'", oldStoragePath).Scan(&oldRowCount); err != nil {
+		t.Fatal(err)
+	}
+	if oldRowCount != 1 {
+		t.Fatalf("file rows at replaced path = %d, want 1", oldRowCount)
+	}
+	var newRowID int64
+	if err := db.DB.QueryRow("SELECT id, size FROM files WHERE storage_path = ?", oldStoragePath).Scan(&newRowID, new(int64)); err != nil {
+		t.Fatal(err)
+	}
+	if newRowID == 0 {
+		t.Fatal("new file row missing")
 	}
 	var used int64
 	if err := db.DB.QueryRow("SELECT used_bytes FROM users WHERE id = ?", admin.ID).Scan(&used); err != nil {
 		t.Fatal(err)
 	}
-	if used != 0 {
-		t.Fatalf("used bytes after overwrite = %d, want 0", used)
+	if used != int64(len(newContent)) {
+		t.Fatalf("used bytes after overwrite = %d, want %d", used, len(newContent))
 	}
 
+	// 非覆盖任务绝不触碰同名目标文件。
+	// A non-overwrite task must never touch the same-named target.
 	keepStoragePath := filepath.Join(userDir, "keep.txt")
 	keepPhysicalPath := filepath.Join(db.DataDir, keepStoragePath)
 	if err := os.WriteFile(keepPhysicalPath, []byte("keep"), 0o644); err != nil {
@@ -595,7 +657,7 @@ func TestOverwriteUploadRemovesOldPhysicalFileAfterCommit(t *testing.T) {
 	if _, err := db.DB.Exec("INSERT INTO files(user_id, name, stored_name, size, mime, sha256, md5, status, storage_path, created_at) VALUES(?, 'keep.txt', 'keep.txt', 4, 'text/plain', 'sha', 'md5', 'ready', ?, ?)", admin.ID, keepStoragePath, now); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.DB.Exec("UPDATE users SET used_bytes = 4 WHERE id = ?", admin.ID); err != nil {
+	if _, err := db.DB.Exec("UPDATE users SET used_bytes = ? WHERE id = ?", int64(len(newContent)), admin.ID); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.CreateUploadTask(ctx, UploadTask{ID: "keep-1", UserID: admin.ID, Name: "keep.txt", Size: 5, ChunkSize: 5, TotalChunks: 1, Status: "pending", StorageDir: userDir}); err != nil {

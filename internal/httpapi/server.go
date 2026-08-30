@@ -1570,6 +1570,30 @@ func (s *Server) uploadChunk(w http.ResponseWriter, r *http.Request) {
 	writeData(w, http.StatusOK, "分片上传成功", map[string]any{"index": index, "size": written})
 }
 
+// rateLimiterMaxKeys 限制各令牌桶 map 的容量，防止来源 IP / 用户键无限增长的内存耗尽攻击。
+// rateLimiterMaxKeys caps each token-bucket map so unbounded source keys cannot exhaust memory.
+const rateLimiterMaxKeys = 10000
+
+// evictIfFull 在惰性清理后仍超容量时驱逐最久未访问的键。
+// evictIfFull evicts the least-recently-seen key when a map still exceeds capacity after the lazy sweep.
+func evictIfFull[K comparable](now time.Time, lastSeen map[K]time.Time, target map[K]*rate.Limiter) {
+	if len(target) < rateLimiterMaxKeys {
+		return
+	}
+	var oldestKey K
+	var oldestSeen time.Time
+	found := false
+	for key, seen := range lastSeen {
+		if !found || seen.Before(oldestSeen) {
+			oldestKey, oldestSeen, found = key, seen, true
+		}
+	}
+	if found {
+		delete(lastSeen, oldestKey)
+		delete(target, oldestKey)
+	}
+}
+
 // limiterFor returns or rebuilds a user's bucket and evicts entries idle for ten minutes.
 // limiterFor 返回或重建用户令牌桶，并清理超过十分钟未访问的条目。
 func (l *rateLimiter) limiterFor(userID, bytesPerSec int64) *rate.Limiter {
@@ -1588,6 +1612,7 @@ func (l *rateLimiter) limiterFor(userID, bytesPerSec int64) *rate.Limiter {
 			delete(l.buckets, id)
 		}
 	}
+	evictIfFull(now, l.lastSeen, l.buckets)
 	if bytesPerSec <= 0 {
 		return nil
 	}
@@ -1625,6 +1650,7 @@ func (l *rateLimiter) limiterForPublic(key string, bytesPerSec int64) *rate.Limi
 			delete(l.publicBuckets, item)
 		}
 	}
+	evictIfFull(now, l.publicLastSeen, l.publicBuckets)
 	if bytesPerSec <= 0 {
 		return nil
 	}
@@ -1663,6 +1689,7 @@ func (l *rateLimiter) allowPublicRequest(ip string, perMinute, burst int) bool {
 			delete(l.requestBuckets, key)
 		}
 	}
+	evictIfFull(now, l.requestLastSeen, l.requestBuckets)
 	limiter, ok := l.requestBuckets[ip]
 	limit := rate.Limit(float64(perMinute) / 60.0)
 	if !ok || limiter == nil || limiter.Limit() != limit {
@@ -1971,16 +1998,23 @@ func (s *Server) completeUpload(w http.ResponseWriter, r *http.Request) {
 		_ = os.RemoveAll(tmpDir)
 	}()
 	fileRecord := store.File{UserID: user.ID, Name: task.Name, StoredName: storedName, Size: task.Size, Mime: task.Mime, SHA256: shaHex, MD5: md5Hex, StoragePath: relativeDir}
-	completed, err := s.store.CompleteUploadWithPlacement(r.Context(), task, fileRecord, func(storagePath string) error {
+	completed, err := s.store.CompleteUploadWithPlacement(r.Context(), task, fileRecord, func(storagePath string, replace bool) error {
 		finalPath = filepath.Join(s.config.DataDir, storagePath)
 		if err := os.MkdirAll(filepath.Dir(finalPath), 0o755); err != nil {
 			return err
 		}
-		if _, err := os.Stat(finalPath); err == nil {
-			return fmt.Errorf("storage path already exists")
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return err
+		if !replace {
+			if _, err := os.Stat(finalPath); err == nil {
+				return fmt.Errorf("storage path already exists")
+			} else if !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
 		}
+		// 覆盖上传直接原子 rename 替换旧文件（POSIX/Windows 均替换存在目标），
+		// 旧物理文件由替换本身清除，不存在"先删旧文件再放新文件"的竞态窗口（G5）。
+		// Overwrite uploads rename over the old file atomically (both platforms replace an
+		// existing target), so the old file is cleared by the replacement itself and no
+		// delete-then-place race window exists (G5).
 		return os.Rename(mergedPath, finalPath)
 	})
 	if err != nil {
@@ -2788,6 +2822,13 @@ func (s *Server) sharePreview(w http.ResponseWriter, r *http.Request) {
 		s.serviceEvent(r, "share_preview", "anonymous", "target=%s result=%s reason=%s", target, result, reason)
 		s.recordShareAudit(r, nil, shareOwnerID, "anonymous", "share_preview", target, result, reason)
 	}()
+	// 与 shareMeta/shareDownload 一致：匿名预览同样按来源 IP 限速，防止持 token 无限拉取文件流。
+	// Like shareMeta/shareDownload, anonymous preview is rate-limited per source IP so a token cannot stream files endlessly.
+	if !s.rateLimiter.allowPublicRequest(s.requestIP(r), 30, 10) {
+		result, reason = "failure", "rate_limited"
+		writeError(w, http.StatusTooManyRequests, "请求过于频繁，请稍后重试")
+		return
+	}
 	share, err := s.store.GetShareByToken(r.Context(), token)
 	if err != nil {
 		if revoked, revokedErr := s.store.GetShareByTokenIncludingRevoked(r.Context(), token); revokedErr == nil && revoked.RevokedAt != "" {

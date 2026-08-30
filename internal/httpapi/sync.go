@@ -7,6 +7,7 @@ import (
 	"crypto/md5"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
@@ -112,22 +113,9 @@ func validateSyncSystemInput(input syncSystemRequest, requireSecret bool) (syncS
 		return input, errors.New("invalid remote system")
 	}
 	if input.HostKeyFingerprint != "" {
-		validFingerprint := false
-		if strings.HasPrefix(input.HostKeyFingerprint, "SHA256:") {
-			payload := strings.TrimPrefix(input.HostKeyFingerprint, "SHA256:")
-			decoded, err := base64.StdEncoding.DecodeString(payload)
-			if err != nil {
-				decoded, err = base64.StdEncoding.WithPadding(base64.NoPadding).DecodeString(payload)
-			}
-			validFingerprint = err == nil && len(decoded) == sha256.Size
-		} else {
-			hexPayload := strings.ReplaceAll(input.HostKeyFingerprint, ":", "")
-			if len(hexPayload) == sha256.Size*2 && strings.Trim(hexPayload, "0123456789abcdefABCDEF") == "" {
-				decoded, err := hex.DecodeString(hexPayload)
-				validFingerprint = err == nil && len(decoded) == sha256.Size
-			}
-		}
-		if !validFingerprint {
+		// 严格解码：base64 尾部 padding 位必须为零，避免"低 2 bit 变化仍匹配"的指纹伪造。
+		// Strict decoding rejects non-zero trailing base64 padding bits so corrupted fingerprints never match.
+		if decoded, valid := decodeFingerprintPayload(input.HostKeyFingerprint); !valid || len(decoded) != sha256.Size {
 			return input, errors.New("invalid remote system")
 		}
 	}
@@ -601,6 +589,7 @@ func (s *Server) deleteSyncTask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "删除同步任务失败")
 		return
 	}
+	s.releaseSyncLock(item.ID)
 	s.serviceEvent(r, "sync_task_delete", user.Username, "target=%d result=success", item.ID)
 	writeData(w, http.StatusOK, "同步任务已删除", nil)
 }
@@ -636,10 +625,29 @@ func (s *Server) syncLock(id int64) *sync.Mutex {
 	}
 	lock := s.syncLocks[id]
 	if lock == nil {
+		// 容量保护：锁表超过上限时清扫未被持有的锁，避免已删除任务的 Mutex 永久滞留。
+		// Capacity guard: when the lock table grows past its cap, sweep locks nobody holds
+		// so mutexes of deleted tasks do not accumulate forever.
+		if len(s.syncLocks) >= 4096 {
+			for key, candidate := range s.syncLocks {
+				if candidate.TryLock() {
+					candidate.Unlock()
+					delete(s.syncLocks, key)
+				}
+			}
+		}
 		lock = &sync.Mutex{}
 		s.syncLocks[id] = lock
 	}
 	return lock
+}
+
+// releaseSyncLock 在任务删除后移除对应的锁条目，防止 map 无限增长。
+// releaseSyncLock drops a task's lock entry after deletion so the map cannot grow unbounded.
+func (s *Server) releaseSyncLock(id int64) {
+	s.syncMu.Lock()
+	defer s.syncMu.Unlock()
+	delete(s.syncLocks, id)
 }
 
 func (s *Server) runSyncTaskNow(w http.ResponseWriter, r *http.Request) {
@@ -786,25 +794,30 @@ func hostKeyCallbackFor(address, fingerprint string) ssh.HostKeyCallback {
 	}
 }
 
-func hostKeyFingerprintMatches(got, want string) bool {
-	decode := func(value string) ([]byte, bool) {
-		value = strings.TrimPrefix(strings.TrimSpace(value), "SHA256:")
-		isHex := strings.Contains(value, ":") || (len(value) == sha256.Size*2 && strings.Trim(value, "0123456789abcdefABCDEF") == "")
-		if isHex {
-			value = strings.ReplaceAll(value, ":", "")
-			decoded, err := hex.DecodeString(value)
-			return decoded, err == nil && len(decoded) == sha256.Size
-		}
-		decoded, err := base64.StdEncoding.DecodeString(value)
-		if err != nil {
-			decoded, err = base64.StdEncoding.WithPadding(base64.NoPadding).DecodeString(value)
-		}
+// decodeFingerprintPayload 解码 SHA256 主机密钥指纹：十六进制优先，base64 使用严格解码
+// （Strict 要求尾部 padding 位为零，43 字符 raw base64 的末字符低 2 bit 必须是 0）。
+// decodeFingerprintPayload decodes a SHA256 host-key fingerprint: hex first, then strict
+// base64 whose trailing padding bits must be zero (the last char of a 43-char raw encoding
+// may only use 4 of its 6 bits, so its low 2 bits must be 0).
+func decodeFingerprintPayload(value string) ([]byte, bool) {
+	value = strings.TrimPrefix(strings.TrimSpace(value), "SHA256:")
+	isHex := strings.Contains(value, ":") || (len(value) == sha256.Size*2 && strings.Trim(value, "0123456789abcdefABCDEF") == "")
+	if isHex {
+		value = strings.ReplaceAll(value, ":", "")
+		decoded, err := hex.DecodeString(value)
 		return decoded, err == nil && len(decoded) == sha256.Size
 	}
+	decoded, err := base64.StdEncoding.Strict().DecodeString(value)
+	if err != nil {
+		decoded, err = base64.RawStdEncoding.Strict().DecodeString(value)
+	}
+	return decoded, err == nil && len(decoded) == sha256.Size
+}
 
-	gotBytes, gotOK := decode(got)
-	wantBytes, wantOK := decode(want)
-	return gotOK && wantOK && string(gotBytes) == string(wantBytes)
+func hostKeyFingerprintMatches(got, want string) bool {
+	gotBytes, gotOK := decodeFingerprintPayload(got)
+	wantBytes, wantOK := decodeFingerprintPayload(want)
+	return gotOK && wantOK && subtle.ConstantTimeCompare(gotBytes, wantBytes) == 1
 }
 
 func (s *Server) openSFTP(ctx context.Context, item store.RemoteSystem) (*sftp.Client, func(), error) {
@@ -867,8 +880,20 @@ func (s *Server) executeSyncTask(ctx context.Context, task store.SyncTask) store
 	// executeSyncTask rechecks the task owner's read-only state before execution.
 	owner, ownerErr := s.store.GetUser(task.UserID)
 	if ownerErr != nil {
+		// 所有者加载失败按失败记录并跳过执行（fail-closed），与调度/手动路径一致。
+		// A failed owner lookup records a failure and skips execution (fail-closed), matching the scheduler and manual paths.
 		log.Printf("load sync task owner %d: %v", task.ID, ownerErr)
-	} else if s.userReadOnly(owner) {
+		runAt := time.Now().UTC().Format(time.RFC3339)
+		entry := store.SyncLog{TaskID: task.ID, UserID: task.UserID, RunAt: runAt, Direction: task.Direction, Result: "failure", Message: "读取任务所有者失败，任务已跳过", Detail: "同步跳过: 任务所有者不可用"}
+		if _, logErr := s.store.CreateSyncLog(context.Background(), entry); logErr != nil {
+			log.Printf("create sync log: %v", logErr)
+		}
+		if err := s.store.UpdateSyncTaskResult(context.Background(), task.ID, runAt, "failure"); err != nil {
+			log.Printf("update sync task result: %v", err)
+		}
+		return entry
+	}
+	if s.userReadOnly(owner) {
 		runAt := time.Now().UTC().Format(time.RFC3339)
 		entry := store.SyncLog{TaskID: task.ID, UserID: task.UserID, RunAt: runAt, Direction: task.Direction, Result: "failure", Message: "用户在只读时段，任务已跳过", Detail: "同步跳过: 用户在只读时段"}
 		if _, logErr := s.store.CreateSyncLog(context.Background(), entry); logErr != nil {
@@ -1227,11 +1252,20 @@ func (s *Server) executeSyncPull(ctx context.Context, task store.SyncTask, syste
 			return createErr
 		}
 		file := store.File{UserID: task.UserID, Name: name, StoredName: name, Size: remoteInfo.Size(), Mime: mimeType, SHA256: shaHex, MD5: md5Hex, StoragePath: storageDir}
-		if _, completeErr := s.store.CompleteUploadWithPlacement(ctx, uploadTask, file, func(storagePath string) error {
+		if _, completeErr := s.store.CompleteUploadWithPlacement(ctx, uploadTask, file, func(storagePath string, replace bool) error {
 			finalPath := filepath.Join(s.config.DataDir, filepath.FromSlash(storagePath))
 			if err := os.MkdirAll(filepath.Dir(finalPath), 0o755); err != nil {
 				return err
 			}
+			if !replace {
+				if _, err := os.Stat(finalPath); err == nil {
+					return fmt.Errorf("storage path already exists")
+				} else if !errors.Is(err, os.ErrNotExist) {
+					return err
+				}
+			}
+			// 覆盖同步原子替换目标，避免传输中断破坏旧文件（与远端 push 的临时文件方案同源）。
+			// Overwrite sync atomically replaces the target so interrupted transfers cannot corrupt it.
 			return os.Rename(tempPath, finalPath)
 		}); completeErr != nil {
 			return completeErr
