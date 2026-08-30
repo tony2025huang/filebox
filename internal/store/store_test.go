@@ -190,6 +190,119 @@ func TestClearIPACL(t *testing.T) {
 	}
 }
 
+func TestListUsersIncludesFolderAndReadyFileCounts(t *testing.T) {
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.EnsureAdmin("admin", "admin123", 1024*1024); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := db.CreateUser(ctx, "member", "hash", "user", 1024); err != nil {
+		t.Fatal(err)
+	}
+	member, err := db.GetUserByUsername("member")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	if _, err := db.DB.Exec("INSERT INTO folders(user_id, name, path, created_at) VALUES(?, ?, ?, ?)", member.ID, "docs", "docs", now); err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range []struct {
+		name, status string
+	}{
+		{"ready.bin", "ready"}, {"deleted.bin", "deleted"},
+	} {
+		if _, err := db.DB.Exec("INSERT INTO files(user_id, name, stored_name, size, mime, sha256, md5, status, storage_path, created_at) VALUES(?, ?, ?, 4, ?, ?, ?, ?, ?, ?)", member.ID, item.name, item.name, "application/octet-stream", "sha", "md5", item.status, "files/member/"+item.name, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	users, total, err := db.ListUsers(ctx, "member", 1, 20)
+	if err != nil || total != 1 || len(users) != 1 {
+		t.Fatalf("ListUsers() = %d users, total %d, %v", len(users), total, err)
+	}
+	if users[0].FolderCount != 1 || users[0].FileCount != 1 {
+		t.Fatalf("user counts = folders %d, files %d", users[0].FolderCount, users[0].FileCount)
+	}
+}
+
+func TestBatchDeleteFilesIsAtomicAndUpdatesQuota(t *testing.T) {
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.EnsureAdmin("admin", "admin123", 1024*1024); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	admin, err := db.GetUserByUsername("admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	ids := make([]int64, 0, 2)
+	for _, item := range []struct {
+		name string
+		size int
+	}{
+		{"one.bin", 3}, {"two.bin", 4},
+	} {
+		result, err := db.DB.Exec("INSERT INTO files(user_id, name, stored_name, size, mime, sha256, md5, status, storage_path, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, 'ready', ?, ?)", admin.ID, item.name, item.name, item.size, "application/octet-stream", "sha", "md5", "files/admin/"+item.name, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		id, err := result.LastInsertId()
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, id)
+	}
+	if _, err := db.DB.Exec("UPDATE users SET used_bytes = 7 WHERE id = ?", admin.ID); err != nil {
+		t.Fatal(err)
+	}
+	paths, err := db.BatchDeleteFiles(ctx, ids, admin.ID, false)
+	if err != nil || len(paths) != 2 {
+		t.Fatalf("BatchDeleteFiles() = %v, %v", paths, err)
+	}
+	for _, id := range ids {
+		file, err := db.FindFile(ctx, id)
+		if err != nil || file.Status != "deleted" {
+			t.Fatalf("deleted file %d = %+v, %v", id, file, err)
+		}
+	}
+	admin, err = db.GetUser(admin.ID)
+	if err != nil || admin.UsedBytes != 0 {
+		t.Fatalf("used bytes after batch delete = %d, %v", admin.UsedBytes, err)
+	}
+
+	if err := db.CreateUser(ctx, "other", "hash", "user", 1024); err != nil {
+		t.Fatal(err)
+	}
+	other, err := db.GetUserByUsername("other")
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := db.DB.Exec("INSERT INTO files(user_id, name, stored_name, size, mime, sha256, md5, status, storage_path, created_at) VALUES(?, 'other.bin', 'other.bin', 2, ?, ?, ?, 'ready', ?, ?)", other.ID, "application/octet-stream", "sha", "md5", "files/other/other.bin", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherID, err := result.LastInsertId()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.BatchDeleteFiles(ctx, []int64{otherID, ids[0]}, admin.ID, false); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("cross-user batch delete error = %v, want ErrNotFound", err)
+	}
+	file, err := db.FindFile(ctx, otherID)
+	if err != nil || file.Status != "ready" {
+		t.Fatalf("cross-user batch delete changed file = %+v, %v", file, err)
+	}
+}
+
 func TestShareStorageAndSettings(t *testing.T) {
 	db, err := Open(t.TempDir())
 	if err != nil {

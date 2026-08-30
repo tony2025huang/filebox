@@ -105,6 +105,16 @@ Object.assign(en, {
   'admin.securityEyebrow': 'ACCOUNT SECURITY', 'admin.securityHeading': 'Security settings', 'admin.securityCopy': 'Configure password strength and source-IP login lock policies.', 'admin.passwordMinLength': 'Minimum password length', 'admin.passwordComplexity': 'Password complexity classes', 'admin.ipLockWindow': 'IP lock window', 'admin.ipLockThreshold': 'IP lock threshold', 'admin.ipAutoUnlock': 'Auto-unlock IPs', 'admin.ipUnlockMinutes': 'IP unlock period', 'admin.totpEnabled': 'Enable TOTP two-factor authentication', 'admin.ipAclEnabled': 'Enable IP allowlist', 'admin.ipWhitelist': 'IP allowlist', 'admin.ipWhitelistPlaceholder': 'For example 127.0.0.1, 10.0.0.0/8', 'admin.securitySaveHint': 'Security changes take effect after saving the user.', 'admin.locksEyebrow': 'LOCK MANAGEMENT', 'admin.locksHeading': 'Lock management', 'admin.locksCopy': 'Review and release source-IP and user login locks.', 'admin.refreshLocks': 'Refresh locks', 'admin.ipLocks': 'IP locks', 'admin.userLocks': 'User locks', 'admin.ip': 'IP address', 'admin.failedCount': 'Failures', 'admin.lockedUntil': 'Locked until', 'admin.notLocked': 'Not locked', 'admin.unlock': 'Release', 'admin.noLocks': 'No lock records', 'notice.lockReleased': 'Lock released', 'error.passwordChangeRequired': 'Change the initial password first', 'logReason.totpFailed': 'Invalid authenticator code', 'logReason.ipLocked': 'IP locked'
 })
 
+Object.assign(zhCN, {
+  'files.batchDelete': '删除所选（{count}）', 'confirm.deleteFiles': '确定删除选中的 {count} 个文件吗？', 'notice.filesDeleted': '已删除 {count} 个文件', 'admin.folderCount': '目录数', 'error.batchDeleteEmpty': '请至少选择一个文件', 'error.invalidFileId': '文件编号无效', 'logs.delete': '删除文件'
+})
+Object.assign(zhTW, {
+  'files.batchDelete': '刪除所選（{count}）', 'confirm.deleteFiles': '確定刪除選取的 {count} 個檔案嗎？', 'notice.filesDeleted': '已刪除 {count} 個檔案', 'admin.folderCount': '目錄數', 'error.batchDeleteEmpty': '請至少選擇一個檔案', 'error.invalidFileId': '檔案編號無效', 'logs.delete': '刪除檔案'
+})
+Object.assign(en, {
+  'files.batchDelete': 'Delete selected ({count})', 'confirm.deleteFiles': 'Delete the selected {count} files?', 'notice.filesDeleted': '{count} files deleted', 'admin.folderCount': 'Folders', 'error.batchDeleteEmpty': 'Select at least one file', 'error.invalidFileId': 'Invalid file id', 'logs.delete': 'Delete file'
+})
+
 export const dictionaries = { 'zh-CN': zhCN, 'zh-TW': zhTW, en }
 export const currentLocale = ref('zh-CN')
 export const systemLocale = ref('zh-CN')

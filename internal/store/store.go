@@ -93,6 +93,8 @@ type User struct {
 	Language           string `json:"language"`
 	QuotaBytes         int64  `json:"quotaBytes"`
 	UsedBytes          int64  `json:"usedBytes"`
+	FolderCount        int64  `json:"folderCount"`
+	FileCount          int64  `json:"fileCount"`
 	Disabled           bool   `json:"disabled"`
 	FailedAttempts     int    `json:"-"`
 	LockedUntil        string `json:"-"`
@@ -1162,7 +1164,7 @@ func (s *Store) ListUsers(ctx context.Context, keyword string, page, pageSize in
 	if err := s.DB.QueryRowContext(ctx, "SELECT COUNT(id) FROM users WHERE username LIKE ?", pattern).Scan(&total); err != nil {
 		return nil, 0, err
 	}
-	rows, err := s.DB.QueryContext(ctx, "SELECT id, username, password_hash, role, language, quota_bytes, used_bytes, disabled, failed_attempts, COALESCE(locked_until, ''), COALESCE(must_change_password, 0), COALESCE(totp_secret, ''), COALESCE(totp_enabled, 0), COALESCE(last_used_totp, ''), COALESCE(ip_acl_enabled, 0), COALESCE(ip_whitelist, ''), created_at, updated_at FROM users WHERE username LIKE ? ORDER BY id LIMIT ? OFFSET ?", pattern, pageSize, (page-1)*pageSize)
+	rows, err := s.DB.QueryContext(ctx, "SELECT id, username, password_hash, role, language, quota_bytes, used_bytes, disabled, failed_attempts, COALESCE(locked_until, ''), COALESCE(must_change_password, 0), COALESCE(totp_secret, ''), COALESCE(totp_enabled, 0), COALESCE(last_used_totp, ''), COALESCE(ip_acl_enabled, 0), COALESCE(ip_whitelist, ''), created_at, updated_at, (SELECT COUNT(id) FROM folders WHERE folders.user_id = users.id), (SELECT COUNT(id) FROM files WHERE files.user_id = users.id AND files.status = 'ready') FROM users WHERE username LIKE ? ORDER BY id LIMIT ? OFFSET ?", pattern, pageSize, (page-1)*pageSize)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -1171,7 +1173,7 @@ func (s *Store) ListUsers(ctx context.Context, keyword string, page, pageSize in
 	for rows.Next() {
 		var user User
 		var disabled, mustChange, totpEnabled, ipACLEnabled int
-		if err := rows.Scan(&user.ID, &user.Username, &user.PasswordHash, &user.Role, &user.Language, &user.QuotaBytes, &user.UsedBytes, &disabled, &user.FailedAttempts, &user.LockedUntil, &mustChange, &user.TOTPSecret, &totpEnabled, &user.LastUsedTOTP, &ipACLEnabled, &user.IPWhitelist, &user.CreatedAt, &user.UpdatedAt); err != nil {
+		if err := rows.Scan(&user.ID, &user.Username, &user.PasswordHash, &user.Role, &user.Language, &user.QuotaBytes, &user.UsedBytes, &disabled, &user.FailedAttempts, &user.LockedUntil, &mustChange, &user.TOTPSecret, &totpEnabled, &user.LastUsedTOTP, &ipACLEnabled, &user.IPWhitelist, &user.CreatedAt, &user.UpdatedAt, &user.FolderCount, &user.FileCount); err != nil {
 			return nil, 0, err
 		}
 		user.Disabled = disabled != 0
@@ -1181,6 +1183,72 @@ func (s *Store) ListUsers(ctx context.Context, keyword string, page, pageSize in
 		users = append(users, user)
 	}
 	return users, total, rows.Err()
+}
+
+// BatchDeleteFiles 在单个事务中软删除全部请求文件，并返回物理清理所需的存储路径。
+// BatchDeleteFiles transactionally soft-deletes every requested file and returns its storage paths for physical cleanup.
+func (s *Store) BatchDeleteFiles(ctx context.Context, fileIDs []int64, userID int64, admin bool) ([]string, error) {
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	rollback := func(err error) ([]string, error) {
+		_ = tx.Rollback()
+		return nil, err
+	}
+	seen := make(map[int64]struct{}, len(fileIDs))
+	type deletion struct {
+		id    int64
+		owner int64
+		size  int64
+		path  string
+	}
+	deletions := make([]deletion, 0, len(fileIDs))
+	for _, fileID := range fileIDs {
+		if _, exists := seen[fileID]; exists {
+			continue
+		}
+		seen[fileID] = struct{}{}
+		var item deletion
+		var status string
+		if err := tx.QueryRowContext(ctx, "SELECT user_id, size, storage_path, status FROM files WHERE id = ?", fileID).Scan(&item.owner, &item.size, &item.path, &status); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return rollback(ErrNotFound)
+			}
+			return rollback(err)
+		}
+		if status == "deleted" || (!admin && item.owner != userID) {
+			return rollback(ErrNotFound)
+		}
+		item.id = fileID
+		deletions = append(deletions, item)
+	}
+	if len(deletions) == 0 {
+		return rollback(ErrNotFound)
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	usedByOwner := make(map[int64]int64)
+	for _, item := range deletions {
+		if _, err := tx.ExecContext(ctx, "UPDATE files SET status = 'deleted', deleted_at = ? WHERE id = ?", now, item.id); err != nil {
+			return rollback(err)
+		}
+		usedByOwner[item.owner] += item.size
+	}
+	// Update each owner's quota once so the transaction remains consistent for mixed-admin batches.
+	// 对管理员跨用户批量删除按用户汇总扣减，保证配额更新与文件状态同事务提交。
+	for owner, size := range usedByOwner {
+		if _, err := tx.ExecContext(ctx, "UPDATE users SET used_bytes = MAX(0, used_bytes - ?), updated_at = ? WHERE id = ?", size, now, owner); err != nil {
+			return rollback(err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	paths := make([]string, 0, len(deletions))
+	for _, item := range deletions {
+		paths = append(paths, item.path)
+	}
+	return paths, nil
 }
 
 func (s *Store) CreateUploadTask(ctx context.Context, task UploadTask) error {

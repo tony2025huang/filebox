@@ -252,6 +252,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/files/{taskID}/complete", s.requireAuth(s.completeUpload))
 	mux.HandleFunc("GET /api/files/{id}/download", s.requireAuth(s.download))
 	mux.HandleFunc("POST /api/files/batch-download", s.requireAuth(s.batchDownload))
+	mux.HandleFunc("POST /api/files/batch-delete", s.requireAuth(s.batchDelete))
 	mux.HandleFunc("GET /api/files/progress/stream", s.requireAuth(s.uploadProgressStream))
 	mux.HandleFunc("GET /api/files/{id}/preview", s.requireAuth(s.preview))
 	mux.HandleFunc("POST /api/files/{id}/share", s.requireAuth(s.createShare))
@@ -1987,6 +1988,60 @@ func (s *Server) batchDownload(w http.ResponseWriter, r *http.Request) {
 	s.serviceEvent(r, "download", user.Username, "name=%s count=%d result=success reason=batch", strings.Join(names, ","), len(names))
 }
 
+// batchDelete 以单事务删除选中文件，提交后再清理物理文件内容。
+// batchDelete deletes selected files atomically and removes their physical content after commit.
+func (s *Server) batchDelete(w http.ResponseWriter, r *http.Request) {
+	user := currentUser(r.Context())
+	var input struct {
+		IDs []int64 `json:"ids"`
+	}
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	if len(input.IDs) == 0 {
+		writeErrorData(w, http.StatusBadRequest, "请至少选择一个文件", map[string]string{"code": "BATCH_DELETE_EMPTY"})
+		return
+	}
+	for _, id := range input.IDs {
+		if id < 1 {
+			writeErrorData(w, http.StatusBadRequest, "文件编号无效", map[string]string{"code": "INVALID_FILE_ID"})
+			return
+		}
+	}
+	targetIDs := make([]string, 0, len(input.IDs))
+	seen := make(map[int64]struct{}, len(input.IDs))
+	for _, id := range input.IDs {
+		if _, exists := seen[id]; exists {
+			continue
+		}
+		seen[id] = struct{}{}
+		targetIDs = append(targetIDs, strconv.FormatInt(id, 10))
+	}
+	target := strings.Join(targetIDs, ",")
+	auditResult, auditReason := "failure", "batch"
+	defer func() {
+		s.serviceEvent(r, "delete", user.Username, "target=%s result=%s reason=batch", target, auditResult)
+		s.recordAudit(r, &user.ID, user.Username, "delete", target, auditResult, auditReason)
+	}()
+	paths, err := s.store.BatchDeleteFiles(r.Context(), input.IDs, user.ID, user.Role == "admin")
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "文件不存在")
+		return
+	}
+	if err != nil {
+		log.Printf("batch delete files: %v", err)
+		writeError(w, http.StatusInternalServerError, "删除文件失败")
+		return
+	}
+	for _, path := range paths {
+		if err := os.Remove(filepath.Join(s.config.DataDir, path)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			log.Printf("remove batch-deleted file content: %v", err)
+		}
+	}
+	auditResult = "success"
+	writeData(w, http.StatusOK, "文件已删除", map[string]any{"deleted": len(paths)})
+}
+
 func uniqueZipEntryName(name string, used map[string]struct{}) string {
 	key := strings.ToLower(name)
 	if _, exists := used[key]; !exists {
@@ -2111,7 +2166,8 @@ func (s *Server) shareMeta(w http.ResponseWriter, r *http.Request) {
 	writeData(w, http.StatusOK, "获取成功", map[string]any{
 		"fileName": file.Name, "fileSize": file.Size, "mime": effectiveFileMIME(file),
 		"expiresAt": share.ExpiresAt, "maxDownloads": share.MaxDownloads, "downloadCount": share.DownloadCount,
-		"createdBy": owner.Username,
+		"downloadAvailable": share.MaxDownloads == 0 || share.DownloadCount < int64(share.MaxDownloads),
+		"createdBy":         owner.Username,
 	})
 }
 
@@ -2149,7 +2205,7 @@ func (s *Server) shareDownload(w http.ResponseWriter, r *http.Request) {
 	}
 	if !allowed {
 		reason = "share_limit"
-		writeError(w, http.StatusForbidden, "分享次数已用完")
+		writeErrorData(w, http.StatusForbidden, "分享次数已用完", map[string]string{"code": "SHARE_DOWNLOAD_LIMIT"})
 		return
 	}
 	handle, err := os.Open(filepath.Join(s.config.DataDir, file.StoragePath))
@@ -2808,7 +2864,7 @@ func (s *Server) logActions(w http.ResponseWriter, r *http.Request) {
 	// usedOnly=true returns only the action types actually present in the current user's logs
 	// (deduplicated by recency), so regular users are not offered filters they never triggered.
 	all := []string{
-		"login", "register", "upload", "upload_init", "upload_chunk", "download", "share", "share_view", "share_download",
+		"login", "register", "upload", "upload_init", "upload_chunk", "download", "delete", "share", "share_view", "share_download",
 		"settings_update", "brand_update", "language_update", "password_change", "password_reset",
 		"user_create", "user_update", "user_disabled", "totp_update", "ip_acl_update",
 		"folder_create", "folder_list", "folder_rename", "folder_delete",
@@ -3077,7 +3133,7 @@ func writeErrorData(w http.ResponseWriter, status int, message string, data any)
 }
 
 func publicUser(user store.User) map[string]any {
-	return map[string]any{"id": user.ID, "username": user.Username, "role": user.Role, "language": user.Language, "quotaBytes": user.QuotaBytes, "usedBytes": user.UsedBytes, "disabled": user.Disabled, "mustChangePassword": user.MustChangePassword, "totpEnabled": user.TOTPEnabled, "ipAclEnabled": user.IPACLEnabled, "ipWhitelist": user.IPWhitelist, "createdAt": user.CreatedAt}
+	return map[string]any{"id": user.ID, "username": user.Username, "role": user.Role, "language": user.Language, "quotaBytes": user.QuotaBytes, "usedBytes": user.UsedBytes, "folderCount": user.FolderCount, "fileCount": user.FileCount, "disabled": user.Disabled, "mustChangePassword": user.MustChangePassword, "totpEnabled": user.TOTPEnabled, "ipAclEnabled": user.IPACLEnabled, "ipWhitelist": user.IPWhitelist, "createdAt": user.CreatedAt}
 }
 
 func isValidLang(value string) bool {

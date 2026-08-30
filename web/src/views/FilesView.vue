@@ -9,7 +9,7 @@
       <div class="dir-bar"><div class="breadcrumb"><button class="breadcrumb-link" :class="{ active: !currentDir }" @click="navigateDir('')">{{ t('files.root') }}</button><template v-for="(seg, i) in breadcrumbs" :key="seg"><span class="breadcrumb-sep">/</span><button class="breadcrumb-link" :class="{ active: i === breadcrumbs.length - 1 }" @click="navigateDir(breadcrumbPath(i))">{{ seg }}</button></template></div><button class="secondary-button" @click="openNewFolder"><FolderPlus :size="17" /> {{ t('files.newFolder') }}</button></div>
       <div v-if="childFolders.length" class="folder-list"><div v-for="folder in childFolders" :key="folder.id" class="folder-row"><button class="folder-entry" @click="navigateDir(folder.path)"><Folder :size="17" /> <strong>{{ folder.name }}</strong></button><div class="folder-actions"><button class="icon-button" :title="t('files.renameFolder')" @click="openRenameFolder(folder)"><Pencil :size="15" /></button><button class="icon-button danger-icon" :title="t('files.deleteFolder')" @click="removeFolder(folder)"><Trash2 :size="15" /></button></div></div></div>
       <div class="upload-zone" :class="{ dragging }" @dragover.prevent="dragging = true" @dragleave.prevent="dragging = false" @drop.prevent="handleDrop"><UploadCloud :size="26" /><div><strong>{{ t('files.dropTitle') }}</strong><span>{{ t('files.dropCopy') }}</span></div><button class="secondary-button" @click="fileInput?.click()"><Upload :size="17" /> {{ t('files.choose') }}</button><button class="secondary-button" @click="folderInput?.click()"><FolderUp :size="17" /> {{ t('files.uploadFolder') }}</button><input ref="fileInput" type="file" multiple hidden @change="handleInput" /><input ref="folderInput" type="file" webkitdirectory directory multiple hidden @change="handleFolderInput" /></div>
-      <div class="toolbar"><div class="search-box"><Search :size="17" /><input v-model="searchInput" :placeholder="t('files.searchPlaceholder')" @keyup.enter="search" /><button v-if="searchInput" :title="t('files.clearSearch')" @click="searchInput = ''; search()"><X :size="15" /></button></div><button v-if="selectedIds.size" class="secondary-button batch-download-button" :disabled="batchDownloading" @click="batchDownload"><Archive :size="16" /> {{ t('files.batchDownload', { count: selectedIds.size }) }}</button><button v-if="batchDownloading" class="icon-button" :title="t('common.cancel')" @click="cancelBatchDownload"><X :size="16" /></button><label class="check-label md5-toggle"><input v-model="showMd5" type="checkbox" @change="persistMd5" /> {{ t('files.showMd5') }}</label><button class="refresh-button" :title="t('files.refresh')" @click="loadFiles"><RefreshCw :size="17" :class="{ spin: loading }" /></button><span class="result-count">{{ t('common.files', { count: total }) }}</span></div>
+      <div class="toolbar"><div class="search-box"><Search :size="17" /><input v-model="searchInput" :placeholder="t('files.searchPlaceholder')" @keyup.enter="search" /><button v-if="searchInput" :title="t('files.clearSearch')" @click="searchInput = ''; search()"><X :size="15" /></button></div><button v-if="selectedIds.size" class="secondary-button batch-download-button" :disabled="batchDownloading || batchDeleting" @click="batchDownload"><Archive :size="16" /> {{ t('files.batchDownload', { count: selectedIds.size }) }}</button><button v-if="selectedIds.size" class="secondary-button batch-delete-button" :disabled="batchDownloading || batchDeleting" @click="batchDelete"><Trash2 :size="16" /> {{ t('files.batchDelete', { count: selectedIds.size }) }}</button><button v-if="batchDownloading" class="icon-button" :title="t('common.cancel')" @click="cancelBatchDownload"><X :size="16" /></button><label class="check-label md5-toggle"><input v-model="showMd5" type="checkbox" @change="persistMd5" /> {{ t('files.showMd5') }}</label><button class="refresh-button" :title="t('files.refresh')" @click="loadFiles"><RefreshCw :size="17" :class="{ spin: loading }" /></button><span class="result-count">{{ t('common.files', { count: total }) }}</span></div>
       <div v-if="notice" class="alert success">{{ notice }}</div><div v-if="error" class="alert error">{{ error }}</div>
       <div class="file-table-wrap"><table class="file-table"><thead><tr><th class="select-col"><input type="checkbox" :checked="allSelected" :aria-label="t('files.selectAll')" @change="toggleSelectAll" /></th><th>{{ t('files.name') }}</th><th>{{ t('files.size') }}</th><th>{{ t('files.type') }}</th><th>{{ t('files.integrity') }}</th><th>{{ t('files.uploadedAt') }}</th><th></th></tr></thead><tbody><tr v-for="file in files" :key="file.id" :class="{ 'row-selected': selectedIds.has(file.id) }"><td class="select-col"><input type="checkbox" :checked="selectedIds.has(file.id)" :aria-label="t('files.selectFile', { name: file.name })" @change="toggleSelect(file.id)" /></td><td><div class="file-title"><span class="file-icon"><component :is="fileIcon(file.mime, file.name)" :size="17" /></span><strong>{{ file.name }}</strong><span v-if="isShared(file)" class="shared-mark" :title="t('files.shared')"><Share2 :size="14" /></span></div></td><td>{{ formatBytes(file.size) }}</td><td><span class="mime-label" :class="{ 'preview-mime': canPreview(file.mime) }">{{ shortMime(file.mime) }}</span></td><td><code v-if="showMd5" class="md5-cell" :title="`MD5 ${file.md5}\nSHA-256 ${file.sha256}`">{{ file.md5 }}</code><span v-else class="hash-label" :title="`MD5 ${file.md5}\nSHA-256 ${file.sha256}`"><CheckCircle2 :size="15" /> {{ t('files.hashes') }}</span></td><td>{{ formatDate(file.createdAt) }}</td><td><div class="row-actions"><button v-if="canPreview(file.mime)" class="icon-button" :title="t('files.preview')" @click="openPreview(file)"><Eye :size="17" /></button><button class="icon-button" :title="t('files.share')" @click="openShare(file)"><Share2 :size="17" /></button><button class="icon-button" :title="t('files.download')" @click="download(file)"><Download :size="17" /></button><button class="icon-button danger-icon" :title="t('files.delete')" @click="remove(file)"><Trash2 :size="17" /></button></div></td></tr></tbody></table><div v-if="!loading && !files.length" class="empty-state"><FolderOpen :size="34" /><strong>{{ keyword ? t('files.noMatch') : t('files.noFiles') }}</strong><span>{{ keyword ? t('files.noMatchCopy') : t('files.noFilesCopy') }}</span></div><div v-if="loading" class="empty-state"><LoaderCircle :size="28" class="spin" /><span>{{ t('files.loading') }}</span></div></div>
       <div v-if="total > pageSize" class="pagination"><button class="secondary-button" :disabled="page === 1" @click="page--; loadFiles()"><ChevronLeft :size="16" /> {{ t('common.previous') }}</button><span>{{ t('common.page', { page }) }}</span><button class="secondary-button" :disabled="page * pageSize >= total" @click="page++; loadFiles()">{{ t('common.next') }} <ChevronRight :size="16" /></button></div><BrandFooter />
@@ -51,6 +51,7 @@ const shareFile = ref(null); const shareForm = ref({ expiresInHours: 24, maxDown
 // Batch-download selection: selectedIds holds the chosen file ids and survives page/search changes.
 const selectedIds = reactive(new Set())
 const batchDownloading = ref(false)
+const batchDeleting = ref(false)
 let batchDownloadController = null
 const allSelected = computed(() => files.value.length > 0 && files.value.every(file => selectedIds.has(file.id)))
 function toggleSelect(id) { if (selectedIds.has(id)) selectedIds.delete(id); else selectedIds.add(id) }
@@ -72,6 +73,25 @@ async function batchDownload() {
   } catch (err) { if (err.name !== 'AbortError') error.value = `${err.message}` } finally { if (batchDownloadController === controller) batchDownloadController = null; batchDownloading.value = false }
 }
 function cancelBatchDownload() { batchDownloadController?.abort() }
+// batchDelete 确认并删除选中文件，随后刷新配额和当前目录列表。
+// batchDelete confirms and removes the selected files, then refreshes quota and the current directory.
+async function batchDelete() {
+  const ids = [...selectedIds]
+  if (!ids.length || !window.confirm(t('confirm.deleteFiles', { count: ids.length }))) return
+  batchDeleting.value = true
+  error.value = ''
+  try {
+    await api('/api/files/batch-delete', { method: 'POST', body: JSON.stringify({ ids }) })
+    selectedIds.clear()
+    notice.value = t('notice.filesDeleted', { count: ids.length })
+    await loadMe()
+    await loadFiles()
+  } catch (err) {
+    error.value = err.message
+  } finally {
+    batchDeleting.value = false
+  }
+}
 const quotaPercent = computed(() => Math.min(100, user.value.quotaBytes ? Math.round((user.value.usedBytes / user.value.quotaBytes) * 100) : 0))
 // 整体上传速率：1s 采样所有进行中上传的合计 loadedBytes，3 秒滑动平均平滑。
 // Overall upload rate: sample the total loadedBytes of active uploads every second and smooth with a 3-second moving average.
@@ -266,7 +286,7 @@ async function download(file) {
   }
   setTimeout(() => { downloads.value = downloads.value.filter(entry => entry !== item) }, 4000)
 }
-async function remove(file) { if (!window.confirm(t('confirm.deleteFile', { name: file.name }))) return; try { await api(`/api/files/${file.id}`, { method: 'DELETE' }); notice.value = t('notice.fileDeleted'); await loadMe(); await loadFiles() } catch (err) { error.value = err.message } }
+async function remove(file) { if (!window.confirm(t('confirm.deleteFile', { name: file.name }))) return; try { await api(`/api/files/${file.id}`, { method: 'DELETE' }); selectedIds.delete(file.id); notice.value = t('notice.fileDeleted'); await loadMe(); await loadFiles() } catch (err) { error.value = err.message } }
 async function logout() { try { await api('/api/auth/logout', { method: 'POST' }) } finally { clearSession(); router.push('/login') } }
 function formatBytes(bytes = 0) { if (bytes < 1024) return `${bytes} B`; const units = ['KB', 'MB', 'GB', 'TB']; let value = bytes; let unit = -1; do { value /= 1024; unit++ } while (value >= 1024 && unit < units.length - 1); return `${value.toFixed(value >= 10 ? 0 : 1)} ${units[unit]}` }
 function formatDate(value) { return value ? new Date(value).toLocaleString(currentLocale.value === 'en' ? 'en-US' : currentLocale.value, { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '-' }

@@ -63,7 +63,7 @@ function actionLabel(value) {
 // actionGroups 把动作分为业务与"系统配置"两组，供筛选下拉分组展示。
 // actionGroups splits actions into business and "system configuration" groups for grouped filter options.
 const actionGroups = computed(() => {
-  const business = new Set(['login', 'register', 'upload', 'upload_init', 'upload_chunk', 'download', 'share', 'share_view', 'share_download'])
+  const business = new Set(['login', 'register', 'upload', 'upload_init', 'upload_chunk', 'download', 'delete', 'share', 'share_view', 'share_download'])
   const businessActions = actions.value.filter(action => business.has(action))
   const systemActions = actions.value.filter(action => !business.has(action))
   return { businessActions, systemActions }

@@ -412,6 +412,50 @@ func TestSharingLifecycleAndAtomicDownloadLimit(t *testing.T) {
 	}
 }
 
+func TestBatchDeleteFilesEndpointDeletesAtomically(t *testing.T) {
+	db, handler := newTestServer(t)
+	token := testAdminToken(t, handler)
+	first := uploadTestFile(t, handler, token, "batch-one.txt", "text/plain", []byte("one"))
+	second := uploadTestFile(t, handler, token, "batch-two.txt", "text/plain", []byte("two"))
+	firstID := int64(first["id"].(float64))
+	secondID := int64(second["id"].(float64))
+	firstMeta, err := db.FindFile(context.Background(), firstID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondMeta, err := db.FindFile(context.Background(), secondID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deleted := testJSONRequest(t, handler, http.MethodPost, "/api/files/batch-delete", token, `{"ids":[`+strconv.FormatInt(firstID, 10)+`,`+strconv.FormatInt(secondID, 10)+`]}`)
+	if deleted.Code != http.StatusOK {
+		t.Fatalf("batch delete status = %d: %s", deleted.Code, deleted.Body.String())
+	}
+	if responseData(t, deleted)["deleted"] != float64(2) {
+		t.Fatalf("batch delete response = %s", deleted.Body.String())
+	}
+	list := testJSONRequest(t, handler, http.MethodGet, "/api/files", token, "")
+	if list.Code != http.StatusOK || responseData(t, list)["total"] != float64(0) {
+		t.Fatalf("files after batch delete = %d: %s", list.Code, list.Body.String())
+	}
+	admin, err := db.GetUserByUsername("admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if admin.UsedBytes != 0 {
+		t.Fatalf("used bytes after batch delete = %d", admin.UsedBytes)
+	}
+	for _, file := range []store.File{firstMeta, secondMeta} {
+		if _, err := os.Stat(filepath.Join(db.DataDir, file.StoragePath)); !os.IsNotExist(err) {
+			t.Fatalf("physical file %q still exists, stat error = %v", file.StoragePath, err)
+		}
+	}
+	logs, _, err := db.ListAuditLogs(context.Background(), &admin.ID, "delete", "", "", 1, 20)
+	if err != nil || len(logs) == 0 || logs[0].Reason != "batch" || logs[0].Result != "success" {
+		t.Fatalf("batch delete audit logs = %+v, %v", logs, err)
+	}
+}
+
 func TestPreviewContentDisposition(t *testing.T) {
 	_, handler := newTestServer(t)
 	token := testAdminToken(t, handler)
