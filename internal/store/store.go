@@ -29,6 +29,17 @@ var ErrConflict = errors.New("conflict")
 // ErrQuota indicates that an operation would exceed the user's quota.
 var ErrQuota = errors.New("quota exceeded")
 
+// QuotaError 携带配额明细，供 API 层向用户展示已用/配额/文件大小/差额。
+// QuotaError carries quota details so the API layer can surface used/quota/file size/shortfall.
+type QuotaError struct {
+	UsedBytes  int64
+	QuotaBytes int64
+	FileSize   int64
+}
+
+func (e *QuotaError) Error() string { return ErrQuota.Error() }
+func (e *QuotaError) Unwrap() error { return ErrQuota }
+
 // ErrNotEmpty 表示目录非空，禁止删除。
 // ErrNotEmpty indicates that a directory is not empty and cannot be deleted.
 var ErrNotEmpty = errors.New("directory not empty")
@@ -1191,7 +1202,7 @@ func (s *Store) CreateUploadTask(ctx context.Context, task UploadTask) error {
 	}
 	if used-replacingSize+pending+task.Size > quota {
 		tx.Rollback()
-		return ErrQuota
+		return &QuotaError{UsedBytes: used, QuotaBytes: quota, FileSize: task.Size}
 	}
 	if task.Resolve == "overwrite" {
 		var oldID, oldSize int64
@@ -1311,6 +1322,13 @@ func (s *Store) completeUpload(ctx context.Context, task UploadTask, file File, 
 		if err != nil {
 			tx.Rollback()
 			return File{}, err
+		}
+		// 分配器为同名冲突生成了数字后缀（如 multi (1).txt）时，用户可见名同步跟随，
+		// 否则列表/下载中多个同名文件无法区分。原名不再占用时（如覆盖场景）保持原名。
+		// When the allocator produced a suffixed storage name (e.g. "multi (1).txt"), the
+		// user-visible name follows so concurrent same-name uploads stay distinguishable.
+		if file.StoredName != file.Name {
+			file.Name = file.StoredName
 		}
 		if err := place(file.StoragePath); err != nil {
 			tx.Rollback()

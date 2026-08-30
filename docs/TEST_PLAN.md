@@ -8,7 +8,7 @@
 - 启动：`bin\filebox.exe --addr=:18081 --data=<tmp-data> --admin-user=admin --admin-pass=Admin123! --min-free-space=0 --log-enabled=true --log-dir=<tmp-logs>`（独立端口 18081，独立数据目录）
 - 初始账号 admin/Admin123!（mustChangePassword=true）→ 登录后改密 Filebox123!
 - 中文 JSON body 使用 UTF-8 字节数组（PS 5.1 避免乱码）；.ps1 脚本带 UTF-8 BOM
-- 测试脚本：`.test-data\stage2\test-lib2.ps1`（辅助库）、`test-setup2.ps1`（准备）、`test-transfer2.ps1`（分片/秒传/文件夹/配额）、`test-share2.ps1`（分享/预览/限速/注册/统计/日志）、`test-expire.ps1`（分享过期）、`test-resume1gb.ps1`（1GB 断点续传）、`test-regress2.ps1`（阶段一回归）、`test-batch5.ps1`（v011 批次 14-17 前端专项）
+- 测试脚本：`.test-data\stage2\test-lib2.ps1`（辅助库）、`test-setup2.ps1`（准备）、`test-transfer2.ps1`（分片/秒传/文件夹/配额）、`test-share2.ps1`（分享/预览/限速/注册/统计/日志）、`test-expire.ps1`（分享过期）、`test-resume1gb.ps1`（1GB 断点续传）、`test-regress2.ps1`（阶段一回归）、`test-batch5.ps1`（v011 批次 14-17 前端专项）、`test-batch6.ps1`（v011 批次 18-19 专项）
 
 ## 1. 功能主流程（阶段二新增）
 | 编号 | 用例 | 预期 |
@@ -57,6 +57,16 @@
 | P16a-c | 产物不含 `logs.retentionDays`（已从日志页移除）；含 `logRetentionDays`/`logRetentionCopy`（系统设置页签） | 日志周期迁移 |
 | P17a-d | 产物含 `brand-footer-title`/`brand-footer-desc`；brand 接口含 siteTitle/siteDescription | 页脚品牌块 |
 
-## 5. 测试报告输出
+## 5. 前端专项（v011 反馈批次 18-19，test-batch6.ps1）
+| 编号 | 用例 | 预期 |
+|---|---|---|
+| P18a-c | 同名冲突 409 产生审计失败记录（reason=conflict）；日志页 /api/logs 可见 upload_init 失败（含原因）；非法名/配额失败审计 reason 细分 | 上传失败日志 |
+| P18d | logActions 含 upload_init/upload_chunk | 动作列表 |
+| P19a | 配额不足 403 响应含 QUOTA_EXCEEDED + usedBytes/quotaBytes/fileSize 明细 | 配额明细 |
+| P19b | 单文件超限 413 + FILE_TOO_LARGE + maxFileSize（与非法名分离） | 超限独立提示 |
+| P19c | 前端产物含 QUOTA_EXCEEDED/FILE_TOO_LARGE 映射与冲突队列（conflictQueue） | 前端映射 |
+| P18e | 3 个同名文件 rename 后全部完成（xx.txt / xx (1).txt / xx (2).txt） | 并发同名容错 |
+
+## 6. 测试报告输出
 - 用例通过/失败统计、缺陷清单（编号/级别/复现/实际/预期）、服务日志片段
 - 结论：是否满足 docs/DEV_DOC.md 阶段二验收标准

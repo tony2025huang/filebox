@@ -30,7 +30,7 @@ function applyFilters() { page.value = 1; filters.keyword = keywordInput.value.t
 async function logout() { try { await api('/api/auth/logout', { method: 'POST' }) } finally { clearSession(); router.push('/login') } }
 function actionLabel(value) {
   const labels = {
-    login: t('logs.login'), register: t('logs.register'), upload: t('logs.upload'), download: t('logs.download'),
+    login: t('logs.login'), register: t('logs.register'), upload: t('logs.upload'), upload_init: t('logs.uploadInit'), upload_chunk: t('logs.uploadChunk'), download: t('logs.download'),
     share: t('logs.share'), share_view: t('logs.shareView'), share_download: t('logs.shareDownload'),
     settings_update: t('logs.settingsUpdate'), brand_update: t('logs.brandUpdate'), language_update: t('logs.languageUpdate'),
     password_change: t('logs.passwordChange'), password_reset: t('logs.passwordReset'), user_create: t('logs.userCreate'),
@@ -44,12 +44,12 @@ function actionLabel(value) {
 // actionGroups 把动作分为业务与"系统配置"两组，供筛选下拉分组展示。
 // actionGroups splits actions into business and "system configuration" groups for grouped filter options.
 const actionGroups = computed(() => {
-  const business = new Set(['login', 'register', 'upload', 'download', 'share', 'share_view', 'share_download'])
+  const business = new Set(['login', 'register', 'upload', 'upload_init', 'upload_chunk', 'download', 'share', 'share_view', 'share_download'])
   const businessActions = actions.value.filter(action => business.has(action))
   const systemActions = actions.value.filter(action => !business.has(action))
   return { businessActions, systemActions }
 })
-function reasonLabel(value) { const keys = { user_not_found: 'logReason.userNotFound', wrong_password: 'logReason.wrongPassword', user_disabled: 'logReason.userDisabled', locked: 'logReason.locked', ip_locked: 'logReason.ipLocked', totp_failed: 'logReason.totpFailed', not_found: 'logReason.notFound', content_not_found: 'logReason.contentNotFound', checksum_mismatch: 'logReason.checksumMismatch', save_failed: 'logReason.saveFailed', upload_failed: 'logReason.uploadFailed' }; return keys[value] ? t(keys[value]) : value || '-' }
+function reasonLabel(value) { const keys = { user_not_found: 'logReason.userNotFound', wrong_password: 'logReason.wrongPassword', user_disabled: 'logReason.userDisabled', locked: 'logReason.locked', ip_locked: 'logReason.ipLocked', totp_failed: 'logReason.totpFailed', not_found: 'logReason.notFound', content_not_found: 'logReason.contentNotFound', checksum_mismatch: 'logReason.checksumMismatch', save_failed: 'logReason.saveFailed', upload_failed: 'logReason.uploadFailed', invalid_name: 'logReason.invalidName', too_large: 'logReason.tooLarge', conflict: 'logReason.conflict', disk_full: 'logReason.diskFull', quota_exceeded: 'logReason.quotaExceeded', task_not_found: 'logReason.taskNotFound', invalid_index: 'logReason.invalidIndex', rate_limited: 'logReason.rateLimited', size_mismatch: 'logReason.sizeMismatch', invalid_dir: 'logReason.invalidDir', invalid_resolve: 'logReason.invalidResolve', prepare_failed: 'logReason.prepareFailed', conflict_check_failed: 'logReason.conflictCheckFailed', disk_check_failed: 'logReason.diskCheckFailed', task_create_failed: 'logReason.taskCreateFailed', invalid_chunk_size: 'logReason.invalidChunkSize' }; return keys[value] ? t(keys[value]) : value || '-' }
 function formatDate(value) { return value ? new Date(value).toLocaleString(currentLocale.value === 'en' ? 'en-US' : currentLocale.value, { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '-' }
 onMounted(() => { loadActions(); loadAdminData(); loadLogs() })
 </script>

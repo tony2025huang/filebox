@@ -19,7 +19,7 @@ const settingsMessageKeys = {
   '密码复杂度无效': 'error.invalidPasswordComplexity', 'IP 锁定窗口无效': 'error.invalidIPLockWindow', 'IP 锁定阈值无效': 'error.invalidIPLockThreshold', 'IP 解锁时长无效': 'error.invalidIPUnlockMinutes'
 }
 
-const codeKeys = { DISK_FULL: 'error.diskFull', PASSWORD_CHANGE_REQUIRED: 'error.passwordChangeRequired', REGISTER_DISABLED: 'error.registerDisabled' }
+const codeKeys = { DISK_FULL: 'error.diskFull', PASSWORD_CHANGE_REQUIRED: 'error.passwordChangeRequired', REGISTER_DISABLED: 'error.registerDisabled', FILE_TOO_LARGE: 'error.fileTooLarge' }
 
 // computeFileSHA256 computes the client checksum and reports progress for the upload row.
 // computeFileSHA256 计算客户端 SHA-256，并向上传项报告校验进度。
@@ -68,6 +68,16 @@ class IncrementalSHA256 {
 // localizeError 按稳定的状态码/错误码/消息映射翻译，并保留未知后端消息作为回退。
 export function localizeError(error = {}) {
   const code = error.data?.code || error.code
+  if (code === 'QUOTA_EXCEEDED') {
+    const used = Number(error.data?.usedBytes) || 0
+    const quota = Number(error.data?.quotaBytes) || 0
+    const fileSize = Number(error.data?.fileSize) || 0
+    return t('error.quotaExceededDetail', { used: formatErrorBytes(used), quota: formatErrorBytes(quota), fileSize: formatErrorBytes(fileSize), short: formatErrorBytes(Math.max(0, used + fileSize - quota)) })
+  }
+  if (code === 'FILE_TOO_LARGE') {
+    const max = Number(error.data?.maxFileSize) || 0
+    return t('error.fileTooLargeDetail', { max: formatErrorBytes(max) })
+  }
   if (code && codeKeys[code]) return t(codeKeys[code])
   if (error.backendMessage && settingsMessageKeys[error.backendMessage]) return t(settingsMessageKeys[error.backendMessage])
   if (error.backendMessage && messageKeys[error.backendMessage]) return t(messageKeys[error.backendMessage])
@@ -75,6 +85,15 @@ export function localizeError(error = {}) {
   const statusKeys = { 401: 'error.authRequired', 403: 'error.adminRequired', 409: 'error.conflict', 413: 'error.uploadFailed', 503: 'error.diskFull' }
   if (statusKeys[error.status]) return t(statusKeys[error.status])
   return error.backendMessage || error.message || t('error.requestFailed')
+}
+
+function formatErrorBytes(bytes = 0) {
+  if (bytes < 1024) return `${bytes} B`
+  const units = ['KB', 'MB', 'GB', 'TB']
+  let value = bytes
+  let unit = -1
+  do { value /= 1024; unit++ } while (value >= 1024 && unit < units.length - 1)
+  return `${value.toFixed(value >= 10 ? 0 : 1)} ${units[unit]}`
 }
 
 // api 统一附加 Bearer token、JSON 请求头，并将非 2xx 响应转换为本地化错误。

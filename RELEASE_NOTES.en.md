@@ -82,6 +82,17 @@ Stage 2 release notes
 - The log page no longer embeds the retention panel; log retention is managed from the admin System tab (same API).
 - The footer is now a brand info block: site title + description on the first line, followed by copyright / ICP / police filing lines.
 
+### Concurrent uploads and failure feedback (v011 feedback batch, delivered with v0.2.0)
+
+- Same-name conflicts are handled as a queue: dropping several same-name files shows one conflict prompt after another, every upload is eventually resolved (with a 60s cancel timeout), and uploads can no longer stall in "preparing"; renamed duplicates get user-visible numbered names (`xx.txt`, `xx (1).txt`, `xx (2).txt`).
+- Failed or cancelled uploads stay in the transfer drawer with a red status and reason, and can be retried or dismissed instead of silently disappearing after a couple of seconds.
+- Every rejection path of upload initialization and chunk upload now records an audit row and a service event with a granular reason (invalid name / too large / conflict / disk full / quota exceeded / task not found / etc.), filterable in the admin log page.
+
+### Quota and single-file limit message improvements (v011 feedback batch, delivered with v0.2.0)
+
+- Quota rejection returns `QUOTA_EXCEEDED` with used/quota/file-size details; the UI shows "Quota exceeded: X used of Y, this file needs Z, short by W. Free up space or adjust the quota."
+- Files over `--max-file-size` return `413 FILE_TOO_LARGE` with the limit; the UI clearly says the file exceeds the single-file limit instead of the misleading generic name/size error.
+
 ### Single-binary delivery and deployment guide
 
 - The deliverable is a single executable (embedded frontend, pure-Go SQLite, zero runtime dependencies); `make release` (or `scripts\release.ps1` on Windows) produces `dist/filebox-windows-amd64.exe`, `dist/filebox-linux-amd64`, and `dist/SHA256SUMS.txt` (CGO_ENABLED=0, -trimpath, -s -w) that run without Go or Node installed.

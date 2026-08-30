@@ -1,5 +1,16 @@
 # Requirement Change Log
 
+## 2026-08-30 - v011 验证反馈批次（问题 18-19，并入阶段二 v0.2.0 交付）
+
+- **问题 18（并发同名上传卡死 + 上传失败日志）**：
+  - 前端：FilesView 冲突弹窗由单个 ref 改为**冲突队列**（`conflictQueue` 数组 + `activeConflict` 计算属性），并发多个同名文件同时 409 时依次弹出处理，每个 `askConflict` 协程最终必定 resolve；未决冲突 60 秒超时按取消处理，杜绝协程永久挂死卡「准备中」；弹窗显示「还有 N 个同名文件待处理」提示。
+  - 前端：上传失败/取消项不再 2.2 秒后静默消失——失败项保留在传输抽屉（红色状态 + 失败原因 + 重试/移除按钮，`transfer-failed`/`transfer-error-text` 样式），由用户重试或点击关闭。
+  - 后端：`uploadInit` 与 `uploadChunk` 失败分支补审计——`recordAudit("upload_init"|"upload_chunk", name, "failure", reason)` + `serviceEvent`，reason 细分（invalid_name/too_large/conflict/disk_full/quota_exceeded/task_not_found/invalid_index/rate_limited/size_mismatch/…），后台日志页（/api/logs）与 server.err.log 均可查；`logActions` 白名单补 `upload_init`/`upload_chunk`，日志页 actionLabel/reasonLabel 三语文案补齐。
+  - 附带修复：重命名（同名后缀）上传完成后用户可见 `name` 同步跟随 `stored_name`（如 `multi.txt` → `multi (1).txt`），列表/下载中多个同名文件可区分（此前仅磁盘名区分、界面显示相同原名）。
+- **问题 19（超出配额提示优化）**：
+  - 后端：store 新增 `QuotaError`（含 usedBytes/quotaBytes/fileSize），`CreateUploadTask` 配额超限时返回明细；`uploadInit` 配额拒绝响应升级为 `403 + code:"QUOTA_EXCEEDED" + usedBytes/quotaBytes/fileSize`；`max-file-size` 超限与非法名分离——独立 `413 + code:"FILE_TOO_LARGE" + maxFileSize`，文案「文件超过单文件大小上限」，不再误导为「文件名或文件大小无效」。
+  - 前端：`localizeError` 增加 `QUOTA_EXCEEDED`（格式化「配额不足：当前已用 X / 总配额 Y，文件需 Z，超出 W，请清理空间或调整配额」）与 `FILE_TOO_LARGE`（「文件超过单文件大小上限 M」）映射；i18n 三语言文案。
+
 ## 2026-08-30 - v011 验证反馈批次（问题 14-17，并入阶段二 v0.2.0 交付）
 
 - **问题 14（管理后台页签化）**：AdminView 重构为左侧垂直菜单 + 右侧内容区布局（`admin-layout`/`admin-sidebar`/`admin-tab`），六个页签：概览（统计卡 + 系统默认语言）、用户管理（搜索 + 表格 + 新建）、安全设置（密码策略 + IP 锁定）、品牌设置（含版权字段）、锁定管理（IP/用户锁定）、系统设置（日志周期 + 注册开关 + 上传限速）；`?tab=` 查询参数深链，切换页签时同步 URL，刷新后保持所在页签。

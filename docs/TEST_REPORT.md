@@ -14,7 +14,8 @@
 | 1GB 断点续传 | test-resume1gb | 9 | 9 | 0 |
 | 阶段一回归 | test-regress2 | 26 | 26 | 0 |
 | v011 批次 5 前端专项（14-17） | test-batch5 | 14 | 14 | 0 |
-| **合计** | **7 套件** | **104** | **104** | **0** |
+| v011 批次 6 专项（18-19） | test-batch6 | 14 | 14 | 0 |
+| **合计** | **8 套件** | **118** | **118** | **0** |
 
 ## 二、阶段二验收项与结果
 
@@ -33,6 +34,7 @@
 | 审计日志含分享/注册动作 | F901-F905：share/share_view/share_download/register 均入库，logActions 含 register | ✅ |
 | 回归（阶段一） | R01-R11：单分片上传/下载/删除闭环+双哈希、0 字节（md5=d41d8cd9…）、冲突 rename/overwrite、非法名 400、越权 404、未登录 401、普通用户 admin 403、日志隔离、登录锁定/解除、品牌/语言、CLI reset-password/locks、Range 206 | ✅ |
 | v011 批次 5（问题 14-17） | P14a-e：`/admin?tab=system` 200、产物含 admin-tab/admin-layout/admin-sidebar 与六个页签键、`query.tab` 深链读取；P15a-b：modal-backdrop/modal-panel + totpReenroll/ip-acl 三请求保留；P16a-c：LogsView 已移除 retention 面板、系统设置页签含 logRetentionDays/logRetentionCopy；P17a-d：brand-footer-title/brand-footer-desc 类与 brand 接口 siteTitle/siteDescription | ✅ |
+| v011 批次 6（问题 18-19） | P18a-c：同名冲突 409 产生审计失败记录（reason=conflict）、日志页可见 upload_init 失败、非法名/配额失败审计 reason 细分；P18d：logActions 含 upload_init/upload_chunk；P18e：3 个同名文件 rename 后全部完成（multi.txt / multi (1).txt / multi (2).txt，name 跟随）；P19a：配额不足 403 含 QUOTA_EXCEEDED+usedBytes/quotaBytes/fileSize；P19b：单文件超限 413+FILE_TOO_LARGE+maxFileSize；P19c：前端产物含映射与冲突队列 | ✅ |
 
 ## 三、缺陷清单（测试发现，已修复并复测）
 
@@ -55,4 +57,4 @@
 
 ## 五、结论
 
-阶段二全部验收标准达成：104/104 用例通过（7 套件，含 v011 反馈批次 5 前端专项 14 项），0 遗留缺陷（测试发现的 3 个缺陷均已代码级修复并复测）。满足 docs/DEV_DOC.md 阶段二验收标准与 docs/CODEX_TASK_2.md 全部条目；v011 验证问题修复单 17 项全部交付。
+阶段二全部验收标准达成：118/118 用例通过（8 套件，含 v011 反馈批次 5/6 前端专项各 14 项），0 遗留缺陷（测试发现的 3 个缺陷均已代码级修复并复测）。满足 docs/DEV_DOC.md 阶段二验收标准与 docs/CODEX_TASK_2.md 全部条目；v011 验证问题修复单 19 项全部交付。

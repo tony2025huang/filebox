@@ -1286,23 +1286,41 @@ func (s *Server) uploadInit(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &input) {
 		return
 	}
+	// 失败审计：upload-init 的每个拒绝分支都记录审计与服务事件，便于后台日志页与
+	// server.err.log 排查（原因细分 invalid_name/too_large/conflict/disk_full/quota_exceeded/…）。
+	// Failure audit: every rejection branch records an audit row and a service event so the
+	// admin log page and server.err.log can explain why initialization failed.
+	auditName := input.Name
+	rejectInit := func(status int, message, reason string, data any) {
+		s.recordAudit(r, &user.ID, user.Username, "upload_init", auditName, "failure", reason)
+		s.serviceEvent(r, "upload_init", user.Username, "name=%s size=%d result=failure reason=%s", auditName, input.Size, reason)
+		if data != nil {
+			writeErrorData(w, status, message, data)
+		} else {
+			writeError(w, status, message)
+		}
+	}
 	displayName, err := validateUploadName(input.Name)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "文件名包含非法字符，禁止上传")
+		rejectInit(http.StatusBadRequest, "文件名包含非法字符，禁止上传", "invalid_name", nil)
 		return
 	}
 	name, err := sanitizeName(displayName)
-	if err != nil || input.Size < 0 || input.Size > s.config.MaxFileSize {
-		writeError(w, http.StatusBadRequest, "文件名或文件大小无效")
+	if err != nil || input.Size < 0 {
+		rejectInit(http.StatusBadRequest, "文件名或文件大小无效", "invalid_name", nil)
+		return
+	}
+	if input.Size > s.config.MaxFileSize {
+		rejectInit(http.StatusRequestEntityTooLarge, "文件超过单文件大小上限", "too_large", map[string]any{"code": "FILE_TOO_LARGE", "maxFileSize": s.config.MaxFileSize})
 		return
 	}
 	if input.Resolve != "" && input.Resolve != "overwrite" && input.Resolve != "rename" {
-		writeError(w, http.StatusBadRequest, "冲突处理方式无效")
+		rejectInit(http.StatusBadRequest, "冲突处理方式无效", "invalid_resolve", nil)
 		return
 	}
 	dir, err := validateUploadDir(input.Dir)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "目录无效")
+		rejectInit(http.StatusBadRequest, "目录无效", "invalid_dir", nil)
 		return
 	}
 	// v011：上传目标目录自动补齐目录记录，保证导航与上传一致。
@@ -1314,11 +1332,11 @@ func (s *Server) uploadInit(w http.ResponseWriter, r *http.Request) {
 	conflict, conflictErr := s.store.FindUploadConflict(r.Context(), user.ID, relativeDir, name)
 	if conflictErr != nil && !errors.Is(conflictErr, store.ErrNotFound) {
 		log.Printf("find upload conflict: %v", conflictErr)
-		writeError(w, http.StatusInternalServerError, "检查同名文件失败")
+		rejectInit(http.StatusInternalServerError, "检查同名文件失败", "conflict_check_failed", nil)
 		return
 	}
 	if conflictErr == nil && input.Resolve == "" {
-		writeErrorData(w, http.StatusConflict, "同名文件已存在", map[string]any{
+		rejectInit(http.StatusConflict, "同名文件已存在", "conflict", map[string]any{
 			"conflict": true,
 			"existing": map[string]any{"id": conflict.ID, "name": conflict.Name, "size": conflict.Size, "createdAt": conflict.CreatedAt, "md5": conflict.MD5},
 		})
@@ -1330,22 +1348,22 @@ func (s *Server) uploadInit(w http.ResponseWriter, r *http.Request) {
 		_, free, _, err := diskusage.DiskUsage(s.config.DataDir)
 		if err != nil {
 			log.Printf("check disk usage: %v", err)
-			writeError(w, http.StatusInternalServerError, "无法检查系统存储空间")
+			rejectInit(http.StatusInternalServerError, "无法检查系统存储空间", "disk_check_failed", nil)
 			return
 		}
 		if free < s.config.MinFreeSpace {
-			writeErrorData(w, http.StatusServiceUnavailable, "系统存储空间不足，暂时禁止上传", map[string]string{"code": "DISK_FULL"})
+			rejectInit(http.StatusServiceUnavailable, "系统存储空间不足，暂时禁止上传", "disk_full", map[string]string{"code": "DISK_FULL"})
 			return
 		}
 	}
 	chunkSize, totalChunks, err := uploadChunkLayout(input.Size, input.ChunkSize)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		rejectInit(http.StatusBadRequest, err.Error(), "invalid_chunk_size", nil)
 		return
 	}
 	taskID, err := randomID()
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "创建上传任务失败")
+		rejectInit(http.StatusInternalServerError, "创建上传任务失败", "task_create_failed", nil)
 		return
 	}
 	mimeType := strings.TrimSpace(input.Mime)
@@ -1357,14 +1375,16 @@ func (s *Server) uploadInit(w http.ResponseWriter, r *http.Request) {
 	}
 	task := store.UploadTask{ID: taskID, UserID: user.ID, Name: name, Size: input.Size, ChunkSize: chunkSize, TotalChunks: totalChunks, Status: "pending", Mime: mimeType, StorageDir: relativeDir, Resolve: input.Resolve}
 	if err := s.store.CreateUploadTask(r.Context(), task); err != nil {
-		if errors.Is(err, store.ErrQuota) {
-			writeError(w, http.StatusForbidden, "超出用户配额")
+		var quotaErr *store.QuotaError
+		if errors.As(err, &quotaErr) {
+			rejectInit(http.StatusForbidden, "超出用户配额", "quota_exceeded", map[string]any{"code": "QUOTA_EXCEEDED", "usedBytes": quotaErr.UsedBytes, "quotaBytes": quotaErr.QuotaBytes, "fileSize": quotaErr.FileSize})
 			return
 		}
 		log.Printf("create upload task: %v", err)
-		writeError(w, http.StatusInternalServerError, "创建上传任务失败")
+		rejectInit(http.StatusInternalServerError, "创建上传任务失败", "task_create_failed", nil)
 		return
 	}
+	s.serviceEvent(r, "upload_init", user.Username, "name=%s size=%d result=success task=%s", name, input.Size, task.ID)
 	writeData(w, http.StatusOK, "上传任务已创建", map[string]any{"taskId": task.ID, "chunkSize": task.ChunkSize, "totalChunks": task.TotalChunks, "uploadedChunks": []int{}})
 }
 
@@ -1380,15 +1400,21 @@ func (s *Server) uploadChunk(w http.ResponseWriter, r *http.Request) {
 	}
 	task, err := s.store.GetUploadTask(r.Context(), taskID)
 	if errors.Is(err, store.ErrNotFound) || task.UserID != user.ID || task.Status != "pending" {
+		s.recordAudit(r, &user.ID, user.Username, "upload_chunk", taskID, "failure", "task_not_found")
+		s.serviceEvent(r, "upload_chunk", user.Username, "task=%s index=%d result=failure reason=task_not_found", taskID, index)
 		writeError(w, http.StatusNotFound, "上传任务不存在")
 		return
 	}
 	if index < 0 || index >= task.TotalChunks {
+		s.recordAudit(r, &user.ID, user.Username, "upload_chunk", task.Name, "failure", "invalid_index")
+		s.serviceEvent(r, "upload_chunk", user.Username, "name=%s index=%d result=failure reason=invalid_index", task.Name, index)
 		writeError(w, http.StatusBadRequest, "分片序号无效")
 		return
 	}
 	expectedSize := expectedUploadChunkSize(task, index)
 	if r.ContentLength >= 0 && r.ContentLength > expectedSize {
+		s.recordAudit(r, &user.ID, user.Username, "upload_chunk", task.Name, "failure", "too_large")
+		s.serviceEvent(r, "upload_chunk", user.Username, "name=%s index=%d result=failure reason=too_large", task.Name, index)
 		writeError(w, http.StatusRequestEntityTooLarge, "上传内容超过声明大小")
 		return
 	}
@@ -1403,18 +1429,24 @@ func (s *Server) uploadChunk(w http.ResponseWriter, r *http.Request) {
 		waitErr := waitForUploadRate(waitContext, limiter, expectedSize)
 		cancel()
 		if waitErr != nil {
+			s.recordAudit(r, &user.ID, user.Username, "upload_chunk", task.Name, "failure", "rate_limited")
+			s.serviceEvent(r, "upload_chunk", user.Username, "name=%s index=%d result=failure reason=rate_limited", task.Name, index)
 			writeError(w, http.StatusTooManyRequests, "上传过慢，请稍后重试")
 			return
 		}
 	}
 	tmpDir := filepath.Join(s.config.DataDir, "tmp", task.ID)
 	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
+		s.recordAudit(r, &user.ID, user.Username, "upload_chunk", task.Name, "failure", "prepare_failed")
+		s.serviceEvent(r, "upload_chunk", user.Username, "name=%s index=%d result=failure reason=prepare_failed", task.Name, index)
 		writeError(w, http.StatusInternalServerError, "无法准备上传空间")
 		return
 	}
 	path := filepath.Join(tmpDir, strconv.Itoa(index))
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
+		s.recordAudit(r, &user.ID, user.Username, "upload_chunk", task.Name, "failure", "write_failed")
+		s.serviceEvent(r, "upload_chunk", user.Username, "name=%s index=%d result=failure reason=write_failed", task.Name, index)
 		writeError(w, http.StatusInternalServerError, "无法写入上传内容")
 		return
 	}
@@ -1424,22 +1456,30 @@ func (s *Server) uploadChunk(w http.ResponseWriter, r *http.Request) {
 	closeErr := file.Close()
 	if copyErr != nil || closeErr != nil {
 		_ = os.Remove(path)
+		s.recordAudit(r, &user.ID, user.Username, "upload_chunk", task.Name, "failure", "write_failed")
+		s.serviceEvent(r, "upload_chunk", user.Username, "name=%s index=%d result=failure reason=write_failed", task.Name, index)
 		writeError(w, http.StatusBadRequest, "写入上传内容失败")
 		return
 	}
 	if written > expectedSize {
 		_ = os.Remove(path)
+		s.recordAudit(r, &user.ID, user.Username, "upload_chunk", task.Name, "failure", "too_large")
+		s.serviceEvent(r, "upload_chunk", user.Username, "name=%s index=%d result=failure reason=too_large", task.Name, index)
 		writeError(w, http.StatusRequestEntityTooLarge, "上传内容超过声明大小")
 		return
 	}
 	if written != expectedSize {
 		_ = os.Remove(path)
+		s.recordAudit(r, &user.ID, user.Username, "upload_chunk", task.Name, "failure", "size_mismatch")
+		s.serviceEvent(r, "upload_chunk", user.Username, "name=%s index=%d result=failure reason=size_mismatch", task.Name, index)
 		writeError(w, http.StatusBadRequest, "上传内容大小与声明不一致")
 		return
 	}
 	if err := s.store.SetChunk(r.Context(), task.ID, index, written, hex.EncodeToString(hash.Sum(nil))); err != nil {
 		_ = os.Remove(path)
 		log.Printf("set uploaded chunk: %v", err)
+		s.recordAudit(r, &user.ID, user.Username, "upload_chunk", task.Name, "failure", "save_failed")
+		s.serviceEvent(r, "upload_chunk", user.Username, "name=%s index=%d result=failure reason=save_failed", task.Name, index)
 		writeError(w, http.StatusInternalServerError, "保存上传分片失败")
 		return
 	}
@@ -2569,7 +2609,7 @@ func (s *Server) listLogs(w http.ResponseWriter, r *http.Request) {
 // logActions returns every audit action (including system-configuration events) for log-page filtering.
 func (s *Server) logActions(w http.ResponseWriter, _ *http.Request) {
 	writeData(w, http.StatusOK, "获取成功", []string{
-		"login", "register", "upload", "download", "share", "share_view", "share_download",
+		"login", "register", "upload", "upload_init", "upload_chunk", "download", "share", "share_view", "share_download",
 		"settings_update", "brand_update", "language_update", "password_change", "password_reset",
 		"user_create", "user_update", "user_disabled", "totp_update", "ip_acl_update",
 		"folder_create", "folder_list", "folder_rename", "folder_delete",
