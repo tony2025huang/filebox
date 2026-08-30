@@ -40,6 +40,126 @@ func newTestServer(t *testing.T) (*store.Store, http.Handler) {
 	return db, server.Handler()
 }
 
+func TestUploadCollectionLifecycleAndAnonymousUpload(t *testing.T) {
+	db, handler := newTestServer(t)
+	token := testAdminToken(t, handler)
+	created := testJSONRequest(t, handler, http.MethodPost, "/api/collections", token, `{"name":"外部收集","expiresInHours":24,"maxUploads":2,"maxFileBytes":1024}`)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create collection status = %d: %s", created.Code, created.Body.String())
+	}
+	collection := responseData(t, created)
+	collectionID := int64(collection["id"].(float64))
+	collectionToken := collection["token"].(string)
+	if !strings.HasPrefix(collection["url"].(string), "/u/") {
+		t.Fatalf("collection url = %#v", collection["url"])
+	}
+	meta := testJSONRequest(t, handler, http.MethodGet, "/api/collections/"+collectionToken+"/meta", "", "")
+	if meta.Code != http.StatusOK || responseData(t, meta)["uploadAllowed"] != true {
+		t.Fatalf("collection meta = %d: %s", meta.Code, meta.Body.String())
+	}
+	content := []byte("hello")
+	init := testJSONRequest(t, handler, http.MethodPost, "/api/collections/"+collectionToken+"/upload-init", "", `{"name":"received.txt","size":5,"chunkSize":0,"remark":"来自访客"}`)
+	if init.Code != http.StatusOK {
+		t.Fatalf("collection init status = %d: %s", init.Code, init.Body.String())
+	}
+	taskID := responseData(t, init)["taskId"].(string)
+	chunk := testBinaryRequest(t, handler, http.MethodPut, "/api/collections/"+collectionToken+"/upload-chunk/"+taskID+"/0", "", content)
+	if chunk.Code != http.StatusOK {
+		t.Fatalf("collection chunk status = %d: %s", chunk.Code, chunk.Body.String())
+	}
+	complete := testJSONRequest(t, handler, http.MethodPost, "/api/collections/"+collectionToken+"/upload-complete/"+taskID, "", `{}`)
+	if complete.Code != http.StatusOK {
+		t.Fatalf("collection complete status = %d: %s", complete.Code, complete.Body.String())
+	}
+	fileID := int64(responseData(t, complete)["id"].(float64))
+	files := testJSONRequest(t, handler, http.MethodGet, "/api/collections/"+strconv.FormatInt(collectionID, 10)+"/files", token, "")
+	if files.Code != http.StatusOK {
+		t.Fatalf("collection files status = %d: %s", files.Code, files.Body.String())
+	}
+	items := responseData(t, files)["items"].([]any)
+	if len(items) != 1 || items[0].(map[string]any)["remark"] != "来自访客" || int64(items[0].(map[string]any)["fileId"].(float64)) != fileID {
+		t.Fatalf("collection files = %#v", items)
+	}
+	ownerFiles := testJSONRequest(t, handler, http.MethodGet, "/api/files?dir="+url.QueryEscape("uploads/"+collectionToken), token, "")
+	if ownerFiles.Code != http.StatusOK || responseData(t, ownerFiles)["total"] != float64(1) {
+		t.Fatalf("owner collection directory = %d: %s", ownerFiles.Code, ownerFiles.Body.String())
+	}
+	secondInit := testJSONRequest(t, handler, http.MethodPost, "/api/collections/"+collectionToken+"/upload-init", "", `{"name":"second.txt","size":1,"chunkSize":0}`)
+	if secondInit.Code != http.StatusOK {
+		t.Fatalf("second collection init status = %d: %s", secondInit.Code, secondInit.Body.String())
+	}
+	thirdInit := testJSONRequest(t, handler, http.MethodPost, "/api/collections/"+collectionToken+"/upload-init", "", `{"name":"third.txt","size":1,"chunkSize":0}`)
+	if thirdInit.Code != http.StatusForbidden {
+		t.Fatalf("collection limit status = %d: %s", thirdInit.Code, thirdInit.Body.String())
+	}
+	var limitBody response
+	if err := json.Unmarshal(thirdInit.Body.Bytes(), &limitBody); err != nil || limitBody.Data.(map[string]any)["code"] != "COLLECTION_LIMIT" {
+		t.Fatalf("collection limit body = %s", thirdInit.Body.String())
+	}
+	revoked := testJSONRequest(t, handler, http.MethodDelete, "/api/collections/"+strconv.FormatInt(collectionID, 10), token, "")
+	if revoked.Code != http.StatusOK {
+		t.Fatalf("revoke collection = %d: %s", revoked.Code, revoked.Body.String())
+	}
+	revokedMeta := testJSONRequest(t, handler, http.MethodGet, "/api/collections/"+collectionToken+"/meta", "", "")
+	if revokedMeta.Code != http.StatusOK || responseData(t, revokedMeta)["status"] != "revoked" {
+		t.Fatalf("revoked collection meta = %d: %s", revokedMeta.Code, revokedMeta.Body.String())
+	}
+	blocked := testJSONRequest(t, handler, http.MethodPost, "/api/collections/"+collectionToken+"/upload-init", "", `{"name":"blocked.txt","size":1,"chunkSize":0}`)
+	if blocked.Code != http.StatusForbidden {
+		t.Fatalf("revoked collection init = %d: %s", blocked.Code, blocked.Body.String())
+	}
+	var auditCount int
+	if err := db.DB.QueryRow("SELECT COUNT(*) FROM audit_logs WHERE action = 'upload_collect' AND reason = 'collection_upload'").Scan(&auditCount); err != nil || auditCount != 1 {
+		t.Fatalf("collection success audit count = %d, %v", auditCount, err)
+	}
+}
+
+func TestUploadCollectionLimitsExpiryQuotaAndOwnership(t *testing.T) {
+	db, handler := newTestServer(t)
+	token := testAdminToken(t, handler)
+	tooLarge := testJSONRequest(t, handler, http.MethodPost, "/api/collections", token, `{"name":"small","expiresInHours":24,"maxUploads":0,"maxFileBytes":2}`)
+	small := responseData(t, tooLarge)
+	largeInit := testJSONRequest(t, handler, http.MethodPost, "/api/collections/"+small["token"].(string)+"/upload-init", "", `{"name":"large.bin","size":3,"chunkSize":0}`)
+	if largeInit.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("collection file limit = %d: %s", largeInit.Code, largeInit.Body.String())
+	}
+	var largeBody response
+	if err := json.Unmarshal(largeInit.Body.Bytes(), &largeBody); err != nil || largeBody.Data.(map[string]any)["code"] != "COLLECTION_FILE_TOO_LARGE" {
+		t.Fatalf("collection file limit body = %s", largeInit.Body.String())
+	}
+	expired := testJSONRequest(t, handler, http.MethodPost, "/api/collections", token, `{"name":"expired","expiresInHours":1,"maxUploads":0,"maxFileBytes":0}`)
+	expiredData := responseData(t, expired)
+	if _, err := db.DB.Exec("UPDATE upload_collections SET expires_at = ? WHERE id = ?", time.Now().UTC().Add(-time.Hour).Format(time.RFC3339), int64(expiredData["id"].(float64))); err != nil {
+		t.Fatal(err)
+	}
+	expiredInit := testJSONRequest(t, handler, http.MethodPost, "/api/collections/"+expiredData["token"].(string)+"/upload-init", "", `{"name":"expired.txt","size":1,"chunkSize":0}`)
+	if expiredInit.Code != http.StatusForbidden {
+		t.Fatalf("expired collection = %d: %s", expiredInit.Code, expiredInit.Body.String())
+	}
+	if _, err := db.DB.Exec("UPDATE users SET quota_bytes = 1 WHERE username = 'admin'"); err != nil {
+		t.Fatal(err)
+	}
+	quota := testJSONRequest(t, handler, http.MethodPost, "/api/collections", token, `{"name":"quota","expiresInHours":1,"maxUploads":0,"maxFileBytes":0}`)
+	quotaData := responseData(t, quota)
+	quotaInit := testJSONRequest(t, handler, http.MethodPost, "/api/collections/"+quotaData["token"].(string)+"/upload-init", "", `{"name":"quota.txt","size":2,"chunkSize":0}`)
+	if quotaInit.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("collection quota = %d: %s", quotaInit.Code, quotaInit.Body.String())
+	}
+	other := testJSONRequest(t, handler, http.MethodPost, "/api/admin/users", token, `{"username":"other-collection-user","password":"Other123!","role":"user","quotaBytes":1024}`)
+	if other.Code != http.StatusCreated {
+		t.Fatalf("create other user = %d: %s", other.Code, other.Body.String())
+	}
+	otherLogin := testJSONRequest(t, handler, http.MethodPost, "/api/auth/login", "", `{"username":"other-collection-user","password":"Other123!"}`)
+	otherToken := responseData(t, otherLogin)["token"].(string)
+	collectionID := int64(quotaData["id"].(float64))
+	if cross := testJSONRequest(t, handler, http.MethodGet, "/api/collections/"+strconv.FormatInt(collectionID, 10), otherToken, ""); cross.Code != http.StatusNotFound {
+		t.Fatalf("cross-owner collection lookup = %d: %s", cross.Code, cross.Body.String())
+	}
+	if cross := testJSONRequest(t, handler, http.MethodDelete, "/api/collections/"+strconv.FormatInt(collectionID, 10), otherToken, ""); cross.Code != http.StatusNotFound {
+		t.Fatalf("cross-owner collection revoke = %d: %s", cross.Code, cross.Body.String())
+	}
+}
+
 func testBinaryRequest(t *testing.T, handler http.Handler, method, path, token string, body []byte) *httptest.ResponseRecorder {
 	t.Helper()
 	request := httptest.NewRequest(method, path, bytes.NewReader(body))

@@ -73,9 +73,11 @@ type Server struct {
 // rateLimiter keeps one token bucket per authenticated user and evicts idle buckets.
 // rateLimiter 按用户维护令牌桶，并清理长期未访问的桶。
 type rateLimiter struct {
-	mu       sync.Mutex
-	buckets  map[int64]*rate.Limiter
-	lastSeen map[int64]time.Time
+	mu             sync.Mutex
+	buckets        map[int64]*rate.Limiter
+	lastSeen       map[int64]time.Time
+	publicBuckets  map[string]*rate.Limiter
+	publicLastSeen map[string]time.Time
 }
 
 type contextKey string
@@ -230,7 +232,7 @@ func NewServer(db *store.Store, config Config) *Server {
 	if config.JWTExpiry <= 0 {
 		config.JWTExpiry = 7 * 24 * time.Hour
 	}
-	return &Server{store: db, config: config, rateLimiter: rateLimiter{buckets: make(map[int64]*rate.Limiter), lastSeen: make(map[int64]time.Time)}}
+	return &Server{store: db, config: config, rateLimiter: rateLimiter{buckets: make(map[int64]*rate.Limiter), lastSeen: make(map[int64]time.Time), publicBuckets: make(map[string]*rate.Limiter), publicLastSeen: make(map[string]time.Time)}}
 }
 
 func (s *Server) Handler() http.Handler {
@@ -264,6 +266,20 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/files/{id}/shares", s.requireAuth(s.deleteShares))
 	mux.HandleFunc("GET /api/files/shared/{token}/meta", s.shareMeta)
 	mux.HandleFunc("GET /api/files/shared/{token}/download", s.shareDownload)
+	mux.HandleFunc("POST /api/collections", s.requireAuth(s.createCollection))
+	mux.HandleFunc("GET /api/collections", s.requireAuth(s.listCollections))
+	mux.HandleFunc("GET /api/collections/{id}", s.requireAuth(s.getCollection))
+	mux.HandleFunc("GET /api/collections/{id}/files", s.requireAuth(s.getCollectionFiles))
+	mux.HandleFunc("DELETE /api/collections/{id}", s.requireAuth(s.deleteCollection))
+	mux.HandleFunc("GET /api/collections/{token}/meta", s.collectionMeta)
+	mux.HandleFunc("POST /api/collections/{token}/upload-init", s.collectionUploadInit)
+	mux.HandleFunc("PUT /api/collections/{token}/upload-chunk/{taskID}/{index}", s.collectionUploadChunk)
+	mux.HandleFunc("POST /api/collections/{token}/upload-chunk/{taskID}/{index}", s.collectionUploadChunk)
+	mux.HandleFunc("PUT /api/collections/{token}/upload-chunk", s.collectionUploadChunk)
+	mux.HandleFunc("POST /api/collections/{token}/upload-chunk", s.collectionUploadChunk)
+	mux.HandleFunc("GET /api/collections/{token}/upload-status/{taskID}", s.collectionUploadStatus)
+	mux.HandleFunc("POST /api/collections/{token}/upload-complete/{taskID}", s.collectionUploadComplete)
+	mux.HandleFunc("POST /api/collections/{token}/upload-complete", s.collectionUploadComplete)
 	mux.HandleFunc("POST /api/folders", s.requireAuth(s.createFolder))
 	mux.HandleFunc("GET /api/folders", s.requireAuth(s.listFolders))
 	mux.HandleFunc("PATCH /api/folders/{id}", s.requireAuth(s.renameFolder))
@@ -1539,6 +1555,41 @@ func (l *rateLimiter) limiterFor(userID, bytesPerSec int64) *rate.Limiter {
 		l.buckets[userID] = limiter
 	}
 	l.lastSeen[userID] = now
+	return limiter
+}
+
+// limiterForPublic applies the same byte-rate bucket to anonymous IP/collection keys.
+// limiterForPublic 对匿名 IP 与收集 token 组合使用同一套字节限速基础设施。
+func (l *rateLimiter) limiterForPublic(key string, bytesPerSec int64) *rate.Limiter {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.publicBuckets == nil {
+		l.publicBuckets = make(map[string]*rate.Limiter)
+	}
+	if l.publicLastSeen == nil {
+		l.publicLastSeen = make(map[string]time.Time)
+	}
+	now := time.Now()
+	for item, seen := range l.publicLastSeen {
+		if now.Sub(seen) > 10*time.Minute {
+			delete(l.publicLastSeen, item)
+			delete(l.publicBuckets, item)
+		}
+	}
+	if bytesPerSec <= 0 {
+		return nil
+	}
+	limiter, ok := l.publicBuckets[key]
+	if !ok || limiter == nil || int64(limiter.Limit()) != bytesPerSec {
+		burst := bytesPerSec
+		if burst < 1024*1024 {
+			burst = 1024 * 1024
+		}
+		limiter = rate.NewLimiter(rate.Limit(bytesPerSec), int(burst))
+		limiter.ReserveN(now, limiter.Burst())
+		l.publicBuckets[key] = limiter
+	}
+	l.publicLastSeen[key] = now
 	return limiter
 }
 
@@ -2912,7 +2963,7 @@ func (s *Server) logActions(w http.ResponseWriter, r *http.Request) {
 		"login", "register", "upload", "upload_init", "upload_chunk", "download", "delete", "share", "share_view", "share_download",
 		"settings_update", "brand_update", "language_update", "password_change", "password_reset",
 		"user_create", "user_update", "user_disabled", "totp_update", "ip_acl_update",
-		"folder_create", "folder_list", "folder_rename", "folder_delete",
+		"folder_create", "folder_list", "folder_rename", "folder_delete", "collection", "upload_collect", "upload_collect_fail",
 		"file_list", "admin_stats", "log_list",
 	}
 	if r.URL.Query().Get("usedOnly") != "true" {

@@ -5,6 +5,7 @@ import AdminView from './views/AdminView.vue'
 import LogsView from './views/LogsView.vue'
 import ChangePasswordView from './views/ChangePasswordView.vue'
 import ShareView from './views/ShareView.vue'
+import UploadView from './views/UploadView.vue'
 
 const router = createRouter({
   history: createWebHistory(),
@@ -14,6 +15,7 @@ const router = createRouter({
     { path: '/', component: FilesView, meta: { titleKey: 'page.files' } },
     { path: '/logs', component: LogsView, meta: { titleKey: 'page.logs' } },
     { path: '/admin', component: AdminView, meta: { admin: true, titleKey: 'page.admin' } },
+    { path: '/u/:token', component: UploadView, meta: { public: true, uploadCollection: true, titleKey: 'collection.upload' } },
     { path: '/:token', component: ShareView, meta: { public: true, share: true, titleKey: 'share.heading' } },
     { path: '/:pathMatch(.*)*', redirect: '/' }
   ]
@@ -23,7 +25,7 @@ const router = createRouter({
 // beforeEach guards restricted pages and preserves the original destination for unauthenticated users.
 router.beforeEach(async (to) => {
   const token = localStorage.getItem('filebox_token')
-  if (to.meta.share) return true
+  if (to.meta.share || to.meta.uploadCollection) return true
   if (to.meta.public) {
     return token ? '/' : true
   }

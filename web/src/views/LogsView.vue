@@ -54,7 +54,7 @@ function actionLabel(value) {
     settings_update: t('logs.settingsUpdate'), brand_update: t('logs.brandUpdate'), language_update: t('logs.languageUpdate'),
     password_change: t('logs.passwordChange'), password_reset: t('logs.passwordReset'), user_create: t('logs.userCreate'),
     user_update: t('logs.userUpdate'), user_disabled: t('logs.userDisabled'), totp_update: t('logs.totpUpdate'),
-    ip_acl_update: t('logs.ipAclUpdate'), folder_create: t('logs.folderCreate'), folder_list: t('logs.folderList'),
+    ip_acl_update: t('logs.ipAclUpdate'), folder_create: t('logs.folderCreate'), folder_list: t('logs.folderList'), collection: t('logs.collection'), upload_collect: t('logs.uploadCollect'), upload_collect_fail: t('logs.uploadCollectFail'),
     folder_rename: t('logs.folderRename'), folder_delete: t('logs.folderDelete'), file_list: t('logs.fileList'),
     admin_stats: t('logs.adminStats'), log_list: t('logs.logList')
   }
@@ -63,7 +63,7 @@ function actionLabel(value) {
 // actionGroups 把动作分为业务与"系统配置"两组，供筛选下拉分组展示。
 // actionGroups splits actions into business and "system configuration" groups for grouped filter options.
 const actionGroups = computed(() => {
-  const business = new Set(['login', 'register', 'upload', 'upload_init', 'upload_chunk', 'download', 'delete', 'share', 'share_view', 'share_download'])
+  const business = new Set(['login', 'register', 'upload', 'upload_init', 'upload_chunk', 'upload_collect', 'upload_collect_fail', 'download', 'delete', 'share', 'share_view', 'share_download'])
   const businessActions = actions.value.filter(action => business.has(action))
   const systemActions = actions.value.filter(action => !business.has(action))
   return { businessActions, systemActions }

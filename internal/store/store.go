@@ -128,17 +128,52 @@ type File struct {
 // UploadTask 表示单文件单分片上传流程中的暂存任务。
 // UploadTask represents a temporary task in the single-file, single-chunk upload flow.
 type UploadTask struct {
-	ID          string
-	UserID      int64
-	Name        string
-	Size        int64
-	ChunkSize   int64
-	TotalChunks int
-	Status      string
-	Mime        string
-	StorageDir  string
-	Resolve     string
+	ID           string
+	UserID       int64
+	CollectionID int64
+	Remark       string
+	Name         string
+	Size         int64
+	ChunkSize    int64
+	TotalChunks  int
+	Status       string
+	Mime         string
+	StorageDir   string
+	Resolve      string
 }
+
+// UploadCollection represents an owner-controlled public upload endpoint.
+// UploadCollection 表示创建者控制的公开上传收集链接。
+type UploadCollection struct {
+	ID           int64  `json:"id"`
+	CreatedBy    int64  `json:"createdBy"`
+	Name         string `json:"name"`
+	Token        string `json:"token"`
+	ExpiresAt    string `json:"expiresAt"`
+	MaxUploads   int    `json:"maxUploads"`
+	UploadCount  int    `json:"uploadCount"`
+	MaxFileBytes int64  `json:"maxFileBytes"`
+	RevokedAt    string `json:"revokedAt,omitempty"`
+	CreatedAt    string `json:"createdAt"`
+}
+
+// UploadCollectionFile records the source collection for an uploaded file.
+// UploadCollectionFile 记录文件来自哪个收集链接以及访客备注。
+type UploadCollectionFile struct {
+	ID           int64  `json:"id"`
+	CollectionID int64  `json:"collectionId"`
+	FileID       int64  `json:"fileId"`
+	OriginalName string `json:"originalName"`
+	Remark       string `json:"remark"`
+	CreatedAt    string `json:"createdAt"`
+	File         File   `json:"file"`
+}
+
+var (
+	ErrCollectionLimit   = errors.New("collection upload limit reached")
+	ErrCollectionExpired = errors.New("collection expired")
+	ErrCollectionRevoked = errors.New("collection revoked")
+)
 
 // ChunkInfo 表示一个已写入临时目录的上传分片。
 // ChunkInfo describes an uploaded chunk recorded for resumable uploads.
@@ -310,6 +345,8 @@ CREATE INDEX IF NOT EXISTS idx_files_user_status ON files(user_id, status, creat
 CREATE TABLE IF NOT EXISTS upload_tasks (
   id TEXT PRIMARY KEY,
   user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  collection_id INTEGER NOT NULL DEFAULT 0,
+  remark TEXT NOT NULL DEFAULT '',
   name TEXT NOT NULL,
   size INTEGER NOT NULL,
   mime TEXT NOT NULL,
@@ -378,7 +415,54 @@ CREATE TABLE IF NOT EXISTS ip_failures (
 	if err := s.migrateFilesSchema(); err != nil {
 		return err
 	}
-	return s.migrateSharesSchema()
+	if err := s.migrateSharesSchema(); err != nil {
+		return err
+	}
+	return s.migrateCollectionsSchema()
+}
+
+// migrateCollectionsSchema creates collection tables and adds the optional task link.
+// migrateCollectionsSchema 创建收集链接表，并为旧上传任务补充可选关联字段。
+func (s *Store) migrateCollectionsSchema() error {
+	columns, err := tableColumns(s.DB, "upload_tasks")
+	if err != nil {
+		return err
+	}
+	if !columns["collection_id"] {
+		if _, err := s.DB.Exec("ALTER TABLE upload_tasks ADD COLUMN collection_id INTEGER NOT NULL DEFAULT 0"); err != nil {
+			return err
+		}
+	}
+	if !columns["remark"] {
+		if _, err := s.DB.Exec("ALTER TABLE upload_tasks ADD COLUMN remark TEXT NOT NULL DEFAULT ''"); err != nil {
+			return err
+		}
+	}
+	_, err = s.DB.Exec(`CREATE TABLE IF NOT EXISTS upload_collections (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  created_by INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  token TEXT NOT NULL UNIQUE,
+  expires_at TEXT NOT NULL,
+  max_uploads INTEGER NOT NULL DEFAULT 0,
+  upload_count INTEGER NOT NULL DEFAULT 0,
+  max_file_bytes INTEGER NOT NULL DEFAULT 0,
+  revoked_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_upload_collections_created_by ON upload_collections(created_by, created_at DESC);
+CREATE TABLE IF NOT EXISTS upload_collection_files (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  collection_id INTEGER NOT NULL REFERENCES upload_collections(id) ON DELETE CASCADE,
+  file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+  original_name TEXT NOT NULL,
+  remark TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_upload_collection_files_collection ON upload_collection_files(collection_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_upload_collection_files_file ON upload_collection_files(file_id);`)
+	return err
 }
 
 // migrateSharesSchema creates sharing records after any legacy files-table rebuild has finished.
@@ -1298,7 +1382,7 @@ func (s *Store) CreateUploadTask(ctx context.Context, task UploadTask) error {
 		}
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	_, err = tx.ExecContext(ctx, "INSERT INTO upload_tasks(id, user_id, name, size, mime, chunk_size, total_chunks, status, storage_dir, resolve, created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)", task.ID, task.UserID, task.Name, task.Size, task.Mime, task.ChunkSize, task.TotalChunks, task.StorageDir, task.Resolve, now, now)
+	_, err = tx.ExecContext(ctx, "INSERT INTO upload_tasks(id, user_id, collection_id, remark, name, size, mime, chunk_size, total_chunks, status, storage_dir, resolve, created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)", task.ID, task.UserID, task.CollectionID, task.Remark, task.Name, task.Size, task.Mime, task.ChunkSize, task.TotalChunks, task.StorageDir, task.Resolve, now, now)
 	if err != nil {
 		tx.Rollback()
 		return err
@@ -1310,7 +1394,7 @@ func (s *Store) GetUploadTask(ctx context.Context, id string) (UploadTask, error
 	// GetUploadTask 按任务 ID 读取上传任务，并将缺失任务映射为 ErrNotFound。
 	// GetUploadTask loads an upload task by ID and maps a missing task to ErrNotFound.
 	var task UploadTask
-	err := s.DB.QueryRowContext(ctx, "SELECT id, user_id, name, size, mime, chunk_size, total_chunks, status, COALESCE(storage_dir, ''), COALESCE(resolve, '') FROM upload_tasks WHERE id = ?", id).Scan(&task.ID, &task.UserID, &task.Name, &task.Size, &task.Mime, &task.ChunkSize, &task.TotalChunks, &task.Status, &task.StorageDir, &task.Resolve)
+	err := s.DB.QueryRowContext(ctx, "SELECT id, user_id, COALESCE(collection_id, 0), COALESCE(remark, ''), name, size, mime, chunk_size, total_chunks, status, COALESCE(storage_dir, ''), COALESCE(resolve, '') FROM upload_tasks WHERE id = ?", id).Scan(&task.ID, &task.UserID, &task.CollectionID, &task.Remark, &task.Name, &task.Size, &task.Mime, &task.ChunkSize, &task.TotalChunks, &task.Status, &task.StorageDir, &task.Resolve)
 	if errors.Is(err, sql.ErrNoRows) {
 		return UploadTask{}, ErrNotFound
 	}
@@ -1454,6 +1538,22 @@ func (s *Store) FindInstantMatch(ctx context.Context, userID int64, md5, sha256 
 	return scanFile(s.DB.QueryRowContext(ctx, "SELECT id, user_id, name, stored_name, size, mime, sha256, md5, status, storage_path, created_at, COALESCE(deleted_at, '') FROM files WHERE user_id = ? AND status = 'ready' AND sha256 = ? AND size = ? ORDER BY id LIMIT 1", userID, sha256, size))
 }
 
+// FindInstantMatchInDirectory restricts instant upload to the requested storage directory.
+// FindInstantMatchInDirectory 仅在目标目录内查找秒传文件，避免跨目录复用内容。
+func (s *Store) FindInstantMatchInDirectory(ctx context.Context, userID int64, directory, md5, sha256 string, size int64) (File, error) {
+	prefix := filepath.Clean(directory) + string(filepath.Separator)
+	query := `SELECT id, user_id, name, stored_name, size, mime, sha256, md5, status, storage_path, created_at, COALESCE(deleted_at, '')
+FROM files WHERE user_id = ? AND status = 'ready' AND substr(storage_path, 1, length(?)) = ? AND size = ? AND `
+	args := []any{userID, prefix, prefix, size}
+	if md5 != "" {
+		file, err := scanFile(s.DB.QueryRowContext(ctx, query+"md5 = ? ORDER BY id LIMIT 1", append(args, md5)...))
+		if err == nil || !errors.Is(err, ErrNotFound) {
+			return file, err
+		}
+	}
+	return scanFile(s.DB.QueryRowContext(ctx, query+"sha256 = ? ORDER BY id LIMIT 1", append(args, sha256)...))
+}
+
 func (s *Store) CompleteUpload(ctx context.Context, task UploadTask, file File) (File, error) {
 	// CompleteUpload 在事务中写入文件记录、更新已用配额并完成上传任务。
 	// CompleteUpload transactionally inserts the file, updates used quota, and completes the upload task.
@@ -1467,6 +1567,10 @@ func (s *Store) CompleteUploadWithPlacement(ctx context.Context, task UploadTask
 }
 
 func (s *Store) completeUpload(ctx context.Context, task UploadTask, file File, place func(storagePath string) error) (File, error) {
+	return s.completeUploadWithCollection(ctx, task, file, place, "", "")
+}
+
+func (s *Store) completeUploadWithCollection(ctx context.Context, task UploadTask, file File, place func(storagePath string) error, originalName, remark string) (File, error) {
 	// completeUpload 在同一事务中协调路径分配、文件放置、元数据写入、配额更新和任务完成。
 	// completeUpload coordinates path allocation, content placement, metadata, quota, and task completion in one transaction.
 	tx, err := s.DB.BeginTx(ctx, nil)
@@ -1505,6 +1609,25 @@ func (s *Store) completeUpload(ctx context.Context, task UploadTask, file File, 
 	if _, err := tx.ExecContext(ctx, "UPDATE users SET used_bytes = used_bytes + ?, updated_at = ? WHERE id = ?", file.Size, now, file.UserID); err != nil {
 		tx.Rollback()
 		return File{}, err
+	}
+	if task.CollectionID > 0 {
+		var expiresAt, revokedAt string
+		if err := tx.QueryRowContext(ctx, "SELECT expires_at, COALESCE(revoked_at, '') FROM upload_collections WHERE id = ?", task.CollectionID).Scan(&expiresAt, &revokedAt); err != nil {
+			tx.Rollback()
+			return File{}, err
+		}
+		if revokedAt != "" {
+			tx.Rollback()
+			return File{}, ErrCollectionRevoked
+		}
+		if expiresAt <= now {
+			tx.Rollback()
+			return File{}, ErrCollectionExpired
+		}
+		if err := s.insertCollectionFileTx(ctx, tx, task.CollectionID, file.ID, originalName, remark, now); err != nil {
+			tx.Rollback()
+			return File{}, err
+		}
 	}
 	result, err = tx.ExecContext(ctx, "UPDATE upload_tasks SET status = 'complete', updated_at = ? WHERE id = ? AND status = 'pending'", now, task.ID)
 	if err != nil {
@@ -1671,6 +1794,299 @@ WHERE token = ? AND expires_at > ? AND (max_downloads = 0 OR download_count < ma
 	}
 	count, err := result.RowsAffected()
 	return count == 1, err
+}
+
+// CreateUploadCollection stores a new public upload collection.
+// CreateUploadCollection 创建新的公开上传收集链接。
+func (s *Store) CreateUploadCollection(ctx context.Context, collection UploadCollection) (UploadCollection, error) {
+	now := time.Now().UTC().Format(time.RFC3339)
+	result, err := s.DB.ExecContext(ctx, `INSERT INTO upload_collections(created_by, name, token, expires_at, max_uploads, upload_count, max_file_bytes, created_at, updated_at)
+VALUES(?, ?, ?, ?, ?, 0, ?, ?, ?)`, collection.CreatedBy, collection.Name, collection.Token, collection.ExpiresAt, collection.MaxUploads, collection.MaxFileBytes, now, now)
+	if err != nil {
+		if isUniqueError(err) {
+			return UploadCollection{}, ErrConflict
+		}
+		return UploadCollection{}, err
+	}
+	collection.ID, err = result.LastInsertId()
+	collection.CreatedAt = now
+	return collection, err
+}
+
+// GetUploadCollectionByToken loads a collection for anonymous token authentication.
+// GetUploadCollectionByToken 按公开 token 读取收集链接。
+func (s *Store) GetUploadCollectionByToken(ctx context.Context, token string) (UploadCollection, error) {
+	return scanUploadCollection(s.DB.QueryRowContext(ctx, `SELECT id, created_by, name, token, expires_at, max_uploads, upload_count, max_file_bytes, COALESCE(revoked_at, ''), created_at
+FROM upload_collections WHERE token = ?`, token))
+}
+
+// GetUploadCollection returns an owner-scoped collection record.
+// GetUploadCollection 按归属读取收集链接，管理员可跨用户读取。
+func (s *Store) GetUploadCollection(ctx context.Context, id, userID int64, admin bool) (UploadCollection, error) {
+	where := "id = ?"
+	args := []any{id}
+	if !admin {
+		where += " AND created_by = ?"
+		args = append(args, userID)
+	}
+	return scanUploadCollection(s.DB.QueryRowContext(ctx, `SELECT id, created_by, name, token, expires_at, max_uploads, upload_count, max_file_bytes, COALESCE(revoked_at, ''), created_at
+FROM upload_collections WHERE `+where, args...))
+}
+
+// ListUploadCollections lists collections owned by a user.
+// ListUploadCollections 列出当前用户创建的收集链接。
+func (s *Store) ListUploadCollections(ctx context.Context, userID int64, admin bool) ([]UploadCollection, error) {
+	query := `SELECT id, created_by, name, token, expires_at, max_uploads, upload_count, max_file_bytes, COALESCE(revoked_at, ''), created_at
+FROM upload_collections`
+	args := []any{}
+	if !admin {
+		query += " WHERE created_by = ?"
+		args = append(args, userID)
+	}
+	query += " ORDER BY created_at DESC, id DESC"
+	rows, err := s.DB.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	collections := make([]UploadCollection, 0)
+	for rows.Next() {
+		var collection UploadCollection
+		if err := rows.Scan(&collection.ID, &collection.CreatedBy, &collection.Name, &collection.Token, &collection.ExpiresAt, &collection.MaxUploads, &collection.UploadCount, &collection.MaxFileBytes, &collection.RevokedAt, &collection.CreatedAt); err != nil {
+			return nil, err
+		}
+		collections = append(collections, collection)
+	}
+	return collections, rows.Err()
+}
+
+// RevokeUploadCollection disables a collection without touching received files.
+// RevokeUploadCollection 撤销收集链接，但保留已经收到的文件。
+func (s *Store) RevokeUploadCollection(ctx context.Context, id, userID int64, admin bool) error {
+	query := "UPDATE upload_collections SET revoked_at = ?, updated_at = ? WHERE id = ?"
+	args := []any{time.Now().UTC().Format(time.RFC3339), time.Now().UTC().Format(time.RFC3339), id}
+	if !admin {
+		query += " AND created_by = ?"
+		args = append(args, userID)
+	}
+	result, err := s.DB.ExecContext(ctx, query, args...)
+	if err != nil {
+		return err
+	}
+	count, err := result.RowsAffected()
+	if err == nil && count == 0 {
+		return ErrNotFound
+	}
+	return err
+}
+
+func scanUploadCollection(row *sql.Row) (UploadCollection, error) {
+	var collection UploadCollection
+	err := row.Scan(&collection.ID, &collection.CreatedBy, &collection.Name, &collection.Token, &collection.ExpiresAt, &collection.MaxUploads, &collection.UploadCount, &collection.MaxFileBytes, &collection.RevokedAt, &collection.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return UploadCollection{}, ErrNotFound
+	}
+	return collection, err
+}
+
+func collectionState(collection UploadCollection, now string) error {
+	if collection.RevokedAt != "" {
+		return ErrCollectionRevoked
+	}
+	if collection.ExpiresAt <= now {
+		return ErrCollectionExpired
+	}
+	if collection.MaxUploads > 0 && collection.UploadCount >= collection.MaxUploads {
+		return ErrCollectionLimit
+	}
+	return nil
+}
+
+// IncrementCollectionUploads atomically reserves one collection upload slot.
+// IncrementCollectionUploads 原子预留一次收集上传次数。
+func (s *Store) IncrementCollectionUploads(ctx context.Context, token string) (UploadCollection, error) {
+	now := time.Now().UTC().Format(time.RFC3339)
+	collection, err := s.GetUploadCollectionByToken(ctx, token)
+	if err != nil {
+		return UploadCollection{}, err
+	}
+	if err := collectionState(collection, now); err != nil {
+		return UploadCollection{}, err
+	}
+	result, err := s.DB.ExecContext(ctx, `UPDATE upload_collections SET upload_count = upload_count + 1, updated_at = ?
+WHERE token = ? AND revoked_at IS NULL AND expires_at > ? AND (max_uploads = 0 OR upload_count < max_uploads)`, now, token, now)
+	if err != nil {
+		return UploadCollection{}, err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return UploadCollection{}, err
+	}
+	if count != 1 {
+		latest, latestErr := s.GetUploadCollectionByToken(ctx, token)
+		if latestErr != nil {
+			return UploadCollection{}, latestErr
+		}
+		return UploadCollection{}, collectionState(latest, now)
+	}
+	collection.UploadCount++
+	return collection, nil
+}
+
+// CreateCollectionUploadTask reserves a collection slot, quota, and task atomically.
+// CreateCollectionUploadTask 在一个事务中预留收集次数、用户配额和分片任务。
+func (s *Store) CreateCollectionUploadTask(ctx context.Context, task UploadTask, token string) error {
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var collection UploadCollection
+	err = tx.QueryRowContext(ctx, `SELECT id, created_by, name, token, expires_at, max_uploads, upload_count, max_file_bytes, COALESCE(revoked_at, ''), created_at
+FROM upload_collections WHERE token = ?`, token).Scan(&collection.ID, &collection.CreatedBy, &collection.Name, &collection.Token, &collection.ExpiresAt, &collection.MaxUploads, &collection.UploadCount, &collection.MaxFileBytes, &collection.RevokedAt, &collection.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	if err := collectionState(collection, now); err != nil {
+		return err
+	}
+	if task.CollectionID == 0 {
+		task.CollectionID = collection.ID
+	}
+	if task.UserID != collection.CreatedBy {
+		return ErrNotFound
+	}
+	var quota, used, pending int64
+	if err := tx.QueryRowContext(ctx, "SELECT quota_bytes, used_bytes FROM users WHERE id = ?", task.UserID).Scan(&quota, &used); err != nil {
+		return err
+	}
+	if err := tx.QueryRowContext(ctx, "SELECT COALESCE(SUM(size), 0) FROM upload_tasks WHERE user_id = ? AND status = 'pending'", task.UserID).Scan(&pending); err != nil {
+		return err
+	}
+	if used+pending+task.Size > quota {
+		return &QuotaError{UsedBytes: used, QuotaBytes: quota, FileSize: task.Size}
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE upload_collections SET upload_count = upload_count + 1, updated_at = ?
+WHERE id = ? AND revoked_at IS NULL AND expires_at > ? AND (max_uploads = 0 OR upload_count < max_uploads)`, now, collection.ID, now)
+	if err != nil {
+		return err
+	}
+	if count, err := result.RowsAffected(); err != nil {
+		return err
+	} else if count != 1 {
+		return ErrCollectionLimit
+	}
+	_, err = tx.ExecContext(ctx, "INSERT INTO upload_tasks(id, user_id, collection_id, remark, name, size, mime, chunk_size, total_chunks, status, storage_dir, resolve, created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, '', ?, ?)", task.ID, task.UserID, task.CollectionID, task.Remark, task.Name, task.Size, task.Mime, task.ChunkSize, task.TotalChunks, task.StorageDir, now, now)
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) insertCollectionFileTx(ctx context.Context, tx *sql.Tx, collectionID, fileID int64, originalName, remark, now string) error {
+	_, err := tx.ExecContext(ctx, "INSERT INTO upload_collection_files(collection_id, file_id, original_name, remark, created_at) VALUES(?, ?, ?, ?, ?)", collectionID, fileID, originalName, remark, now)
+	return err
+}
+
+// CreateCollectionFile records an instant-upload result and consumes one slot atomically.
+// CreateCollectionFile 原子记录秒传文件并消耗一次收集次数。
+func (s *Store) CreateCollectionFile(ctx context.Context, token string, fileID int64, originalName, remark string) (UploadCollectionFile, error) {
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return UploadCollectionFile{}, err
+	}
+	defer tx.Rollback()
+	var collection UploadCollection
+	err = tx.QueryRowContext(ctx, `SELECT id, created_by, name, token, expires_at, max_uploads, upload_count, max_file_bytes, COALESCE(revoked_at, ''), created_at
+FROM upload_collections WHERE token = ?`, token).Scan(&collection.ID, &collection.CreatedBy, &collection.Name, &collection.Token, &collection.ExpiresAt, &collection.MaxUploads, &collection.UploadCount, &collection.MaxFileBytes, &collection.RevokedAt, &collection.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return UploadCollectionFile{}, ErrNotFound
+	}
+	if err != nil {
+		return UploadCollectionFile{}, err
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	if err := collectionState(collection, now); err != nil {
+		return UploadCollectionFile{}, err
+	}
+	var owner int64
+	if err := tx.QueryRowContext(ctx, "SELECT user_id FROM files WHERE id = ? AND status = 'ready'", fileID).Scan(&owner); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return UploadCollectionFile{}, ErrNotFound
+		}
+		return UploadCollectionFile{}, err
+	}
+	if owner != collection.CreatedBy {
+		return UploadCollectionFile{}, ErrNotFound
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE upload_collections SET upload_count = upload_count + 1, updated_at = ?
+WHERE id = ? AND revoked_at IS NULL AND expires_at > ? AND (max_uploads = 0 OR upload_count < max_uploads)`, now, collection.ID, now)
+	if err != nil {
+		return UploadCollectionFile{}, err
+	}
+	if count, err := result.RowsAffected(); err != nil {
+		return UploadCollectionFile{}, err
+	} else if count != 1 {
+		return UploadCollectionFile{}, ErrCollectionLimit
+	}
+	linkResult, err := tx.ExecContext(ctx, "INSERT INTO upload_collection_files(collection_id, file_id, original_name, remark, created_at) VALUES(?, ?, ?, ?, ?)", collection.ID, fileID, originalName, remark, now)
+	if err != nil {
+		return UploadCollectionFile{}, err
+	}
+	id, err := linkResult.LastInsertId()
+	if err != nil {
+		return UploadCollectionFile{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return UploadCollectionFile{}, err
+	}
+	file, err := s.FindFile(ctx, fileID)
+	if err != nil {
+		return UploadCollectionFile{}, err
+	}
+	return UploadCollectionFile{ID: id, CollectionID: collection.ID, FileID: fileID, OriginalName: originalName, Remark: remark, CreatedAt: now, File: file}, nil
+}
+
+// CompleteCollectionFile links a completed task to its collection in one transaction.
+// CompleteCollectionFile 将已完成的任务和收集链接记录在同一事务中。
+func (s *Store) CompleteCollectionFile(ctx context.Context, task UploadTask, file File, originalName, remark string) (File, error) {
+	return s.CompleteCollectionFileWithPlacement(ctx, task, file, nil, originalName, remark)
+}
+
+// CompleteCollectionFileWithPlacement commits a collected file and its remark atomically.
+// CompleteCollectionFileWithPlacement 原子提交收集文件内容、元数据和备注。
+func (s *Store) CompleteCollectionFileWithPlacement(ctx context.Context, task UploadTask, file File, place func(storagePath string) error, originalName, remark string) (File, error) {
+	completed, err := s.completeUploadWithCollection(ctx, task, file, place, originalName, remark)
+	if err != nil {
+		return File{}, err
+	}
+	return completed, nil
+}
+
+// ListUploadCollectionFiles lists received files with the visitor remark.
+// ListUploadCollectionFiles 列出收集链接已收到的文件和备注。
+func (s *Store) ListUploadCollectionFiles(ctx context.Context, collectionID int64) ([]UploadCollectionFile, error) {
+	rows, err := s.DB.QueryContext(ctx, `SELECT ucf.id, ucf.collection_id, ucf.file_id, ucf.original_name, ucf.remark, ucf.created_at,
+f.id, f.user_id, f.name, f.stored_name, f.size, f.mime, f.sha256, f.md5, f.status, f.storage_path, f.created_at, COALESCE(f.deleted_at, '')
+FROM upload_collection_files ucf JOIN files f ON f.id = ucf.file_id
+WHERE ucf.collection_id = ? ORDER BY ucf.created_at DESC, ucf.id DESC`, collectionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]UploadCollectionFile, 0)
+	for rows.Next() {
+		var item UploadCollectionFile
+		if err := rows.Scan(&item.ID, &item.CollectionID, &item.FileID, &item.OriginalName, &item.Remark, &item.CreatedAt, &item.File.ID, &item.File.UserID, &item.File.Name, &item.File.StoredName, &item.File.Size, &item.File.Mime, &item.File.SHA256, &item.File.MD5, &item.File.Status, &item.File.StoragePath, &item.File.CreatedAt, &item.File.DeletedAt); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
 }
 
 // CreateFolder 校验父目录存在与路径唯一后创建用户目录。
