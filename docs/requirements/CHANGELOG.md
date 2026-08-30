@@ -1,5 +1,12 @@
 # Requirement Change Log
 
+## 2026-08-30 - v012 批次 E（功能 8/9：分享管理 + 分享下载日志）
+
+- **功能 8（分享管理）**：新增 `/shares` 分享管理页与 API——`GET /api/shares`（我的分享列表：文件名/token/有效期/下载次数/状态/剩余时间）、`GET /api/shares/{token}`（详情）、`PUT /api/shares/{token}/extend`（延期，仅创建者/管理员）、`PUT /api/shares/{token}/increase`（增次，不允许降低）、`DELETE /api/shares/{token}`（单条撤销，软撤销）、`GET /api/shares/{token}/logs`（下载日志）；越权一律 404。
+- **功能 9（分享下载日志 + 失败原因细分）**：`shares.revoked_at` 软撤销（匿名访问 403 分享已撤销、审计 share_revoked）；`audit_logs.share_owner_id` 列让分享者可见自己分享的匿名下载日志（查询 user_id=me OR share_owner_id=me）；失败原因枚举补全 `share_not_found`/`share_expired`/`share_revoked`/`share_limit`/`share_denied`；logActions 补 `share_extend`/`share_increase`/`share_revoke`。
+- **前端**：SharesView 管理页（列表/详情/延期/增次/撤销/复制链接/下载日志）、FilesView 分享入口联动、LogsView 普通用户可见分享相关动作；i18n 三语。
+- 验证：go test/vet/build 全绿；DSH 实测批次 E 专属测试 17/17（列表/详情/延期/增次/降次被拒/下载限制/日志含 limit/越权 404/撤销后 403 share_revoked/日志含 revoked）+ share 24/24、regress 26/26 无回归。提交 `d687801`。
+
 ## 2026-08-30 - v012 批次 D（功能 6 第一部分：系统内用户只读时段）
 
 - **功能 6 第一部分（用户只读时段）**：管理员对单个用户设置一次性只读窗口（users 表 `read_only_from`/`read_only_until` 列，migrate 自动补）；`PUT /api/admin/users/{id}/read-only` 设置/清除（起止倒置或格式非法 400 INVALID_READ_ONLY_WINDOW）；`/api/auth/me` 与管理端用户列表返回 `readOnlyFrom`/`readOnlyUntil`/`readOnly`。
