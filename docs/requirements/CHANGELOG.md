@@ -1,5 +1,13 @@
 # Requirement Change Log
 
+## 2026-08-30 - v011 验证反馈批次（问题 14-17，并入阶段二 v0.2.0 交付）
+
+- **问题 14（管理后台页签化）**：AdminView 重构为左侧垂直菜单 + 右侧内容区布局（`admin-layout`/`admin-sidebar`/`admin-tab`），六个页签：概览（统计卡 + 系统默认语言）、用户管理（搜索 + 表格 + 新建）、安全设置（密码策略 + IP 锁定）、品牌设置（含版权字段）、锁定管理（IP/用户锁定）、系统设置（日志周期 + 注册开关 + 上传限速）；`?tab=` 查询参数深链，切换页签时同步 URL，刷新后保持所在页签。
+- **问题 15（用户弹窗）**：新建/编辑用户由页面内嵌面板改为居中模态框（`modal-backdrop`/`modal-panel`，遮罩点击关闭，带标题/关闭按钮/完整表单），编辑弹窗保留角色、配额、重置密码、禁用、TOTP 启用与重新绑定、IP 白名单等全部字段，保存仍走 `PUT /users/{id}` + `/totp` + `/ip-acl` 三请求。
+- **问题 16（日志周期迁移）**：LogsView 移除 logRetentionDays 设置面板（含 settings/saveSettings 脚本），日志页只保留筛选与列表；日志保存天数设置迁入 AdminView「系统设置」页签，复用既有 `PUT /api/admin/settings`（后端零改动）；同步清理三语字典中已无引用的 `logs.retention*` 键。
+- **问题 17（页脚品牌信息）**：BrandFooter 首行渲染 `brand.siteTitle`（粗体），其下小字显示 `siteDescription`，随后依次显示版权、ICP、公安备案；任一非空即渲染，全部为空则不显示。
+- **D-S2-3 修复（目录重命名 + 软删除记录冲突 500）**：目录重命名级联改写其下文件 `storage_path` 前缀时，若目标前缀下残留同名的软删除记录（先删除后重传同名文件再改目录名），`UNIQUE(files.storage_path)` 冲突导致 `PATCH /api/folders/{id}` 返回 500。修复：`RenameFolder` 在改写前清理目标前缀下的 `status='deleted'` 记录（其内容已物理删除）；另修正 `isUniqueError` 只匹配 `UNIQUE` 约束失败，避免把 `FOREIGN KEY constraint failed` 误判为同名冲突。新增单测 `TestRenameFolderClearsDeletedRows`。
+
 ## 2026-08-30 - v011 验证反馈批次（问题 10-13，并入阶段二 v0.2.0 交付）
 
 - **问题 10（日志成功绿/失败红）**：`.result-label.success` 改用固定绿色（`color:#1e7e34; background:#e8f5ec`），不再跟随主题色；失败保持固定红 `#a83e2d/#fff0ed`；更换主题色后成功/失败配色不变。

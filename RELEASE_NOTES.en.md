@@ -75,6 +75,13 @@ Stage 2 release notes
 - The topbar gained a "Change password" entry so regular users can rotate their password anytime; admins can check "Require TOTP re-enrollment" so the user re-binds on the next login.
 - Brand settings gained a copyright field (for example `Copyright © 2026 xxx`) rendered in the footer with empty-value suppression.
 
+### Tabbed admin console and UX (v011 feedback batch, delivered with v0.2.0)
+
+- The admin console is now a left tab navigation with a content area: Overview (stats + system language) / Users (search + table) / Security (password policy + IP locking) / Branding / Locks / System (log retention days + registration switch + upload rate limit); `?tab=` deep-links to a tab and the active tab survives refresh.
+- Create/edit user flows are centered modal dialogs (backdrop-click to close) with full role/quota/password/disabled/TOTP re-enrollment/IP-allowlist fields.
+- The log page no longer embeds the retention panel; log retention is managed from the admin System tab (same API).
+- The footer is now a brand info block: site title + description on the first line, followed by copyright / ICP / police filing lines.
+
 ### Single-binary delivery and deployment guide
 
 - The deliverable is a single executable (embedded frontend, pure-Go SQLite, zero runtime dependencies); `make release` (or `scripts\release.ps1` on Windows) produces `dist/filebox-windows-amd64.exe`, `dist/filebox-linux-amd64`, and `dist/SHA256SUMS.txt` (CGO_ENABLED=0, -trimpath, -s -w) that run without Go or Node installed.

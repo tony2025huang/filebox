@@ -210,3 +210,53 @@ func TestShareStorageAndSettings(t *testing.T) {
 		t.Fatalf("SetSettingDefault overwrote setting = %+v, %v", unchanged, err)
 	}
 }
+
+// TestRenameFolderClearsDeletedRows: 目录重命名会把其下 ready 文件的 storage_path
+// 前缀改写为新目录；若目标前缀下残留同名的软删除记录（删除后重传再改目录），
+// UNIQUE(storage_path) 会冲突。deleted 内容已物理删除，重命名前应清理。
+// TestRenameFolderClearsDeletedRows covers the rename-folder path where a deleted
+// row already holds the target storage_path; the rewrite must clear it first.
+func TestRenameFolderClearsDeletedRows(t *testing.T) {
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	now := time.Now().UTC().Format(time.RFC3339)
+	if _, err := db.DB.Exec("INSERT INTO users(id, username, password_hash, role, created_at, updated_at) VALUES(1, 'u1', 'h', 'user', ?, ?)", now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.CreateFolder(ctx, 1, "", "docs"); err != nil {
+		t.Fatal(err)
+	}
+	// ready 文件位于 files/1/docs/plan.txt
+	if _, err := db.DB.Exec("INSERT INTO files(user_id, name, stored_name, size, mime, sha256, md5, status, storage_path, created_at) VALUES(1, 'plan.txt', 'plan.txt', 4, 'text/plain', 'sha', 'md5', 'ready', 'files\\1\\docs\\plan.txt', ?)", now); err != nil {
+		t.Fatal(err)
+	}
+	// 软删除记录已占用重命名后的目标路径 files/1/archive/plan.txt
+	if _, err := db.DB.Exec("INSERT INTO files(user_id, name, stored_name, size, mime, sha256, md5, status, storage_path, created_at) VALUES(1, 'plan.txt', 'plan.txt', 4, 'text/plain', 'sha', 'md5', 'deleted', 'files\\1\\archive\\plan.txt', ?)", now); err != nil {
+		t.Fatal(err)
+	}
+	folder, err := db.GetFolderByPath(ctx, 1, "docs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.RenameFolder(ctx, folder.ID, 1, "archive"); err != nil {
+		t.Fatalf("RenameFolder with colliding deleted row = %v", err)
+	}
+	var count int
+	if err := db.DB.QueryRow("SELECT COUNT(id) FROM files WHERE status = 'deleted' AND storage_path = 'files\\1\\archive\\plan.txt'").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("deleted row was not cleared before rewrite: count=%d", count)
+	}
+	var sp string
+	if err := db.DB.QueryRow("SELECT storage_path FROM files WHERE status = 'ready'").Scan(&sp); err != nil {
+		t.Fatal(err)
+	}
+	if sp != "files\\1\\archive\\plan.txt" {
+		t.Fatalf("ready file not rewritten to new prefix: %q", sp)
+	}
+}

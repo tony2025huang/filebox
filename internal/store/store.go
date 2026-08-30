@@ -1644,6 +1644,16 @@ func (s *Store) RenameFolder(ctx context.Context, id, userID int64, newName stri
 	}
 	filePrefix := filepath.Join("files", strconv.FormatInt(userID, 10), oldPath)
 	newFilePrefix := filepath.Join("files", strconv.FormatInt(userID, 10), newPath)
+	// 软删除记录仍占用旧 storage_path；重命名会把旧前缀下的 ready 文件改写为新前缀，
+	// 与目标前缀下已存在的 deleted 记录（如先删除后重传的同名文件）发生 UNIQUE 冲突。
+	// deleted 记录的内容已物理删除，改写前清除目标前缀下的它们，避免重命名目录 500
+	//（与 D-S2-1 同类）。
+	// Deleted rows keep their storage_path; rewriting ready files to the new prefix can
+	// collide with a deleted row already holding that path (delete-then-reupload). Their
+	// content is gone, so clear the target prefix before the rewrite.
+	if _, err := tx.ExecContext(ctx, "DELETE FROM files WHERE user_id = ? AND status = 'deleted' AND storage_path LIKE ? ESCAPE '\\'", userID, escapeLike(newFilePrefix)+"%"); err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, "UPDATE files SET storage_path = ? || substr(storage_path, length(?) + 1) WHERE user_id = ? AND status != 'deleted' AND storage_path LIKE ? ESCAPE '\\'", newFilePrefix, filePrefix, userID, escapeLike(filePrefix)+"%"); err != nil {
 		return err
 	}
@@ -2008,8 +2018,12 @@ func nullableString(value string) any {
 	return value
 }
 
+// isUniqueError 仅将 UNIQUE 约束冲突识别为 ErrConflict，避免把外键等其他
+// "constraint failed" 错误（如 FOREIGN KEY constraint failed）误判为同名冲突。
+// isUniqueError treats only genuine UNIQUE violations as ErrConflict so that other
+// constraint failures (for example FOREIGN KEY) are not misreported as name clashes.
 func isUniqueError(err error) bool {
-	return err != nil && (contains(err.Error(), "UNIQUE") || contains(err.Error(), "constraint failed"))
+	return err != nil && (contains(err.Error(), "UNIQUE constraint failed") || contains(err.Error(), "UNIQUE"))
 }
 func contains(value, part string) bool { return len(value) >= len(part) && stringContains(value, part) }
 func stringContains(value, part string) bool {

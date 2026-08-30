@@ -52,3 +52,7 @@ Updated: 2026-08-29 (Stage 2 delivered as v0.2.0)
 | Log "system configuration" actions (v011 feedback) | done | `logActions` exposes the full action set and the log page groups/filters business vs system-configuration actions with trilingual labels. |
 | Self password change entry + TOTP re-enrollment (v011 feedback) | done | Topbars link to the existing change-password page; admin TOTP toggle supports `reenroll` so the user re-binds on the next login. |
 | Copyright text branding (v011 feedback) | done | `brand_copyright` setting, `/api/brand` `copyrightText`, admin panel input, and conditional footer rendering with empty-value suppression. |
+| Tabbed admin console (v011 feedback) | done | AdminView uses a left vertical menu with six tabs (overview/users/security/branding/locks/system); `?tab=` deep-links and survives refresh; log retention, registration switch, and upload rate limit live in the system tab. |
+| User modal dialogs (v011 feedback) | done | Create/edit user flows are centered `modal-backdrop`/`modal-panel` dialogs with full role/quota/password/TOTP/IP-allowlist fields. |
+| Log retention moved to admin (v011 feedback) | done | The log page no longer embeds the retention panel; logRetentionDays is edited in the admin system tab via the existing settings API. |
+| Footer brand info block (v011 feedback) | done | BrandFooter renders `siteTitle` + `siteDescription` on the first line, then copyright/ICP/police lines; nothing renders when all are empty. |

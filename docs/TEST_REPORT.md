@@ -1,7 +1,7 @@
 # FileBox 阶段二 DSH 二次测试报告
 
-日期：2026-08-29 ｜ 测试环境：Windows / Go 1.27 / filebox v0.2.0 单二进制（127.0.0.1:18081，独立数据目录 `.test-data\stage2\test-data`）
-测试依据：docs/TEST_PLAN.md（阶段二） ｜ 被测版本：v0.2.0（阶段二全量 + 阶段一回归）
+日期：2026-08-30 ｜ 测试环境：Windows / Go 1.27 / filebox v0.2.0 单二进制（127.0.0.1:18081，独立数据目录 `.test-data\stage2\test-data`）
+测试依据：docs/TEST_PLAN.md（阶段二） ｜ 被测版本：v0.2.0（阶段二全量 + 阶段一回归 + v011 反馈批次 1-5）
 
 ## 一、结果统计
 
@@ -13,7 +13,8 @@
 | 分享过期 | test-expire | 6 | 6 | 0 |
 | 1GB 断点续传 | test-resume1gb | 9 | 9 | 0 |
 | 阶段一回归 | test-regress2 | 26 | 26 | 0 |
-| **合计** | **6 套件** | **90** | **90** | **0** |
+| v011 批次 5 前端专项（14-17） | test-batch5 | 14 | 14 | 0 |
+| **合计** | **7 套件** | **104** | **104** | **0** |
 
 ## 二、阶段二验收项与结果
 
@@ -31,6 +32,7 @@
 | 系统统计 | F801：admin stats 含 shares/shareDownloads | ✅ |
 | 审计日志含分享/注册动作 | F901-F905：share/share_view/share_download/register 均入库，logActions 含 register | ✅ |
 | 回归（阶段一） | R01-R11：单分片上传/下载/删除闭环+双哈希、0 字节（md5=d41d8cd9…）、冲突 rename/overwrite、非法名 400、越权 404、未登录 401、普通用户 admin 403、日志隔离、登录锁定/解除、品牌/语言、CLI reset-password/locks、Range 206 | ✅ |
+| v011 批次 5（问题 14-17） | P14a-e：`/admin?tab=system` 200、产物含 admin-tab/admin-layout/admin-sidebar 与六个页签键、`query.tab` 深链读取；P15a-b：modal-backdrop/modal-panel + totpReenroll/ip-acl 三请求保留；P16a-c：LogsView 已移除 retention 面板、系统设置页签含 logRetentionDays/logRetentionCopy；P17a-d：brand-footer-title/brand-footer-desc 类与 brand 接口 siteTitle/siteDescription | ✅ |
 
 ## 三、缺陷清单（测试发现，已修复并复测）
 
@@ -38,6 +40,7 @@
 |---|---|---|---|---|---|---|
 | D-S2-1 | 一般 | 存储 | 删除后重传同名文件返回 HTTP 500：`UNIQUE constraint failed: files.storage_path`——软删除记录仍占用 storage_path，allocateStorageName 未剔除导致复用冲突 | 上传 preview.txt → 删除 → 再传同名 → complete 500 | `allocateStorageName` 在复用路径时清理该路径下的软删除记录（其内容已物理删除）；新增单测 `TestReuploadAfterDeleteReusesStoragePath` | ✅ 删除→重传 200，md5 一致，ready 文件数=1 |
 | D-S2-2 | 轻微 | CLI | `filebox admin reset-password` 再次 `flags.Parse(args[1:])` 丢掉首个 flag（`--data` 被忽略），非 admin 用户/非默认数据目录场景下操作落错库 | `admin reset-password --data=<dir> --username=user2` 在 dir 上无记录 | 改为 `flags.Parse(args)`（args 已剔除子命令名）；新增单测 `TestResetPasswordParsesDataFlag` | ✅ CLI 重置 user2 成功且新密码可登录（真实数据目录） |
+| D-S2-3 | 一般 | 目录 | 目录重命名级联改写其下文件 `storage_path` 前缀时，若目标前缀下残留同名的软删除记录（先删除后重传同名文件，再重命名目录），`UNIQUE(files.storage_path)` 冲突导致 `PATCH /api/folders/{id}` 返回 500；`isUniqueError` 还会把 `FOREIGN KEY constraint failed` 误判为同名冲突 | 上传 plan.txt → 删除 → 重传 → 重命名所在目录 → 500 `rename folder: UNIQUE constraint failed: files.storage_path` | `RenameFolder` 在改写前清理目标前缀下的 `status='deleted'` 记录（内容已物理删除）；`isUniqueError` 仅匹配 `UNIQUE` 约束失败；新增单测 `TestRenameFolderClearsDeletedRows` | ✅ 重命名 200、磁盘目录物理移动、过滤命中 1；folders 21/21 连续两次运行全绿（幂等） |
 
 修复验证：`go build ./...`、`go vet ./...`、`go test ./...` 全过；Windows/Linux 交叉编译通过；前端构建 + `sync-web` embed 同步通过；上述两处缺陷场景均回归复测通过。
 
@@ -52,4 +55,4 @@
 
 ## 五、结论
 
-阶段二全部验收标准达成：90/90 用例通过，0 遗留缺陷（测试发现的 2 个缺陷均已代码级修复并复测）。满足 docs/DEV_DOC.md 阶段二验收标准与 docs/CODEX_TASK_2.md 全部条目。
+阶段二全部验收标准达成：104/104 用例通过（7 套件，含 v011 反馈批次 5 前端专项 14 项），0 遗留缺陷（测试发现的 3 个缺陷均已代码级修复并复测）。满足 docs/DEV_DOC.md 阶段二验收标准与 docs/CODEX_TASK_2.md 全部条目；v011 验证问题修复单 17 项全部交付。
