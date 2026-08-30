@@ -223,6 +223,56 @@ func testAdminToken(t *testing.T, handler http.Handler) string {
 	return token
 }
 
+func TestJWTInvalidatedAfterPasswordChange(t *testing.T) {
+	_, handler := newTestServer(t)
+	adminToken := testAdminToken(t, handler)
+	created := testJSONRequest(t, handler, http.MethodPost, "/api/admin/users", adminToken, `{"username":"jwt-rotate","password":"Readonly123!","role":"user"}`)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create JWT test user = %d: %s", created.Code, created.Body.String())
+	}
+	userID := int64(responseData(t, created)["id"].(float64))
+	login := testJSONRequest(t, handler, http.MethodPost, "/api/auth/login", "", `{"username":"jwt-rotate","password":"Readonly123!"}`)
+	if login.Code != http.StatusOK {
+		t.Fatalf("initial user login = %d: %s", login.Code, login.Body.String())
+	}
+	token1 := responseData(t, login)["token"].(string)
+	if me := testJSONRequest(t, handler, http.MethodGet, "/api/auth/me", token1, ""); me.Code != http.StatusOK {
+		t.Fatalf("initial token auth = %d: %s", me.Code, me.Body.String())
+	}
+
+	updated := testJSONRequest(t, handler, http.MethodPut, "/api/admin/users/"+formatID(userID), adminToken, `{"password":"BrandNew123!"}`)
+	if updated.Code != http.StatusOK {
+		t.Fatalf("admin password change = %d: %s", updated.Code, updated.Body.String())
+	}
+	if me := testJSONRequest(t, handler, http.MethodGet, "/api/auth/me", token1, ""); me.Code != http.StatusUnauthorized {
+		t.Fatalf("old token after admin password change = %d: %s", me.Code, me.Body.String())
+	}
+
+	login = testJSONRequest(t, handler, http.MethodPost, "/api/auth/login", "", `{"username":"jwt-rotate","password":"BrandNew123!"}`)
+	if login.Code != http.StatusOK {
+		t.Fatalf("new password login = %d: %s", login.Code, login.Body.String())
+	}
+	token2 := responseData(t, login)["token"].(string)
+	if me := testJSONRequest(t, handler, http.MethodGet, "/api/auth/me", token2, ""); me.Code != http.StatusOK {
+		t.Fatalf("new token auth = %d: %s", me.Code, me.Body.String())
+	}
+
+	selfChange := testJSONRequest(t, handler, http.MethodPost, "/api/auth/change-password", token2, `{"oldPassword":"BrandNew123!","newPassword":"SelfChange123!"}`)
+	if selfChange.Code != http.StatusOK {
+		t.Fatalf("self-service password change = %d: %s", selfChange.Code, selfChange.Body.String())
+	}
+	newToken, ok := responseData(t, selfChange)["token"].(string)
+	if !ok || newToken == "" {
+		t.Fatalf("self-service replacement token = %#v", responseData(t, selfChange)["token"])
+	}
+	if me := testJSONRequest(t, handler, http.MethodGet, "/api/auth/me", token2, ""); me.Code != http.StatusUnauthorized {
+		t.Fatalf("old token after self-service password change = %d: %s", me.Code, me.Body.String())
+	}
+	if me := testJSONRequest(t, handler, http.MethodGet, "/api/auth/me", newToken, ""); me.Code != http.StatusOK {
+		t.Fatalf("self-service replacement token auth = %d: %s", me.Code, me.Body.String())
+	}
+}
+
 func TestZeroByteUploadCompletesAndIsListed(t *testing.T) {
 	db, handler := newTestServer(t)
 	token := testAdminToken(t, handler)
@@ -600,6 +650,42 @@ func TestSharingLifecycleAndAtomicDownloadLimit(t *testing.T) {
 	}
 }
 
+func TestSharePreviewDoesNotConsumeDownloadCount(t *testing.T) {
+	db, handler := newTestServer(t)
+	token := testAdminToken(t, handler)
+	file := uploadTestFile(t, handler, token, "preview.txt", "text/plain", []byte("preview content"))
+	id := int64(file["id"].(float64))
+	created := testJSONRequest(t, handler, http.MethodPost, "/api/files/"+strconv.FormatInt(id, 10)+"/share", token, `{"expiresInHours":1,"maxDownloads":1}`)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create share status = %d: %s", created.Code, created.Body.String())
+	}
+	shareToken := responseData(t, created)["token"].(string)
+	preview := testBinaryRequest(t, handler, http.MethodGet, "/api/files/shared/"+shareToken+"/preview", "", nil)
+	if preview.Code != http.StatusOK || !bytes.Equal(preview.Body.Bytes(), []byte("preview content")) {
+		t.Fatalf("share preview = %d, %q", preview.Code, preview.Body.String())
+	}
+	if preview.Header().Get("Content-Disposition") != "inline" {
+		t.Fatalf("share preview content disposition = %q, want inline", preview.Header().Get("Content-Disposition"))
+	}
+	meta := testJSONRequest(t, handler, http.MethodGet, "/api/files/shared/"+shareToken+"/meta", "", "")
+	metaData := responseData(t, meta)
+	if metaData["downloadAvailable"] != true {
+		t.Fatalf("preview consumed a download slot: %#v", metaData)
+	}
+	down := testBinaryRequest(t, handler, http.MethodGet, "/api/files/shared/"+shareToken+"/download", "", nil)
+	if down.Code != http.StatusOK || !bytes.Equal(down.Body.Bytes(), []byte("preview content")) {
+		t.Fatalf("share download after preview = %d, %q", down.Code, down.Body.String())
+	}
+	limited := testBinaryRequest(t, handler, http.MethodGet, "/api/files/shared/"+shareToken+"/download", "", nil)
+	if limited.Code != http.StatusForbidden {
+		t.Fatalf("limited share download status = %d", limited.Code)
+	}
+	var previewResult string
+	if err := db.DB.QueryRow("SELECT result FROM audit_logs WHERE action = 'share_preview' ORDER BY id DESC LIMIT 1").Scan(&previewResult); err != nil || previewResult != "success" {
+		t.Fatalf("share_preview audit = %q, %v", previewResult, err)
+	}
+}
+
 func TestBatchShareCreatesIndependentLinksAndRejectsUnauthorizedBatch(t *testing.T) {
 	db, handler := newTestServer(t)
 	adminToken := testAdminToken(t, handler)
@@ -657,6 +743,31 @@ func TestBatchShareCreatesIndependentLinksAndRejectsUnauthorizedBatch(t *testing
 	}
 	if err := db.DB.QueryRow("SELECT result FROM audit_logs WHERE action = 'batch_share' AND user_id = (SELECT id FROM users WHERE username = 'batch-share-other') ORDER BY id DESC LIMIT 1").Scan(&auditResult); err != nil || auditResult != "failure" {
 		t.Fatalf("unauthorized batch share audit = %q, %v", auditResult, err)
+	}
+}
+
+func TestBatchOperationsRejectOverLimit(t *testing.T) {
+	_, handler := newTestServer(t)
+	token := testAdminToken(t, handler)
+	ids := make([]string, 501)
+	for i := range ids {
+		ids[i] = strconv.Itoa(i + 1)
+	}
+	idList := strings.Join(ids, ",")
+
+	batchShare := testJSONRequest(t, handler, http.MethodPost, "/api/files/batch-share", token, `{"fileIds":[`+idList+`],"expiresInHours":24}`)
+	if batchShare.Code != http.StatusBadRequest {
+		t.Fatalf("over-limit batch share status = %d: %s", batchShare.Code, batchShare.Body.String())
+	}
+
+	batchDownload := testJSONRequest(t, handler, http.MethodPost, "/api/files/batch-download", token, `{"ids":[`+idList+`]}`)
+	if batchDownload.Code != http.StatusBadRequest {
+		t.Fatalf("over-limit batch download status = %d: %s", batchDownload.Code, batchDownload.Body.String())
+	}
+
+	batchDelete := testJSONRequest(t, handler, http.MethodPost, "/api/files/batch-delete", token, `{"ids":[`+idList+`]}`)
+	if batchDelete.Code != http.StatusBadRequest {
+		t.Fatalf("over-limit batch delete status = %d: %s", batchDelete.Code, batchDelete.Body.String())
 	}
 }
 

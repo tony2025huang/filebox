@@ -29,19 +29,21 @@ import (
 	"github.com/robfig/cron/v3"
 	"golang.org/x/crypto/ssh"
 
+	"filebox/internal/diskusage"
 	"filebox/internal/store"
 )
 
 // syncSystemRequest 是目标系统 API 请求体；authSecret 只用于写入或更新凭据。
 // syncSystemRequest is the remote-system API body; authSecret is write-only credential input.
 type syncSystemRequest struct {
-	Name           string `json:"name"`
-	Host           string `json:"host"`
-	Port           int    `json:"port"`
-	Username       string `json:"username"`
-	AuthType       string `json:"authType"`
-	AuthSecret     string `json:"authSecret"`
-	AuthPassphrase string `json:"authPassphrase"`
+	Name               string `json:"name"`
+	Host               string `json:"host"`
+	Port               int    `json:"port"`
+	Username           string `json:"username"`
+	AuthType           string `json:"authType"`
+	AuthSecret         string `json:"authSecret"`
+	AuthPassphrase     string `json:"authPassphrase"`
+	HostKeyFingerprint string `json:"hostKeyFingerprint"`
 }
 
 type syncTaskRequest struct {
@@ -63,7 +65,7 @@ type syncMkdirRequest struct {
 }
 
 func publicSyncSystem(item store.RemoteSystem) map[string]any {
-	return map[string]any{"id": item.ID, "name": item.Name, "host": item.Host, "port": item.Port, "username": item.Username, "authType": item.AuthType, "hasCredentials": item.AuthSecret != "", "taskCount": item.TaskCount, "createdAt": item.CreatedAt}
+	return map[string]any{"id": item.ID, "name": item.Name, "host": item.Host, "port": item.Port, "username": item.Username, "authType": item.AuthType, "hostKeyFingerprint": item.HostKeyFingerprint, "hasCredentials": item.AuthSecret != "", "taskCount": item.TaskCount, "createdAt": item.CreatedAt}
 }
 
 func publicSyncTask(item store.SyncTask) map[string]any {
@@ -87,6 +89,7 @@ func validateSyncSystemInput(input syncSystemRequest, requireSecret bool) (syncS
 	input.Host = strings.TrimSpace(input.Host)
 	input.Username = strings.TrimSpace(input.Username)
 	input.AuthType = strings.TrimSpace(input.AuthType)
+	input.HostKeyFingerprint = strings.TrimSpace(input.HostKeyFingerprint)
 	if input.Port == 0 {
 		input.Port = 22
 	}
@@ -105,6 +108,29 @@ func validateSyncSystemInput(input syncSystemRequest, requireSecret bool) (syncS
 	if len([]byte(input.AuthSecret)) > 512*1024 || len([]byte(input.AuthPassphrase)) > 4096 {
 		return input, errors.New("credentials too large")
 	}
+	if len([]byte(input.HostKeyFingerprint)) > 512 {
+		return input, errors.New("invalid remote system")
+	}
+	if input.HostKeyFingerprint != "" {
+		validFingerprint := false
+		if strings.HasPrefix(input.HostKeyFingerprint, "SHA256:") {
+			payload := strings.TrimPrefix(input.HostKeyFingerprint, "SHA256:")
+			decoded, err := base64.StdEncoding.DecodeString(payload)
+			if err != nil {
+				decoded, err = base64.StdEncoding.WithPadding(base64.NoPadding).DecodeString(payload)
+			}
+			validFingerprint = err == nil && len(decoded) == sha256.Size
+		} else {
+			hexPayload := strings.ReplaceAll(input.HostKeyFingerprint, ":", "")
+			if len(hexPayload) == sha256.Size*2 && strings.Trim(hexPayload, "0123456789abcdefABCDEF") == "" {
+				decoded, err := hex.DecodeString(hexPayload)
+				validFingerprint = err == nil && len(decoded) == sha256.Size
+			}
+		}
+		if !validFingerprint {
+			return input, errors.New("invalid remote system")
+		}
+	}
 	if input.AuthType == "password" {
 		input.AuthPassphrase = ""
 	}
@@ -113,6 +139,9 @@ func validateSyncSystemInput(input syncSystemRequest, requireSecret bool) (syncS
 
 func (s *Server) createSyncSystem(w http.ResponseWriter, r *http.Request) {
 	user := currentUser(r.Context())
+	if s.rejectReadOnly(w, r, user, "sync_system_create", "") {
+		return
+	}
 	var input syncSystemRequest
 	if !decodeJSON(w, r, &input) {
 		return
@@ -135,7 +164,7 @@ func (s *Server) createSyncSystem(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "保存目标系统失败")
 		return
 	}
-	item, err := s.store.CreateRemoteSystem(r.Context(), store.RemoteSystem{UserID: user.ID, Name: input.Name, Host: input.Host, Port: input.Port, Username: input.Username, AuthType: input.AuthType, AuthSecret: secret, AuthPassphrase: passphrase})
+	item, err := s.store.CreateRemoteSystem(r.Context(), store.RemoteSystem{UserID: user.ID, Name: input.Name, Host: input.Host, Port: input.Port, Username: input.Username, AuthType: input.AuthType, AuthSecret: secret, AuthPassphrase: passphrase, HostKeyFingerprint: input.HostKeyFingerprint})
 	if err != nil {
 		log.Printf("create sync remote system: %v", err)
 		writeError(w, http.StatusInternalServerError, "创建目标系统失败")
@@ -167,6 +196,9 @@ func (s *Server) updateSyncSystem(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "目标系统不存在")
 		return
 	}
+	if s.rejectReadOnly(w, r, user, "sync_system_update", r.PathValue("id")) {
+		return
+	}
 	existing, err := s.store.GetRemoteSystem(r.Context(), id, user.ID, user.Role == "admin")
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "目标系统不存在")
@@ -191,6 +223,10 @@ func (s *Server) updateSyncSystem(w http.ResponseWriter, r *http.Request) {
 	}
 	secret := existing.AuthSecret
 	passphrase := existing.AuthPassphrase
+	fingerprint := existing.HostKeyFingerprint
+	if input.HostKeyFingerprint != "" {
+		fingerprint = input.HostKeyFingerprint
+	}
 	if input.AuthSecret != "__keep__" {
 		secret, err = s.encryptSyncSecret(input.AuthSecret)
 		if err != nil {
@@ -209,7 +245,7 @@ func (s *Server) updateSyncSystem(w http.ResponseWriter, r *http.Request) {
 	if input.AuthType == "password" {
 		passphrase = ""
 	}
-	if err := s.store.UpdateRemoteSystem(r.Context(), store.RemoteSystem{ID: id, Name: input.Name, Host: input.Host, Port: input.Port, Username: input.Username, AuthType: input.AuthType, AuthSecret: secret, AuthPassphrase: passphrase}, user.ID, user.Role == "admin"); errors.Is(err, store.ErrNotFound) {
+	if err := s.store.UpdateRemoteSystem(r.Context(), store.RemoteSystem{ID: id, Name: input.Name, Host: input.Host, Port: input.Port, Username: input.Username, AuthType: input.AuthType, AuthSecret: secret, AuthPassphrase: passphrase, HostKeyFingerprint: fingerprint}, user.ID, user.Role == "admin"); errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "目标系统不存在")
 		return
 	} else if err != nil {
@@ -222,6 +258,7 @@ func (s *Server) updateSyncSystem(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "读取目标系统失败")
 		return
 	}
+	s.serviceEvent(r, "sync_system_update", user.Username, "target=%d result=success", id)
 	writeData(w, http.StatusOK, "目标系统已更新", publicSyncSystem(updated))
 }
 
@@ -230,6 +267,9 @@ func (s *Server) deleteSyncSystem(w http.ResponseWriter, r *http.Request) {
 	id, err := parseSyncID(r.PathValue("id"))
 	if err != nil {
 		writeError(w, http.StatusNotFound, "目标系统不存在")
+		return
+	}
+	if s.rejectReadOnly(w, r, user, "sync_system_delete", r.PathValue("id")) {
 		return
 	}
 	references, err := s.store.DeleteRemoteSystem(r.Context(), id, user.ID, user.Role == "admin")
@@ -246,6 +286,7 @@ func (s *Server) deleteSyncSystem(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "删除目标系统失败")
 		return
 	}
+	s.serviceEvent(r, "sync_system_delete", user.Username, "target=%d result=success", id)
 	writeData(w, http.StatusOK, "目标系统已删除", nil)
 }
 
@@ -424,6 +465,9 @@ func syncTaskFromRequest(input syncTaskRequest, userID int64) store.SyncTask {
 
 func (s *Server) createSyncTask(w http.ResponseWriter, r *http.Request) {
 	user := currentUser(r.Context())
+	if s.rejectReadOnly(w, r, user, "sync_task_create", "") {
+		return
+	}
 	var input syncTaskRequest
 	if !decodeJSON(w, r, &input) {
 		return
@@ -444,6 +488,7 @@ func (s *Server) createSyncTask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "创建同步任务失败")
 		return
 	}
+	s.serviceEvent(r, "sync_task_create", user.Username, "target=%d result=success", item.ID)
 	writeData(w, http.StatusCreated, "同步任务已创建", publicSyncTask(item))
 }
 
@@ -507,6 +552,9 @@ func (s *Server) updateSyncTask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "读取同步任务失败")
 		return
 	}
+	if s.rejectReadOnly(w, r, user, "sync_task_update", r.PathValue("id")) {
+		return
+	}
 	var input syncTaskRequest
 	if !decodeJSON(w, r, &input) {
 		return
@@ -527,6 +575,7 @@ func (s *Server) updateSyncTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	result, _ := s.store.GetSyncTask(r.Context(), item.ID, user.ID, user.Role == "admin")
+	s.serviceEvent(r, "sync_task_update", user.Username, "target=%d result=success", item.ID)
 	writeData(w, http.StatusOK, "同步任务已更新", publicSyncTask(result))
 }
 
@@ -541,6 +590,9 @@ func (s *Server) deleteSyncTask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "读取同步任务失败")
 		return
 	}
+	if s.rejectReadOnly(w, r, user, "sync_task_delete", r.PathValue("id")) {
+		return
+	}
 	if err := s.store.DeleteSyncTask(r.Context(), item.ID, user.ID, user.Role == "admin"); errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "同步任务不存在")
 		return
@@ -549,6 +601,7 @@ func (s *Server) deleteSyncTask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "删除同步任务失败")
 		return
 	}
+	s.serviceEvent(r, "sync_task_delete", user.Username, "target=%d result=success", item.ID)
 	writeData(w, http.StatusOK, "同步任务已删除", nil)
 }
 
@@ -590,6 +643,7 @@ func (s *Server) syncLock(id int64) *sync.Mutex {
 }
 
 func (s *Server) runSyncTaskNow(w http.ResponseWriter, r *http.Request) {
+	user := currentUser(r.Context())
 	item, err := s.getSyncTaskForRequest(r)
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "同步任务不存在")
@@ -597,6 +651,18 @@ func (s *Server) runSyncTaskNow(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "读取同步任务失败")
+		return
+	}
+	owner, ownerErr := s.store.GetUser(item.UserID)
+	if ownerErr != nil {
+		writeError(w, http.StatusInternalServerError, "读取同步任务失败")
+		return
+	}
+	if s.userReadOnly(owner) {
+		target := strconv.FormatInt(item.ID, 10)
+		s.recordAudit(r, &owner.ID, owner.Username, "sync_run", target, "failure", "read_only")
+		s.serviceEvent(r, "sync_run", owner.Username, "target=%d result=failure reason=read_only", item.ID)
+		writeErrorData(w, http.StatusForbidden, "当前账号处于只读时段，无法执行同步", map[string]string{"code": "READ_ONLY"})
 		return
 	}
 	lock := s.syncLock(item.ID)
@@ -607,6 +673,7 @@ func (s *Server) runSyncTaskNow(w http.ResponseWriter, r *http.Request) {
 	defer lock.Unlock()
 	entry := s.executeSyncTask(r.Context(), item)
 	writeData(w, http.StatusOK, "同步执行完成", publicSyncLog(entry))
+	s.serviceEvent(r, "sync_run", user.Username, "target=%d result=success", item.ID)
 }
 
 // StartSyncScheduler 每分钟扫描周期任务，服务重启后按当前 cron 重新恢复调度。
@@ -642,6 +709,19 @@ func (s *Server) scheduleSyncTasks(ctx context.Context) {
 		}
 		next := schedule.Next(now.Add(-time.Minute))
 		if next.After(now) || next.Before(now.Add(-time.Minute)) {
+			continue
+		}
+		owner, err := s.store.GetUser(item.UserID)
+		if err != nil {
+			log.Printf("load scheduled sync task owner %d: %v", item.ID, err)
+			continue
+		}
+		if owner.Disabled {
+			log.Printf("skip scheduled sync task %d: owner disabled", item.ID)
+			continue
+		}
+		if s.userReadOnly(owner) {
+			log.Printf("skip scheduled sync task %d: owner in read-only window", item.ID)
 			continue
 		}
 		lock := s.syncLock(item.ID)
@@ -690,6 +770,43 @@ func (s *Server) decryptSyncSecret(value string) (string, error) {
 	return string(plain), err
 }
 
+// hostKeyCallbackFor 返回按配置指纹校验的 HostKeyCallback；未配置指纹时回退 InsecureIgnoreHostKey 并打警告日志（兼容既有数据）。
+// hostKeyCallbackFor returns a HostKeyCallback that verifies the configured fingerprint, falling back to InsecureIgnoreHostKey with a warning when none is set.
+func hostKeyCallbackFor(address, fingerprint string) ssh.HostKeyCallback {
+	if fingerprint == "" {
+		log.Printf("WARNING: connecting to %s without host key verification (no host_key_fingerprint configured)", address)
+		return ssh.InsecureIgnoreHostKey()
+	}
+	return func(hostname string, remote net.Addr, key ssh.PublicKey) error {
+		got := ssh.FingerprintSHA256(key) // "SHA256:..."
+		if !hostKeyFingerprintMatches(got, fingerprint) {
+			return fmt.Errorf("host key fingerprint mismatch: got %s, want %s", got, fingerprint)
+		}
+		return nil
+	}
+}
+
+func hostKeyFingerprintMatches(got, want string) bool {
+	decode := func(value string) ([]byte, bool) {
+		value = strings.TrimPrefix(strings.TrimSpace(value), "SHA256:")
+		isHex := strings.Contains(value, ":") || (len(value) == sha256.Size*2 && strings.Trim(value, "0123456789abcdefABCDEF") == "")
+		if isHex {
+			value = strings.ReplaceAll(value, ":", "")
+			decoded, err := hex.DecodeString(value)
+			return decoded, err == nil && len(decoded) == sha256.Size
+		}
+		decoded, err := base64.StdEncoding.DecodeString(value)
+		if err != nil {
+			decoded, err = base64.StdEncoding.WithPadding(base64.NoPadding).DecodeString(value)
+		}
+		return decoded, err == nil && len(decoded) == sha256.Size
+	}
+
+	gotBytes, gotOK := decode(got)
+	wantBytes, wantOK := decode(want)
+	return gotOK && wantOK && string(gotBytes) == string(wantBytes)
+}
+
 func (s *Server) openSFTP(ctx context.Context, item store.RemoteSystem) (*sftp.Client, func(), error) {
 	secret, err := s.decryptSyncSecret(item.AuthSecret)
 	if err != nil {
@@ -723,7 +840,7 @@ func (s *Server) openSFTP(ctx context.Context, item store.RemoteSystem) (*sftp.C
 	if err != nil {
 		return nil, func() {}, err
 	}
-	sshConfig := &ssh.ClientConfig{User: item.Username, Auth: auth, HostKeyCallback: ssh.InsecureIgnoreHostKey(), Timeout: 15 * time.Second}
+	sshConfig := &ssh.ClientConfig{User: item.Username, Auth: auth, HostKeyCallback: hostKeyCallbackFor(address, strings.TrimSpace(item.HostKeyFingerprint)), Timeout: 15 * time.Second}
 	connection, channels, requests, err := ssh.NewClientConn(netConn, address, sshConfig)
 	if err != nil {
 		netConn.Close()
@@ -746,6 +863,22 @@ type syncRunResult struct {
 }
 
 func (s *Server) executeSyncTask(ctx context.Context, task store.SyncTask) store.SyncLog {
+	// executeSyncTask 在执行前再次校验任务所有者的只读状态。
+	// executeSyncTask rechecks the task owner's read-only state before execution.
+	owner, ownerErr := s.store.GetUser(task.UserID)
+	if ownerErr != nil {
+		log.Printf("load sync task owner %d: %v", task.ID, ownerErr)
+	} else if s.userReadOnly(owner) {
+		runAt := time.Now().UTC().Format(time.RFC3339)
+		entry := store.SyncLog{TaskID: task.ID, UserID: task.UserID, RunAt: runAt, Direction: task.Direction, Result: "failure", Message: "用户在只读时段，任务已跳过", Detail: "同步跳过: 用户在只读时段"}
+		if _, logErr := s.store.CreateSyncLog(context.Background(), entry); logErr != nil {
+			log.Printf("create sync log: %v", logErr)
+		}
+		if err := s.store.UpdateSyncTaskResult(context.Background(), task.ID, runAt, "failure"); err != nil {
+			log.Printf("update sync task result: %v", err)
+		}
+		return entry
+	}
 	runAt := time.Now().UTC().Format(time.RFC3339)
 	result := syncRunResult{}
 	item, err := s.store.GetRemoteSystem(context.Background(), task.RemoteSystemID, task.UserID, false)
@@ -899,12 +1032,30 @@ func (s *Server) executeSyncPush(ctx context.Context, task store.SyncTask, syste
 				continue
 			}
 		}
-		remoteFile, createErr := client.OpenFile(remotePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC)
+		tempRemote := remotePath + ".filebox-part-" + newSyncTaskID()
+		remoteFile, createErr := client.OpenFile(tempRemote, os.O_WRONLY|os.O_CREATE|os.O_EXCL)
 		if createErr == nil {
-			_, createErr = io.Copy(remoteFile, handle)
+			_, copyErr := io.Copy(remoteFile, handle)
 			closeErr := remoteFile.Close()
-			if createErr == nil {
+			if copyErr != nil {
+				createErr = copyErr
+				_ = client.Remove(tempRemote)
+			} else if closeErr != nil {
 				createErr = closeErr
+				_ = client.Remove(tempRemote)
+			} else {
+				// 原子替换远端目标，避免传输中断时破坏原文件。
+				// Atomically replace the remote target so interrupted transfers cannot corrupt it.
+				renameErr := client.PosixRename(tempRemote, remotePath)
+				if renameErr != nil {
+					// 回退到标准重命名，以兼容不支持 POSIX 扩展的服务器。
+					// Fall back to the standard rename for servers without the POSIX extension.
+					renameErr = client.Rename(tempRemote, remotePath)
+				}
+				if renameErr != nil {
+					_ = client.Remove(tempRemote)
+					createErr = renameErr
+				}
 			}
 		}
 		closeErr := handle.Close()
@@ -1012,6 +1163,21 @@ func (s *Server) executeSyncPull(ctx context.Context, task store.SyncTask, syste
 				return conflictErr
 			}
 		}
+		if remoteInfo.Size() > s.config.MaxFileSize {
+			result.detail = append(result.detail, relative+": skipped (exceeds max file size)")
+			return nil
+		}
+		if s.config.MinFreeSpace > 0 {
+			_, free, _, diskErr := diskusage.DiskUsage(s.config.DataDir)
+			if diskErr != nil {
+				result.detail = append(result.detail, relative+": disk check failed")
+				return nil
+			}
+			if free < s.config.MinFreeSpace {
+				result.detail = append(result.detail, relative+": skipped (insufficient disk space)")
+				return nil
+			}
+		}
 		temp, tempErr := os.CreateTemp(filepath.Join(s.config.DataDir, "tmp"), "sync-download-*")
 		if tempErr != nil {
 			return tempErr
@@ -1038,6 +1204,13 @@ func (s *Server) executeSyncPull(ctx context.Context, task store.SyncTask, syste
 		}
 		if localCloseErr != nil {
 			return localCloseErr
+		}
+		tempInfo, statErr := os.Stat(tempPath)
+		if statErr != nil {
+			return statErr
+		}
+		if tempInfo.Size() != remoteInfo.Size() {
+			return fmt.Errorf("size mismatch: got %d want %d", tempInfo.Size(), remoteInfo.Size())
 		}
 		shaHex, md5Hex, hashErr := hashSyncFile(tempPath)
 		if hashErr != nil {

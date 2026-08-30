@@ -17,17 +17,18 @@ var ErrSyncReferenced = errors.New("sync remote system is referenced")
 // RemoteSystem 保存一个可被多个同步任务复用的 SFTP 目标配置。
 // RemoteSystem stores an SFTP target configuration reusable by multiple tasks.
 type RemoteSystem struct {
-	ID             int64  `json:"id"`
-	UserID         int64  `json:"userId"`
-	Name           string `json:"name"`
-	Host           string `json:"host"`
-	Port           int    `json:"port"`
-	Username       string `json:"username"`
-	AuthType       string `json:"authType"`
-	AuthSecret     string `json:"-"`
-	AuthPassphrase string `json:"-"`
-	TaskCount      int64  `json:"taskCount"`
-	CreatedAt      string `json:"createdAt"`
+	ID                 int64  `json:"id"`
+	UserID             int64  `json:"userId"`
+	Name               string `json:"name"`
+	Host               string `json:"host"`
+	Port               int    `json:"port"`
+	Username           string `json:"username"`
+	AuthType           string `json:"authType"`
+	AuthSecret         string `json:"-"`
+	AuthPassphrase     string `json:"-"`
+	HostKeyFingerprint string `json:"hostKeyFingerprint"`
+	TaskCount          int64  `json:"taskCount"`
+	CreatedAt          string `json:"createdAt"`
 }
 
 // SyncTask 描述一个 FileBox 与 SFTP 之间的同步任务。
@@ -80,6 +81,7 @@ CREATE TABLE IF NOT EXISTS remote_systems (
   auth_type TEXT NOT NULL CHECK(auth_type IN ('password', 'key')),
   auth_secret TEXT NOT NULL,
   auth_passphrase TEXT NOT NULL DEFAULT '',
+  host_key_fingerprint TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_remote_systems_user ON remote_systems(user_id, created_at DESC);
@@ -117,13 +119,25 @@ CREATE TABLE IF NOT EXISTS sync_logs (
 );
 CREATE INDEX IF NOT EXISTS idx_sync_logs_task_run ON sync_logs(task_id, run_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_sync_logs_run ON sync_logs(run_at);`)
-	return err
+	if err != nil {
+		return err
+	}
+	columns, err := tableColumns(s.DB, "remote_systems")
+	if err != nil {
+		return err
+	}
+	if !columns["host_key_fingerprint"] {
+		if _, err := s.DB.Exec("ALTER TABLE remote_systems ADD COLUMN host_key_fingerprint TEXT NOT NULL DEFAULT ''"); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func scanRemoteSystem(row interface{ Scan(...any) error }) (RemoteSystem, error) {
 	var item RemoteSystem
 	var err error
-	err = row.Scan(&item.ID, &item.UserID, &item.Name, &item.Host, &item.Port, &item.Username, &item.AuthType, &item.AuthSecret, &item.AuthPassphrase, &item.CreatedAt, &item.TaskCount)
+	err = row.Scan(&item.ID, &item.UserID, &item.Name, &item.Host, &item.Port, &item.Username, &item.AuthType, &item.AuthSecret, &item.AuthPassphrase, &item.HostKeyFingerprint, &item.CreatedAt, &item.TaskCount)
 	if errors.Is(err, sql.ErrNoRows) {
 		return RemoteSystem{}, ErrNotFound
 	}
@@ -131,15 +145,15 @@ func scanRemoteSystem(row interface{ Scan(...any) error }) (RemoteSystem, error)
 }
 
 const remoteSystemColumns = `r.id, r.user_id, r.name, r.host, r.port, r.username, r.auth_type,
- r.auth_secret, COALESCE(r.auth_passphrase, ''), r.created_at,
+ r.auth_secret, COALESCE(r.auth_passphrase, ''), COALESCE(r.host_key_fingerprint, ''), r.created_at,
  (SELECT COUNT(t.id) FROM sync_tasks t WHERE t.remote_system_id = r.id)`
 
 // CreateRemoteSystem 写入目标系统配置。
 // CreateRemoteSystem inserts a remote system configuration.
 func (s *Store) CreateRemoteSystem(ctx context.Context, item RemoteSystem) (RemoteSystem, error) {
 	now := time.Now().UTC().Format(time.RFC3339)
-	result, err := s.DB.ExecContext(ctx, `INSERT INTO remote_systems(user_id, name, host, port, username, auth_type, auth_secret, auth_passphrase, created_at)
-VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)`, item.UserID, item.Name, item.Host, item.Port, item.Username, item.AuthType, item.AuthSecret, item.AuthPassphrase, now)
+	result, err := s.DB.ExecContext(ctx, `INSERT INTO remote_systems(user_id, name, host, port, username, auth_type, auth_secret, auth_passphrase, host_key_fingerprint, created_at)
+VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, item.UserID, item.Name, item.Host, item.Port, item.Username, item.AuthType, item.AuthSecret, item.AuthPassphrase, item.HostKeyFingerprint, now)
 	if err != nil {
 		return RemoteSystem{}, err
 	}
@@ -195,9 +209,9 @@ func (s *Store) UpdateRemoteSystem(ctx context.Context, item RemoteSystem, userI
 	if admin {
 		where, args = "id = ?", []any{item.ID}
 	}
-	values := []any{item.Name, item.Host, item.Port, item.Username, item.AuthType, item.AuthSecret, item.AuthPassphrase}
+	values := []any{item.Name, item.Host, item.Port, item.Username, item.AuthType, item.AuthSecret, item.AuthPassphrase, item.HostKeyFingerprint}
 	values = append(values, args...)
-	result, err := s.DB.ExecContext(ctx, "UPDATE remote_systems SET name = ?, host = ?, port = ?, username = ?, auth_type = ?, auth_secret = ?, auth_passphrase = ? WHERE "+where,
+	result, err := s.DB.ExecContext(ctx, "UPDATE remote_systems SET name = ?, host = ?, port = ?, username = ?, auth_type = ?, auth_secret = ?, auth_passphrase = ?, host_key_fingerprint = ? WHERE "+where,
 		values...)
 	if err != nil {
 		return err
@@ -370,7 +384,13 @@ func (s *Store) DeleteSyncTask(ctx context.Context, id, userID int64, admin bool
 // ListScheduledSyncTasks 返回调度器扫描所需的周期任务。
 // ListScheduledSyncTasks returns periodic tasks for the scheduler scan.
 func (s *Store) ListScheduledSyncTasks(ctx context.Context) ([]SyncTask, error) {
-	rows, err := s.DB.QueryContext(ctx, "SELECT "+syncTaskColumns+" FROM sync_tasks WHERE enabled = 1 AND schedule_type = 'periodic' ORDER BY id")
+	rows, err := s.DB.QueryContext(ctx, `SELECT sync_tasks.id, sync_tasks.user_id, sync_tasks.name, sync_tasks.direction, sync_tasks.remote_system_id,
+ sync_tasks.source_type, sync_tasks.source_path, sync_tasks.target_type, sync_tasks.target_path, sync_tasks.conflict_policy,
+ sync_tasks.schedule_type, sync_tasks.cron, sync_tasks.enabled, COALESCE(sync_tasks.last_run_at, ''),
+ COALESCE(sync_tasks.last_result, ''), sync_tasks.created_at
+ FROM sync_tasks JOIN users ON users.id = sync_tasks.user_id
+ WHERE sync_tasks.enabled = 1 AND sync_tasks.schedule_type = 'periodic' AND users.disabled = 0
+ ORDER BY sync_tasks.id`)
 	if err != nil {
 		return nil, err
 	}

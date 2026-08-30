@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -89,6 +90,7 @@ type User struct {
 	ID                 int64  `json:"id"`
 	Username           string `json:"username"`
 	PasswordHash       string `json:"-"`
+	LastPasswordChange string `json:"-"`
 	Role               string `json:"role"`
 	Language           string `json:"language"`
 	QuotaBytes         int64  `json:"quotaBytes"`
@@ -492,7 +494,9 @@ func (s *Store) migrateSharesSchema() error {
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_shares_file ON shares(file_id);
-CREATE INDEX IF NOT EXISTS idx_shares_created_by ON shares(created_by, created_at DESC);`); err != nil {
+CREATE INDEX IF NOT EXISTS idx_shares_created_by ON shares(created_by, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_shares_expires ON shares(expires_at);
+CREATE INDEX IF NOT EXISTS idx_shares_revoked ON shares(revoked_at);`); err != nil {
 		return err
 	}
 	columns, err := tableColumns(s.DB, "shares")
@@ -544,6 +548,7 @@ func (s *Store) migrateUsersSchema() error {
 		}
 	}
 	for _, definition := range []struct{ name, sql string }{
+		{"last_password_change", "ALTER TABLE users ADD COLUMN last_password_change TEXT NOT NULL DEFAULT ''"},
 		{"must_change_password", "ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0"},
 		{"totp_secret", "ALTER TABLE users ADD COLUMN totp_secret TEXT"},
 		{"totp_enabled", "ALTER TABLE users ADD COLUMN totp_enabled INTEGER NOT NULL DEFAULT 0"},
@@ -750,7 +755,8 @@ func (s *Store) EnsureAdmin(username, password string, quota int64) error {
 // ResetPassword 更新用户密码、强制下次登录改密，并清除登录锁定状态。
 // ResetPassword updates a user's password, forces the next login to change it, and clears login locks.
 func (s *Store) ResetPassword(username, newHash string) (int64, error) {
-	result, err := s.DB.Exec("UPDATE users SET password_hash = ?, must_change_password = 1, failed_attempts = 0, locked_until = NULL, updated_at = ? WHERE username = ?", newHash, time.Now().UTC().Format(time.RFC3339), username)
+	now := time.Now().UTC()
+	result, err := s.DB.Exec("UPDATE users SET password_hash = ?, last_password_change = ?, must_change_password = 1, failed_attempts = 0, locked_until = NULL, updated_at = ? WHERE username = ?", newHash, now.Format(time.RFC3339Nano), now.Format(time.RFC3339), username)
 	if err != nil {
 		return 0, err
 	}
@@ -778,19 +784,19 @@ func (s *Store) ClearIPACL(username string) (bool, error) {
 func (s *Store) GetUserByUsername(username string) (User, error) {
 	// GetUserByUsername 按唯一用户名读取账户及其登录锁定状态。
 	// GetUserByUsername loads an account and its login-lock state by unique username.
-	return scanUser(s.DB.QueryRow("SELECT id, username, password_hash, role, language, quota_bytes, used_bytes, disabled, failed_attempts, COALESCE(locked_until, ''), COALESCE(must_change_password, 0), COALESCE(totp_secret, ''), COALESCE(totp_enabled, 0), COALESCE(last_used_totp, ''), COALESCE(ip_acl_enabled, 0), COALESCE(ip_whitelist, ''), COALESCE(read_only_from, ''), COALESCE(read_only_until, ''), created_at, updated_at FROM users WHERE username = ?", username))
+	return scanUser(s.DB.QueryRow("SELECT id, username, password_hash, COALESCE(last_password_change, ''), role, language, quota_bytes, used_bytes, disabled, failed_attempts, COALESCE(locked_until, ''), COALESCE(must_change_password, 0), COALESCE(totp_secret, ''), COALESCE(totp_enabled, 0), COALESCE(last_used_totp, ''), COALESCE(ip_acl_enabled, 0), COALESCE(ip_whitelist, ''), COALESCE(read_only_from, ''), COALESCE(read_only_until, ''), created_at, updated_at FROM users WHERE username = ?", username))
 }
 
 func (s *Store) GetUser(id int64) (User, error) {
 	// GetUser 按账户 ID 读取用户记录。
 	// GetUser loads a user record by account ID.
-	return scanUser(s.DB.QueryRow("SELECT id, username, password_hash, role, language, quota_bytes, used_bytes, disabled, failed_attempts, COALESCE(locked_until, ''), COALESCE(must_change_password, 0), COALESCE(totp_secret, ''), COALESCE(totp_enabled, 0), COALESCE(last_used_totp, ''), COALESCE(ip_acl_enabled, 0), COALESCE(ip_whitelist, ''), COALESCE(read_only_from, ''), COALESCE(read_only_until, ''), created_at, updated_at FROM users WHERE id = ?", id))
+	return scanUser(s.DB.QueryRow("SELECT id, username, password_hash, COALESCE(last_password_change, ''), role, language, quota_bytes, used_bytes, disabled, failed_attempts, COALESCE(locked_until, ''), COALESCE(must_change_password, 0), COALESCE(totp_secret, ''), COALESCE(totp_enabled, 0), COALESCE(last_used_totp, ''), COALESCE(ip_acl_enabled, 0), COALESCE(ip_whitelist, ''), COALESCE(read_only_from, ''), COALESCE(read_only_until, ''), created_at, updated_at FROM users WHERE id = ?", id))
 }
 
 func scanUser(row *sql.Row) (User, error) {
 	var user User
 	var disabled, mustChange, totpEnabled, ipACLEnabled int
-	err := row.Scan(&user.ID, &user.Username, &user.PasswordHash, &user.Role, &user.Language, &user.QuotaBytes, &user.UsedBytes, &disabled, &user.FailedAttempts, &user.LockedUntil, &mustChange, &user.TOTPSecret, &totpEnabled, &user.LastUsedTOTP, &ipACLEnabled, &user.IPWhitelist, &user.ReadOnlyFrom, &user.ReadOnlyUntil, &user.CreatedAt, &user.UpdatedAt)
+	err := row.Scan(&user.ID, &user.Username, &user.PasswordHash, &user.LastPasswordChange, &user.Role, &user.Language, &user.QuotaBytes, &user.UsedBytes, &disabled, &user.FailedAttempts, &user.LockedUntil, &mustChange, &user.TOTPSecret, &totpEnabled, &user.LastUsedTOTP, &ipACLEnabled, &user.IPWhitelist, &user.ReadOnlyFrom, &user.ReadOnlyUntil, &user.CreatedAt, &user.UpdatedAt)
 	user.Disabled = disabled != 0
 	user.MustChangePassword = mustChange != 0
 	user.TOTPEnabled = totpEnabled != 0
@@ -875,17 +881,19 @@ func (s *Store) UpdateUser(ctx context.Context, id int64, role *string, quota *i
 	}
 	if passwordHash != nil {
 		user.PasswordHash = *passwordHash
+		user.LastPasswordChange = time.Now().UTC().Format(time.RFC3339Nano)
 		user.MustChangePassword = true
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	_, err = s.DB.ExecContext(ctx, "UPDATE users SET password_hash = ?, role = ?, quota_bytes = ?, disabled = ?, failed_attempts = 0, locked_until = NULL, must_change_password = ?, updated_at = ? WHERE id = ?", user.PasswordHash, user.Role, user.QuotaBytes, boolInt(user.Disabled), boolInt(user.MustChangePassword), now, id)
+	_, err = s.DB.ExecContext(ctx, "UPDATE users SET password_hash = ?, last_password_change = ?, role = ?, quota_bytes = ?, disabled = ?, failed_attempts = 0, locked_until = NULL, must_change_password = ?, updated_at = ? WHERE id = ?", user.PasswordHash, user.LastPasswordChange, user.Role, user.QuotaBytes, boolInt(user.Disabled), boolInt(user.MustChangePassword), now, id)
 	return err
 }
 
 // ChangePassword replaces a user's password and clears the forced-change marker.
 // ChangePassword 更新用户密码并清除强制改密标记。
 func (s *Store) ChangePassword(ctx context.Context, id int64, passwordHash string) error {
-	result, err := s.DB.ExecContext(ctx, "UPDATE users SET password_hash = ?, must_change_password = 0, updated_at = ? WHERE id = ?", passwordHash, time.Now().UTC().Format(time.RFC3339), id)
+	now := time.Now().UTC()
+	result, err := s.DB.ExecContext(ctx, "UPDATE users SET password_hash = ?, last_password_change = ?, must_change_password = 0, updated_at = ? WHERE id = ?", passwordHash, now.Format(time.RFC3339Nano), now.Format(time.RFC3339), id)
 	if err != nil {
 		return err
 	}
@@ -1413,6 +1421,7 @@ func (s *Store) CreateUploadTask(ctx context.Context, task UploadTask) error {
 		tx.Rollback()
 		return err
 	}
+	var oldDiskPath string
 	if task.Resolve == "overwrite" {
 		_ = tx.QueryRowContext(ctx, "SELECT size FROM files WHERE user_id = ? AND status = 'ready' AND storage_path = ?", task.UserID, filepath.Join(task.StorageDir, task.Name)).Scan(&replacingSize)
 	}
@@ -1433,10 +1442,7 @@ func (s *Store) CreateUploadTask(ctx context.Context, task UploadTask) error {
 				tx.Rollback()
 				return err
 			}
-			if removeErr := os.Remove(filepath.Join(s.DataDir, oldPath)); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
-				tx.Rollback()
-				return fmt.Errorf("remove overwritten file: %w", removeErr)
-			}
+			oldDiskPath = filepath.Join(s.DataDir, oldPath)
 		} else if !errors.Is(err, sql.ErrNoRows) {
 			tx.Rollback()
 			return err
@@ -1448,7 +1454,17 @@ func (s *Store) CreateUploadTask(ctx context.Context, task UploadTask) error {
 		tx.Rollback()
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	// 提交成功后再删除被覆盖文件，避免事务回滚造成物理文件丢失。
+	// Remove the overwritten file only after commit so a rollback cannot lose data.
+	if oldDiskPath != "" {
+		if removeErr := os.Remove(oldDiskPath); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+			log.Printf("remove overwritten file after commit: %v", removeErr)
+		}
+	}
+	return nil
 }
 
 func (s *Store) GetUploadTask(ctx context.Context, id string) (UploadTask, error) {
@@ -1950,6 +1966,34 @@ WHERE token = ? AND revoked_at IS NULL AND expires_at > ? AND (max_downloads = 0
 	return count == 1, err
 }
 
+// PruneShares physically deletes invalid shares (revoked or expired) older than the retention period.
+// PruneShares 物理删除超过留存期的失效分享（已撤销或已过期），返回删除条数。
+func (s *Store) PruneShares(ctx context.Context, retentionDays int) (int64, error) {
+	if retentionDays < 0 {
+		retentionDays = 0
+	}
+	cutoff := time.Now().UTC().Add(-time.Duration(retentionDays) * 24 * time.Hour).Format(time.RFC3339)
+	result, err := s.DB.ExecContext(ctx, `DELETE FROM shares WHERE (revoked_at IS NOT NULL AND revoked_at < ?) OR (revoked_at IS NULL AND expires_at < ?)`, cutoff, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+// PruneAuditLogs 删除超过留存天数的审计日志，与同步日志清理保持一致。
+// PruneAuditLogs removes audit logs older than the retention period, mirroring sync-log pruning.
+func (s *Store) PruneAuditLogs(ctx context.Context, retentionDays int) (int64, error) {
+	if retentionDays < 0 {
+		return 0, fmt.Errorf("invalid audit log retention")
+	}
+	cutoff := time.Now().UTC().Add(-time.Duration(retentionDays) * 24 * time.Hour).Format(time.RFC3339)
+	result, err := s.DB.ExecContext(ctx, "DELETE FROM audit_logs WHERE created_at < ?", cutoff)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 // CreateUploadCollection stores a new public upload collection.
 // CreateUploadCollection 创建新的公开上传收集链接。
 func (s *Store) CreateUploadCollection(ctx context.Context, collection UploadCollection) (UploadCollection, error) {
@@ -2352,8 +2396,8 @@ func (s *Store) EnsureFolderPath(ctx context.Context, userID int64, path string)
 	return nil
 }
 
-// RenameFolder 事务性重命名目录：更新自身与全部子孙的 path、批量替换文件 storage_path 前缀，并物理移动磁盘目录。
-// RenameFolder transactionally renames a folder: updates the path of itself and descendants, rewrites file storage prefixes, and moves the disk directory.
+// RenameFolder 事务性重命名目录：更新自身与全部子孙的 path、批量替换文件 storage_path 前缀，并在提交后移动磁盘目录。
+// RenameFolder transactionally renames a folder: updates the path of itself and descendants, rewrites file storage prefixes, and moves the disk directory after commit.
 func (s *Store) RenameFolder(ctx context.Context, id, userID int64, newName string) error {
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
@@ -2403,10 +2447,13 @@ func (s *Store) RenameFolder(ctx context.Context, id, userID int64, newName stri
 	}
 	oldDisk := filepath.Join(s.DataDir, filePrefix)
 	newDisk := filepath.Join(s.DataDir, newFilePrefix)
-	if err := os.Rename(oldDisk, newDisk); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("rename disk directory: %w", err)
+	if err := tx.Commit(); err != nil {
+		return err
 	}
-	return tx.Commit()
+	if err := os.Rename(oldDisk, newDisk); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("rename disk directory after commit: %w", err)
+	}
+	return nil
 }
 
 // DeleteFolder 仅删除空目录（无 ready 文件且无子目录），物理移除并删除记录。

@@ -114,6 +114,74 @@ func TestReadOnlyWindowControlsWritesAndExposesState(t *testing.T) {
 	}
 }
 
+func TestReadOnlyBlocksSyncAndCollectionWrites(t *testing.T) {
+	_, handler := newTestServer(t)
+	adminToken := testAdminToken(t, handler)
+	created := testJSONRequest(t, handler, http.MethodPost, "/api/admin/users", adminToken, `{"username":"ro-sync","password":"Readonly123!","role":"user","quotaBytes":1048576}`)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create read-only user = %d: %s", created.Code, created.Body.String())
+	}
+	userID := int64(responseData(t, created)["id"].(float64))
+	login := testJSONRequest(t, handler, http.MethodPost, "/api/auth/login", "", `{"username":"ro-sync","password":"Readonly123!"}`)
+	if login.Code != http.StatusOK {
+		t.Fatalf("read-only user login = %d: %s", login.Code, login.Body.String())
+	}
+	userToken := responseData(t, login)["token"].(string)
+
+	system := testJSONRequest(t, handler, http.MethodPost, "/api/sync/systems", userToken, `{"name":"ro-system","host":"127.0.0.1","port":22,"username":"u","authType":"password","authSecret":"x"}`)
+	if system.Code != http.StatusCreated {
+		t.Fatalf("create sync system before window = %d: %s", system.Code, system.Body.String())
+	}
+	systemID := int64(responseData(t, system)["id"].(float64))
+	taskBody := `{"name":"ro-task","direction":"push","remoteSystemId":` + formatID(systemID) + `,"sourceType":"filebox","sourcePath":"","targetType":"sftp","targetPath":".","conflictPolicy":"overwrite","scheduleType":"once"}`
+	task := testJSONRequest(t, handler, http.MethodPost, "/api/sync/tasks", userToken, taskBody)
+	if task.Code != http.StatusCreated {
+		t.Fatalf("create sync task before window = %d: %s", task.Code, task.Body.String())
+	}
+	taskID := int64(responseData(t, task)["id"].(float64))
+	collection := testJSONRequest(t, handler, http.MethodPost, "/api/collections", userToken, `{"name":"c","expiresInHours":1}`)
+	if collection.Code != http.StatusCreated {
+		t.Fatalf("create collection before window = %d: %s", collection.Code, collection.Body.String())
+	}
+	collectionData := responseData(t, collection)
+	collectionID := int64(collectionData["id"].(float64))
+	collectionToken := collectionData["token"].(string)
+
+	from := time.Now().UTC().Add(-time.Minute).Format(time.RFC3339)
+	until := time.Now().UTC().Add(time.Minute).Format(time.RFC3339)
+	setWindow := testJSONRequest(t, handler, http.MethodPut, "/api/admin/users/"+formatID(userID)+"/read-only", adminToken, `{"from":"`+from+`","until":"`+until+`"}`)
+	if setWindow.Code != http.StatusOK {
+		t.Fatalf("set read-only window = %d: %s", setWindow.Code, setWindow.Body.String())
+	}
+
+	validSystem := `{"name":"ro-system-updated","host":"127.0.0.1","port":22,"username":"u","authType":"password","authSecret":""}`
+	validTask := `{"name":"ro-task-updated","direction":"push","remoteSystemId":` + formatID(systemID) + `,"sourceType":"filebox","sourcePath":"","targetType":"sftp","targetPath":".","conflictPolicy":"overwrite","scheduleType":"once"}`
+	checks := []struct {
+		name string
+		got  *httptest.ResponseRecorder
+	}{
+		{name: "sync system create", got: testJSONRequest(t, handler, http.MethodPost, "/api/sync/systems", userToken, `{"name":"blocked-system","host":"127.0.0.1","port":22,"username":"u","authType":"password","authSecret":"x"}`)},
+		{name: "sync system update", got: testJSONRequest(t, handler, http.MethodPut, "/api/sync/systems/"+formatID(systemID), userToken, validSystem)},
+		{name: "sync system delete", got: testJSONRequest(t, handler, http.MethodDelete, "/api/sync/systems/"+formatID(systemID), userToken, "")},
+		{name: "sync task create", got: testJSONRequest(t, handler, http.MethodPost, "/api/sync/tasks", userToken, taskBody)},
+		{name: "sync task update", got: testJSONRequest(t, handler, http.MethodPut, "/api/sync/tasks/"+formatID(taskID), userToken, validTask)},
+		{name: "sync task delete", got: testJSONRequest(t, handler, http.MethodDelete, "/api/sync/tasks/"+formatID(taskID), userToken, "")},
+		{name: "sync task run", got: testJSONRequest(t, handler, http.MethodPost, "/api/sync/tasks/"+formatID(taskID)+"/run", userToken, "")},
+		{name: "collection create", got: testJSONRequest(t, handler, http.MethodPost, "/api/collections", userToken, `{"name":"blocked-collection","expiresInHours":1}`)},
+		{name: "collection delete", got: testJSONRequest(t, handler, http.MethodDelete, "/api/collections/"+formatID(collectionID), userToken, "")},
+		{name: "collection upload init", got: testJSONRequest(t, handler, http.MethodPost, "/api/collections/"+collectionToken+"/upload-init", "", `{"name":"a.txt","size":1}`)},
+	}
+	for _, check := range checks {
+		if check.got.Code != http.StatusForbidden || responseCode(t, check.got) != "READ_ONLY" {
+			t.Errorf("%s = %d code=%q body=%s", check.name, check.got.Code, responseCode(t, check.got), check.got.Body.String())
+		}
+	}
+	clearWindow := testJSONRequest(t, handler, http.MethodPut, "/api/admin/users/"+formatID(userID)+"/read-only", adminToken, `{"from":"","until":""}`)
+	if clearWindow.Code != http.StatusOK {
+		t.Fatalf("clear read-only window = %d: %s", clearWindow.Code, clearWindow.Body.String())
+	}
+}
+
 func TestUserReadOnlyAtUsesInclusiveBoundariesAndRejectsInvalidWindows(t *testing.T) {
 	from := time.Date(2026, 8, 30, 10, 0, 0, 0, time.UTC)
 	until := from.Add(time.Hour)

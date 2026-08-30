@@ -32,7 +32,7 @@
         </div>
 
         <div v-show="activeTab === 'system'">
-          <div class="form-panel"><div class="panel-heading"><div><p class="eyebrow">{{ t('admin.tabSystem') }}</p><h2>{{ t('admin.tabSystem') }}</h2></div><button class="secondary-button" :disabled="settingsSaving" @click="saveSettings"><Save :size="16" /> {{ t('admin.saveSettings') }}</button></div><div class="security-grid"><label>{{ t('admin.logRetentionDays') }}<input v-model.number="settings.logRetentionDays" type="number" min="0" /><span>{{ t('common.days') }}</span></label><label>{{ t('admin.uploadRateLimit') }}<input v-model.number="settings.uploadRateLimit" type="number" min="0" step="1" /><span>{{ t('admin.uploadRateLimitCopy') }}</span></label><label class="check-label"><input v-model="settings.registerEnabled" type="checkbox" /> {{ t('admin.registerEnabled') }}<span class="field-hint">{{ t('admin.registerEnabledCopy') }}</span></label><label class="check-label"><input v-model="settings.trustProxy" type="checkbox" /> {{ t('admin.trustProxy') }}<span class="field-hint">{{ t('admin.trustProxyCopy') }}</span></label></div><p class="muted">{{ t('admin.logRetentionCopy') }}</p></div>
+          <div class="form-panel"><div class="panel-heading"><div><p class="eyebrow">{{ t('admin.tabSystem') }}</p><h2>{{ t('admin.tabSystem') }}</h2></div><button class="secondary-button" :disabled="settingsSaving" @click="saveSettings"><Save :size="16" /> {{ t('admin.saveSettings') }}</button></div><div class="system-settings-grid"><label>{{ t('admin.logRetentionDays') }}<input v-model.number="settings.logRetentionDays" type="number" min="0" /><span class="setting-suffix">{{ t('common.days') }}</span></label><label>{{ t('admin.uploadRateLimit') }}<input v-model.number="settings.uploadRateLimit" type="number" min="0" step="1" /><span class="setting-suffix">{{ t('admin.uploadRateLimitCopy') }}</span></label><label class="check-label"><input v-model="settings.registerEnabled" type="checkbox" /> {{ t('admin.registerEnabled') }}<span class="field-hint">{{ t('admin.registerEnabledCopy') }}</span></label><label class="check-label"><input v-model="settings.trustProxy" type="checkbox" /> {{ t('admin.trustProxy') }}<span class="field-hint">{{ t('admin.trustProxyCopy') }}</span></label></div><p class="muted">{{ t('admin.logRetentionCopy') }}</p></div>
         </div>
 
         <BrandFooter />
@@ -133,10 +133,14 @@ onMounted(async () => { loadAll(); await loadBrand(); loadBrandSettings() })
 .modal-backdrop .modal-panel { width: min(560px, 100%); border-radius: 12px; }
 .modal-backdrop .panel-heading { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
 .modal-backdrop .panel-heading h2 { margin: 0; }
-.modal-backdrop .admin-form { display: grid; grid-template-columns: 1fr; gap: 13px; align-items: stretch; }
+.modal-backdrop .admin-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 13px; align-items: stretch; }
 .modal-backdrop .admin-form label { margin: 0; }
-.modal-backdrop .admin-form .submit-button { justify-content: center; }
-.modal-backdrop .user-security-form { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; padding: 14px; border: 1px solid #e3eaf1; border-radius: 8px; background: #f8fafc; }
+.modal-backdrop .admin-form .submit-button { grid-column: 1 / -1; width: auto; justify-self: start; }
+.modal-backdrop .user-security-form { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; padding: 14px; border: 1px solid #e3eaf1; border-radius: 8px; background: #f8fafc; }
 .modal-backdrop .user-security-form .security-whitelist { grid-column: 1 / -1; }
-@media (max-width: 800px) { .modal-backdrop .user-security-form { grid-template-columns: 1fr; } }
+.modal-backdrop .create-security-form, .modal-backdrop .security-section-title { grid-column: 1 / -1; }
+@media (max-width: 800px) {
+  .modal-backdrop .admin-form { grid-template-columns: 1fr; }
+  .modal-backdrop .user-security-form { grid-template-columns: 1fr; }
+}
 </style>

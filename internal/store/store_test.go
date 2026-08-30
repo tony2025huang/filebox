@@ -3,6 +3,10 @@ package store
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -374,6 +378,101 @@ func TestShareStorageAndSettings(t *testing.T) {
 	}
 }
 
+func TestPruneSharesRemovesRevokedAndExpired(t *testing.T) {
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.EnsureAdmin("admin", "admin123", 1024*1024); err != nil {
+		t.Fatal(err)
+	}
+	user, err := db.GetUserByUsername("admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	result, err := db.DB.Exec("INSERT INTO files(user_id, name, stored_name, size, mime, sha256, md5, status, storage_path, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, 'ready', ?, ?)", user.ID, "prune.txt", "prune.txt", 3, "text/plain", "sha", "md5", "files/admin/prune.txt", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fileID, err := result.LastInsertId()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := db.CreateShare(ctx, fileID, user.ID, "prune-revoked", time.Now().Add(time.Hour), 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreateShare(ctx, fileID, user.ID, "prune-expired", time.Now().Add(-30*24*time.Hour), 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreateShare(ctx, fileID, user.ID, "prune-active", time.Now().Add(24*time.Hour), 0); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().UTC().Add(-30 * 24 * time.Hour).Format(time.RFC3339)
+	if _, err := db.DB.Exec("UPDATE shares SET revoked_at = ? WHERE token = ?", old, "prune-revoked"); err != nil {
+		t.Fatal(err)
+	}
+	removed, err := db.PruneShares(ctx, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed != 2 {
+		t.Fatalf("PruneShares() removed = %d, want 2", removed)
+	}
+	var remaining int
+	if err := db.DB.QueryRow("SELECT COUNT(id) FROM shares").Scan(&remaining); err != nil {
+		t.Fatal(err)
+	}
+	if remaining != 1 {
+		t.Fatalf("shares remaining = %d, want 1", remaining)
+	}
+	// 最近撤销（未超过留存期）不删除
+	if _, err := db.DB.Exec("UPDATE shares SET revoked_at = ? WHERE token = ?", time.Now().UTC().Format(time.RFC3339), "prune-active"); err != nil {
+		t.Fatal(err)
+	}
+	removed, err = db.PruneShares(ctx, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed != 0 {
+		t.Fatalf("recently revoked share pruned: removed = %d, want 0", removed)
+	}
+}
+
+func TestPruneAuditLogsRemovesExpiredRecords(t *testing.T) {
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	old := time.Now().UTC().Add(-30 * 24 * time.Hour).Format(time.RFC3339)
+	recent := time.Now().UTC().Format(time.RFC3339)
+	if _, err := db.DB.Exec("INSERT INTO audit_logs(user_id, username, action, target, ip, result, reason, created_at) VALUES(NULL, ?, ?, ?, ?, ?, ?, ?)", "audit-user", "old", "", "-", "success", "", old); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.DB.Exec("INSERT INTO audit_logs(user_id, username, action, target, ip, result, reason, created_at) VALUES(NULL, ?, ?, ?, ?, ?, ?, ?)", "audit-user", "recent", "", "-", "success", "", recent); err != nil {
+		t.Fatal(err)
+	}
+
+	removed, err := db.PruneAuditLogs(ctx, 7)
+	if err != nil || removed != 1 {
+		t.Fatalf("PruneAuditLogs() = %d, %v; want 1, nil", removed, err)
+	}
+	var remaining int
+	if err := db.DB.QueryRow("SELECT COUNT(id) FROM audit_logs").Scan(&remaining); err != nil {
+		t.Fatal(err)
+	}
+	if remaining != 1 {
+		t.Fatalf("audit logs remaining = %d, want 1", remaining)
+	}
+	if _, err := db.PruneAuditLogs(ctx, -1); err == nil {
+		t.Fatal("PruneAuditLogs() accepted negative retention")
+	}
+}
+
 func TestShareManagementPreservesRevocationAndOwnership(t *testing.T) {
 	db, err := Open(t.TempDir())
 	if err != nil {
@@ -431,6 +530,127 @@ func TestShareManagementPreservesRevocationAndOwnership(t *testing.T) {
 	revoked, err := db.GetShareByTokenIncludingRevoked(ctx, "managed-token")
 	if err != nil || revoked.RevokedAt == "" {
 		t.Fatalf("revoked share lookup = %+v, %v", revoked, err)
+	}
+}
+
+// TestOverwriteUploadRemovesOldPhysicalFileAfterCommit verifies overwrite cleanup happens after commit.
+// TestOverwriteUploadRemovesOldPhysicalFileAfterCommit 验证覆盖上传只在事务提交后清理旧物理文件。
+func TestOverwriteUploadRemovesOldPhysicalFileAfterCommit(t *testing.T) {
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.EnsureAdmin("admin", "admin123", 1024*1024); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	admin, err := db.GetUserByUsername("admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	userDir := filepath.Join("files", strconv.FormatInt(admin.ID, 10))
+	oldStoragePath := filepath.Join(userDir, "old.txt")
+	oldPhysicalPath := filepath.Join(db.DataDir, oldStoragePath)
+	if err := os.MkdirAll(filepath.Dir(oldPhysicalPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(oldPhysicalPath, []byte("old"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	if _, err := db.DB.Exec("INSERT INTO files(user_id, name, stored_name, size, mime, sha256, md5, status, storage_path, created_at) VALUES(?, 'old.txt', 'old.txt', 3, 'text/plain', 'sha', 'md5', 'ready', ?, ?)", admin.ID, oldStoragePath, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.DB.Exec("UPDATE users SET used_bytes = 3 WHERE id = ?", admin.ID); err != nil {
+		t.Fatal(err)
+	}
+	task := UploadTask{ID: "ow-1", UserID: admin.ID, Name: "old.txt", Size: 5, ChunkSize: 5, TotalChunks: 1, Status: "pending", StorageDir: userDir, Resolve: "overwrite"}
+	if err := db.CreateUploadTask(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(oldPhysicalPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("overwritten physical file still exists: %v", err)
+	}
+	var count int
+	if err := db.DB.QueryRow("SELECT COUNT(id) FROM files WHERE storage_path = ?", oldStoragePath).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("overwritten file row count = %d, want 0", count)
+	}
+	var used int64
+	if err := db.DB.QueryRow("SELECT used_bytes FROM users WHERE id = ?", admin.ID).Scan(&used); err != nil {
+		t.Fatal(err)
+	}
+	if used != 0 {
+		t.Fatalf("used bytes after overwrite = %d, want 0", used)
+	}
+
+	keepStoragePath := filepath.Join(userDir, "keep.txt")
+	keepPhysicalPath := filepath.Join(db.DataDir, keepStoragePath)
+	if err := os.WriteFile(keepPhysicalPath, []byte("keep"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.DB.Exec("INSERT INTO files(user_id, name, stored_name, size, mime, sha256, md5, status, storage_path, created_at) VALUES(?, 'keep.txt', 'keep.txt', 4, 'text/plain', 'sha', 'md5', 'ready', ?, ?)", admin.ID, keepStoragePath, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.DB.Exec("UPDATE users SET used_bytes = 4 WHERE id = ?", admin.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreateUploadTask(ctx, UploadTask{ID: "keep-1", UserID: admin.ID, Name: "keep.txt", Size: 5, ChunkSize: 5, TotalChunks: 1, Status: "pending", StorageDir: userDir}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(keepPhysicalPath); err != nil {
+		t.Fatalf("non-overwrite physical file was removed: %v", err)
+	}
+}
+
+// TestRenameFolderMovesDiskDirectoryAfterCommit verifies the disk move follows the database commit.
+// TestRenameFolderMovesDiskDirectoryAfterCommit 验证磁盘目录移动发生在数据库事务提交之后。
+func TestRenameFolderMovesDiskDirectoryAfterCommit(t *testing.T) {
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	now := time.Now().UTC().Format(time.RFC3339)
+	if _, err := db.DB.Exec("INSERT INTO users(id, username, password_hash, role, created_at, updated_at) VALUES(1, 'u1', 'h', 'user', ?, ?)", now, now); err != nil {
+		t.Fatal(err)
+	}
+	folder, err := db.CreateFolder(ctx, 1, "", "docs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	docsDiskPath := filepath.Join(db.DataDir, "files", "1", "docs")
+	if err := os.MkdirAll(docsDiskPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(docsDiskPath, "plan.txt"), []byte("plan"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	storagePath := filepath.Join("files", "1", "docs", "plan.txt")
+	if _, err := db.DB.Exec("INSERT INTO files(user_id, name, stored_name, size, mime, sha256, md5, status, storage_path, created_at) VALUES(1, 'plan.txt', 'plan.txt', 4, 'text/plain', 'sha', 'md5', 'ready', ?, ?)", storagePath, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.RenameFolder(ctx, folder.ID, 1, "archive"); err != nil {
+		t.Fatal(err)
+	}
+	archivePlanPath := filepath.Join(db.DataDir, "files", "1", "archive", "plan.txt")
+	if _, err := os.Stat(archivePlanPath); err != nil {
+		t.Fatalf("renamed physical file is missing: %v", err)
+	}
+	if _, err := os.Stat(docsDiskPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("old disk directory still exists: %v", err)
+	}
+	var updatedStoragePath string
+	if err := db.DB.QueryRow("SELECT storage_path FROM files WHERE status = 'ready'").Scan(&updatedStoragePath); err != nil {
+		t.Fatal(err)
+	}
+	newPrefix := filepath.Join("files", "1", "archive") + string(filepath.Separator)
+	if !strings.HasPrefix(updatedStoragePath, newPrefix) {
+		t.Fatalf("ready file storage path = %q, want prefix %q", updatedStoragePath, newPrefix)
 	}
 }
 

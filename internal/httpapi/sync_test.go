@@ -2,13 +2,103 @@ package httpapi
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/hex"
 	"net/http"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
 	"filebox/internal/store"
+	"golang.org/x/crypto/ssh"
 )
+
+func TestHostKeyFingerprintMatches(t *testing.T) {
+	bytes := make([]byte, 32)
+	for index := range bytes {
+		bytes[index] = byte(index)
+	}
+	base64Fingerprint := base64.RawStdEncoding.EncodeToString(bytes)
+	mismatchedBytes := append([]byte(nil), bytes...)
+	mismatchedBytes[0]++
+	tests := []struct {
+		name  string
+		got   string
+		want  string
+		match bool
+	}{
+		{"matching SHA256 base64", "SHA256:" + base64Fingerprint, base64Fingerprint, true},
+		{"mismatched base64", "SHA256:" + base64Fingerprint, base64.RawStdEncoding.EncodeToString(mismatchedBytes), false},
+		{"hex against SHA256 base64", hex.EncodeToString(bytes), "SHA256:" + base64Fingerprint, true},
+		{"wrong length base64", "SHA256:" + base64.RawStdEncoding.EncodeToString(bytes[:31]), base64Fingerprint, false},
+		{"invalid base64", "SHA256:not-valid!", base64Fingerprint, false},
+		{"empty strings", "", "", false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := hostKeyFingerprintMatches(test.got, test.want); got != test.match {
+				t.Fatalf("hostKeyFingerprintMatches(%q, %q) = %t, want %t", test.got, test.want, got, test.match)
+			}
+		})
+	}
+}
+
+func TestHostKeyFingerprintCallback(t *testing.T) {
+	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicKey, err := ssh.NewPublicKey(&privateKey.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fingerprint := ssh.FingerprintSHA256(publicKey)
+	callback := hostKeyCallbackFor("127.0.0.1:22", fingerprint)
+	if err := callback("sftp.example", nil, publicKey); err != nil {
+		t.Fatalf("matching host key callback = %v", err)
+	}
+	corrupted := fingerprint[:len(fingerprint)-1]
+	last := fingerprint[len(fingerprint)-1]
+	if last == 'A' {
+		corrupted += "B"
+	} else {
+		corrupted += "A"
+	}
+	if err := hostKeyCallbackFor("127.0.0.1:22", corrupted)("sftp.example", nil, publicKey); err == nil {
+		t.Fatal("corrupted host key fingerprint unexpectedly matched")
+	}
+}
+
+func TestValidateSyncSystemInputHostKeyFingerprint(t *testing.T) {
+	bytes := make([]byte, 32)
+	validBase64 := "SHA256:" + base64.RawStdEncoding.EncodeToString(bytes)
+	validHex := hex.EncodeToString(bytes)
+	tests := []struct {
+		name        string
+		fingerprint string
+		valid       bool
+	}{
+		{"valid SHA256", "  " + validBase64 + "  ", true},
+		{"garbage", "garbage", false},
+		{"over-long", strings.Repeat("a", 513), false},
+		{"valid hex", validHex, true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			input, err := validateSyncSystemInput(syncSystemRequest{Name: "remote", Host: "example", Username: "user", AuthType: "password", HostKeyFingerprint: test.fingerprint}, false)
+			if (err == nil) != test.valid {
+				t.Fatalf("validateSyncSystemInput() error = %v, want valid=%t", err, test.valid)
+			}
+			if test.valid && input.HostKeyFingerprint != strings.TrimSpace(test.fingerprint) {
+				t.Fatalf("trimmed fingerprint = %q, want %q", input.HostKeyFingerprint, strings.TrimSpace(test.fingerprint))
+			}
+		})
+	}
+}
 
 func TestSyncSystemTaskOwnershipEncryptionAndDeleteProtection(t *testing.T) {
 	db, handler := newTestServer(t)

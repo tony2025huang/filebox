@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -107,5 +109,98 @@ func TestResetPasswordParsesDataFlag(t *testing.T) {
 	}
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestBackupRestoreRoundTrip 验证 admin backup → restore 端到端流程与密钥持久化。
+// TestBackupRestoreRoundTrip verifies the admin backup → restore flow end to end with key persistence.
+func TestBackupRestoreRoundTrip(t *testing.T) {
+	dataDir := t.TempDir()
+	db, err := store.Open(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.EnsureAdmin("admin", "admin123", 1024); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// 模拟 serve 首次运行生成的 secrets.json，供 backup 读取。
+	secret := "test-backup-secret-0123456789abcdef"
+	if err := os.MkdirAll(filepath.Join(dataDir, "config"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeSecretsFile(filepath.Join(dataDir, "config", "secrets.json"), secretsFilePayload{JWTSecret: secret}); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(t.TempDir(), "backup.tar.gz")
+	if code := run([]string{"admin", "backup", "--data", dataDir, "--out", out}); code != 0 {
+		t.Fatalf("admin backup exit code = %d, want 0", code)
+	}
+	if _, err := os.Stat(out); err != nil {
+		t.Fatalf("backup archive missing: %v", err)
+	}
+	restoreDir := t.TempDir()
+	if code := run([]string{"admin", "restore", "--data", restoreDir, "--in", out}); code != 0 {
+		t.Fatalf("admin restore exit code = %d, want 0", code)
+	}
+	payload, err := readSecretsFile(filepath.Join(restoreDir, "config", "secrets.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if payload.JWTSecret != secret || secretFingerprint(payload.JWTSecret) != secretFingerprint(secret) {
+		t.Fatalf("restored secret mismatch: %q", payload.JWTSecret)
+	}
+	restored, err := store.Open(restoreDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	user, err := restored.GetUserByUsername("admin")
+	if err != nil || user.Username != "admin" {
+		restored.Close()
+		t.Fatalf("restored admin = %+v, %v", user, err)
+	}
+	if err := restored.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// 非空目标未加 --force --yes 时拒绝恢复
+	if code := run([]string{"admin", "restore", "--data", restoreDir, "--in", out}); code == 0 {
+		t.Fatal("restore into non-empty target without --force --yes should fail")
+	}
+	// --force --yes 允许替换并保留旧目录
+	if code := run([]string{"admin", "restore", "--data", restoreDir, "--in", out, "--force", "--yes"}); code != 0 {
+		t.Fatalf("forced restore exit code = %d, want 0", code)
+	}
+	if _, err := readSecretsFile(filepath.Join(restoreDir, "config", "secrets.json")); err != nil {
+		t.Fatalf("forced restore did not write secrets.json: %v", err)
+	}
+	if matches, _ := filepath.Glob(restoreDir + ".pre-restore-*"); len(matches) != 1 {
+		t.Fatalf("pre-restore backup dirs = %v, want 1", matches)
+	}
+}
+
+// TestBackupRequiresJWTSecret 验证缺失密钥时 backup 报错而不是回退开发密钥。
+// TestBackupRequiresJWTSecret verifies backup fails when no JWT secret is available instead of falling back.
+func TestBackupRequiresJWTSecret(t *testing.T) {
+	dataDir := t.TempDir()
+	db, err := store.Open(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.EnsureAdmin("admin", "admin123", 1024); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(t.TempDir(), "backup.tar.gz")
+	if code := run([]string{"admin", "backup", "--data", dataDir, "--out", out}); code != 1 {
+		t.Fatalf("backup without secret exit code = %d, want 1", code)
+	}
+	if code := run([]string{"admin", "backup", "--data", dataDir, "--out", out, "--jwt-secret", "explicit-secret"}); code != 0 {
+		t.Fatalf("backup with --jwt-secret exit code = %d, want 0", code)
 	}
 }

@@ -48,6 +48,9 @@ type collectionUploadCompleteRequest struct {
 // createCollection 为当前用户创建公开上传收集链接。
 func (s *Server) createCollection(w http.ResponseWriter, r *http.Request) {
 	user := currentUser(r.Context())
+	if s.rejectReadOnly(w, r, user, "collection_create", "") {
+		return
+	}
 	var input collectionCreateRequest
 	if !decodeJSON(w, r, &input) {
 		return
@@ -166,6 +169,9 @@ func (s *Server) deleteCollection(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "收集链接不存在")
 		return
 	}
+	if s.rejectReadOnly(w, r, user, "collection_revoke", r.PathValue("id")) {
+		return
+	}
 	err = s.store.RevokeUploadCollection(r.Context(), id, user.ID, user.Role == "admin")
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "收集链接不存在")
@@ -184,7 +190,12 @@ func (s *Server) deleteCollection(w http.ResponseWriter, r *http.Request) {
 // collectionMeta exposes only safe public collection metadata.
 // collectionMeta 向匿名访问者仅公开安全的收集元数据。
 func (s *Server) collectionMeta(w http.ResponseWriter, r *http.Request) {
-	collection, err := s.store.GetUploadCollectionByToken(r.Context(), r.PathValue("token"))
+	token := r.PathValue("token")
+	if !s.rateLimiter.allowPublicRequest(s.requestIP(r), 30, 10) {
+		s.collectionFailure(w, r, token, "rate_limited", http.StatusTooManyRequests, "请求过于频繁，请稍后重试", nil)
+		return
+	}
+	collection, err := s.store.GetUploadCollectionByToken(r.Context(), token)
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "收集链接不存在")
 		return
@@ -312,6 +323,10 @@ func (s *Server) collectionFailure(w http.ResponseWriter, r *http.Request, targe
 // collectionUploadInit 校验收集限制并创建匿名上传任务，支持目录内秒传。
 func (s *Server) collectionUploadInit(w http.ResponseWriter, r *http.Request) {
 	token := r.PathValue("token")
+	if !s.rateLimiter.allowPublicRequest(s.requestIP(r), 30, 10) {
+		s.collectionFailure(w, r, token, "rate_limited", http.StatusTooManyRequests, "请求过于频繁，请稍后重试", nil)
+		return
+	}
 	var input collectionUploadInitRequest
 	if !decodeJSON(w, r, &input) {
 		s.collectionFailure(w, r, token, "invalid_request", http.StatusBadRequest, "请求格式无效", nil)
@@ -371,6 +386,10 @@ func (s *Server) collectionUploadInit(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		log.Printf("load collection owner: %v", err)
 		s.collectionFailure(w, r, name, "owner_not_found", http.StatusNotFound, "收集链接不存在", nil)
+		return
+	}
+	if s.userReadOnly(owner) {
+		s.collectionFailure(w, r, name, "read_only", http.StatusForbidden, "收集者处于只读时段，暂不接受上传", map[string]string{"code": "READ_ONLY"})
 		return
 	}
 	storageDir := filepath.Join("files", strconv.FormatInt(owner.ID, 10), "uploads", token)
@@ -525,6 +544,10 @@ func (s *Server) writeCollectionTaskError(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) collectionUploadStatus(w http.ResponseWriter, r *http.Request) {
+	if !s.rateLimiter.allowPublicRequest(s.requestIP(r), 30, 10) {
+		s.collectionFailure(w, r, r.PathValue("token"), "rate_limited", http.StatusTooManyRequests, "请求过于频繁，请稍后重试", nil)
+		return
+	}
 	_, _, task, err := s.loadCollectionTask(r)
 	if err != nil {
 		s.writeCollectionTaskError(w, r, err)
@@ -547,6 +570,10 @@ func (s *Server) collectionUploadStatus(w http.ResponseWriter, r *http.Request) 
 // collectionUploadComplete merges chunks, verifies hashes, and records the remark.
 // collectionUploadComplete 合并分片、校验哈希并记录上传备注。
 func (s *Server) collectionUploadComplete(w http.ResponseWriter, r *http.Request) {
+	if !s.rateLimiter.allowPublicRequest(s.requestIP(r), 30, 10) {
+		s.collectionFailure(w, r, r.PathValue("token"), "rate_limited", http.StatusTooManyRequests, "请求过于频繁，请稍后重试", nil)
+		return
+	}
 	var input collectionUploadCompleteRequest
 	preloaded := false
 	if r.PathValue("taskID") == "" && r.URL.Query().Get("taskId") == "" {
@@ -563,7 +590,7 @@ func (s *Server) collectionUploadComplete(w http.ResponseWriter, r *http.Request
 		r.URL.RawQuery = query.Encode()
 		preloaded = true
 	}
-	_, _, task, err := s.loadCollectionTask(r)
+	_, owner, task, err := s.loadCollectionTask(r)
 	if err != nil {
 		s.writeCollectionTaskError(w, r, err)
 		return
@@ -578,6 +605,11 @@ func (s *Server) collectionUploadComplete(w http.ResponseWriter, r *http.Request
 			s.serviceEvent(r, "upload_collect_fail", "anonymous", "name=%s size=%d result=failure reason=%s", task.Name, task.Size, auditReason)
 		}
 	}()
+	if s.userReadOnly(owner) {
+		auditReason = "read_only"
+		writeErrorData(w, http.StatusForbidden, "收集者处于只读时段，暂不接受上传", map[string]string{"code": "READ_ONLY"})
+		return
+	}
 	if !preloaded && r.Body != nil && r.ContentLength != 0 {
 		if !decodeJSON(w, r, &input) {
 			auditReason = "invalid_request"

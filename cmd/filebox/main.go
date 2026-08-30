@@ -1,18 +1,28 @@
 package main
 
 import (
+	"archive/tar"
+	"compress/gzip"
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"math/big"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -24,6 +34,7 @@ import (
 	"filebox/internal/store"
 	"filebox/internal/webassets"
 	"golang.org/x/crypto/bcrypt"
+	"golang.org/x/crypto/pbkdf2"
 )
 
 const version = "dev"
@@ -111,18 +122,29 @@ func runServe(args []string) error {
 	if err != nil {
 		return fmt.Errorf("invalid trusted proxies: %w", err)
 	}
-	// 安全提示：未显式设置 JWT secret 时使用内置开发值，仅适合本地测试。
-	// Security notice: without an explicit JWT secret the built-in development value is used, which is only safe for local testing.
-	if !envSet("FILEBOX_JWT_SECRET") && !flagWasSet(flags, "jwt-secret") {
-		fmt.Fprintln(os.Stderr, "WARNING: using the built-in development JWT secret; set --jwt-secret or FILEBOX_JWT_SECRET to a strong random value in production")
+	// JWT 密钥解析优先级：显式 --jwt-secret > FILEBOX_JWT_SECRET > <dataDir>/config/secrets.json > 新目录首次生成。
+	// JWT secret resolution priority: explicit --jwt-secret > FILEBOX_JWT_SECRET > <dataDir>/config/secrets.json > first-run generation.
+	resolvedJWTSecret, secretSource, secretErr := resolveJWTSecret(*dataDir, flagWasSet(flags, "jwt-secret"), envSet("FILEBOX_JWT_SECRET"), *jwtSecret, true)
+	if secretErr != nil {
+		return secretErr
 	}
+	// 安全提示：未显式设置敏感配置时使用内置默认值，仅适合本地测试。
+	// Security notice: without explicit sensitive settings, built-in defaults are used, which are only safe for local testing.
+	warnings := make([]string, 0, 2)
+	if resolvedJWTSecret == "filebox-development-secret-change-me" {
+		warnings = append(warnings, "JWT signing secret: using the built-in development value; set --jwt-secret or FILEBOX_JWT_SECRET to a strong random value")
+	}
+	if !envSet("FILEBOX_ADMIN_PASS") && !flagWasSet(flags, "admin-pass") && *adminPass == "admin123" {
+		warnings = append(warnings, "admin password: using the default 'admin123'; set --admin-pass or FILEBOX_ADMIN_PASS to a strong value before exposing this service")
+	}
+	warnProductionDefaults(warnings)
 
 	logger, err := logging.newLogger()
 	if err != nil {
 		return err
 	}
 	defer logger.Close()
-	logger.Event("startup", "operator=system ip=- version=%s addr=%s data=%s log_enabled=%t log_dir=%s log_retention_days=%d", version, *addr, *dataDir, *logging.enabled, *logging.dir, *logging.retentionDays)
+	logger.Event("startup", "operator=system ip=- version=%s addr=%s data=%s log_enabled=%t log_dir=%s log_retention_days=%d jwt_secret_source=%s", version, *addr, *dataDir, *logging.enabled, *logging.dir, *logging.retentionDays, secretSource)
 
 	db, err := store.Open(*dataDir)
 	if err != nil {
@@ -154,7 +176,7 @@ func runServe(args []string) error {
 		MaxFileSize:     *maxFileSize,
 		MinFreeSpace:    *minFreeSpace,
 		RegisterEnabled: *registerEnabled,
-		JWTSecret:       []byte(*jwtSecret),
+		JWTSecret:       []byte(resolvedJWTSecret),
 		JWTExpiry:       7 * 24 * time.Hour,
 		TrustedProxies:  trustedProxies,
 		Logger:          logger,
@@ -163,7 +185,19 @@ func runServe(args []string) error {
 
 	logger.Infof("FileBox listening on %s", *addr)
 	logger.Infof("data directory: %s", *dataDir)
-	httpServer := &http.Server{Addr: *addr, Handler: server.Handler()}
+	httpServer := &http.Server{
+		Addr:              *addr,
+		Handler:           server.Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		// ReadTimeout 保持为 0，避免大文件上传被服务器读超时截断。
+		// ReadTimeout remains 0 so large file uploads are not cut off by the server read timeout.
+		ReadTimeout: 0,
+		// WriteTimeout 保持为 0，支持 SSE 推送和大文件下载。
+		// WriteTimeout remains 0 to support SSE pushes and large downloads.
+		WriteTimeout:   0,
+		MaxHeaderBytes: 1 << 20,
+	}
 	serverErrors := make(chan error, 1)
 	go func() { serverErrors <- httpServer.ListenAndServe() }()
 	// 后台清理：每小时清理超过 24 小时未完成的废弃上传任务及其临时分片目录。
@@ -177,6 +211,11 @@ func runServe(args []string) error {
 	}()
 	go func() {
 		defer close(cleanupDone)
+		if settings, settingsErr := db.GetLogSettings(cleanupContext); settingsErr == nil {
+			if _, pruneErr := db.PruneAuditLogs(cleanupContext, settings.LogRetentionDays); pruneErr != nil && !errors.Is(cleanupContext.Err(), context.Canceled) {
+				logger.Event("cleanup", "operator=system ip=- command=prune-audit-logs result=failure reason=%s", pruneErr.Error())
+			}
+		}
 		ticker := time.NewTicker(time.Hour)
 		defer ticker.Stop()
 		for {
@@ -185,6 +224,14 @@ func runServe(args []string) error {
 				if settings, settingsErr := db.GetLogSettings(cleanupContext); settingsErr == nil {
 					if _, pruneErr := db.PruneSyncLogs(cleanupContext, settings.LogRetentionDays); pruneErr != nil && !errors.Is(cleanupContext.Err(), context.Canceled) {
 						logger.Event("cleanup", "operator=system ip=- command=prune-sync-logs result=failure reason=%s", pruneErr.Error())
+					}
+					if _, pruneErr := db.PruneAuditLogs(cleanupContext, settings.LogRetentionDays); pruneErr != nil && !errors.Is(cleanupContext.Err(), context.Canceled) {
+						logger.Event("cleanup", "operator=system ip=- command=prune-audit-logs result=failure reason=%s", pruneErr.Error())
+					}
+					if pruned, pruneErr := db.PruneShares(cleanupContext, settings.LogRetentionDays); pruneErr != nil && !errors.Is(cleanupContext.Err(), context.Canceled) {
+						logger.Event("cleanup", "operator=system ip=- command=prune-shares result=failure reason=%s", pruneErr.Error())
+					} else if pruned > 0 {
+						logger.Event("cleanup", "operator=system ip=- command=prune-shares result=success count=%d", pruned)
 					}
 				}
 				expired, err := db.ListExpiredUploadTasks(cleanupContext, 24*time.Hour)
@@ -267,6 +314,10 @@ func runAdmin(args []string) int {
 		return runAdminClearIPACL(args[1:])
 	case "migrate-v010-paths":
 		return runAdminMigrateV010Paths(args[1:])
+	case "backup":
+		return runAdminBackup(args[1:])
+	case "restore":
+		return runAdminRestore(args[1:])
 	default:
 		printAdminUsage(os.Stderr)
 		return 2
@@ -397,6 +448,628 @@ func copyFile(source, target string) error {
 		return err
 	}
 	return os.WriteFile(target, data, 0o600)
+}
+
+// secretsFilePayload 是 <dataDir>/config/secrets.json 的磁盘格式。
+// secretsFilePayload is the on-disk format of <dataDir>/config/secrets.json.
+type secretsFilePayload struct {
+	JWTSecret string `json:"jwtSecret"`
+}
+
+func readSecretsFile(path string) (secretsFilePayload, error) {
+	var payload secretsFilePayload
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return payload, err
+	}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return payload, fmt.Errorf("parse %s: %w", path, err)
+	}
+	if payload.JWTSecret == "" {
+		return payload, fmt.Errorf("%s is missing jwtSecret", path)
+	}
+	return payload, nil
+}
+
+func writeSecretsFile(path string, payload secretsFilePayload) error {
+	data, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0o600)
+}
+
+// existingJWTSecret returns the persisted key of a data directory, or "" when none exists.
+// existingJWTSecret 返回数据目录中已持久化的密钥，不存在时返回空字符串。
+func existingJWTSecret(dataDir string) (string, error) {
+	payload, err := readSecretsFile(filepath.Join(dataDir, "config", "secrets.json"))
+	if err == nil {
+		return payload.JWTSecret, nil
+	}
+	if os.IsNotExist(err) {
+		return "", nil
+	}
+	return "", err
+}
+
+// resolveJWTSecret 按优先级解析 JWT 签名密钥：
+// 显式 --jwt-secret > FILEBOX_JWT_SECRET > <dataDir>/config/secrets.json > 首次运行生成（仅全新数据目录）。
+// resolveJWTSecret resolves the JWT signing secret with this priority:
+// explicit --jwt-secret > FILEBOX_JWT_SECRET > <dataDir>/config/secrets.json > first-run generation (new data dirs only).
+func resolveJWTSecret(dataDir string, flagSet, envSet bool, explicitValue string, allowGenerate bool) (string, string, error) {
+	if flagSet || envSet {
+		return explicitValue, "flag-or-env", nil
+	}
+	secretFile := filepath.Join(dataDir, "config", "secrets.json")
+	payload, readErr := readSecretsFile(secretFile)
+	if readErr == nil {
+		return payload.JWTSecret, "secrets.json", nil
+	}
+	if !os.IsNotExist(readErr) {
+		return "", "", readErr
+	}
+	if !allowGenerate {
+		return "", "", fmt.Errorf("no JWT secret configured for %s: provide --jwt-secret / FILEBOX_JWT_SECRET or create %s", dataDir, secretFile)
+	}
+	if _, statErr := os.Stat(filepath.Join(dataDir, "filebox.db")); statErr == nil {
+		return "", "", fmt.Errorf("no JWT secret configured for existing data directory %s: provide --jwt-secret / FILEBOX_JWT_SECRET with the value used when this data directory was first created, or create %s", dataDir, secretFile)
+	} else if !os.IsNotExist(statErr) {
+		return "", "", fmt.Errorf("stat %s: %w", filepath.Join(dataDir, "filebox.db"), statErr)
+	}
+	randomBytes := make([]byte, 48)
+	if _, err := rand.Read(randomBytes); err != nil {
+		return "", "", fmt.Errorf("generate JWT secret: %w", err)
+	}
+	generated := hex.EncodeToString(randomBytes)
+	if err := os.MkdirAll(filepath.Dir(secretFile), 0o700); err != nil {
+		return "", "", fmt.Errorf("create config directory: %w", err)
+	}
+	if err := writeSecretsFile(secretFile, secretsFilePayload{JWTSecret: generated}); err != nil {
+		return "", "", fmt.Errorf("persist JWT secret: %w", err)
+	}
+	return generated, "generated", nil
+}
+
+func secretFingerprint(secret string) string {
+	sum := sha256.Sum256([]byte(secret))
+	return hex.EncodeToString(sum[:])
+}
+
+func sha256Hex(content []byte) string {
+	sum := sha256.Sum256(content)
+	return hex.EncodeToString(sum[:])
+}
+
+// encryptSecret 用口令经 PBKDF2 派生密钥，以 AES-256-GCM 加密 jwtSecret。
+// encryptSecret derives a key from the passphrase with PBKDF2 and seals jwtSecret with AES-256-GCM.
+func encryptSecret(secret, passphrase string) (encoded, saltB64 string, err error) {
+	salt := make([]byte, 16)
+	if _, err := rand.Read(salt); err != nil {
+		return "", "", err
+	}
+	key := pbkdf2.Key([]byte(passphrase), salt, 210000, 32, sha256.New)
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return "", "", err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", "", err
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return "", "", err
+	}
+	sealed := gcm.Seal(nonce, nonce, []byte(secret), nil)
+	return base64.StdEncoding.EncodeToString(sealed), base64.StdEncoding.EncodeToString(salt), nil
+}
+
+func decryptSecret(encoded, saltB64, passphrase string) (string, error) {
+	sealed, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		return "", fmt.Errorf("decode encrypted secret: %w", err)
+	}
+	salt, err := base64.StdEncoding.DecodeString(saltB64)
+	if err != nil {
+		return "", fmt.Errorf("decode salt: %w", err)
+	}
+	key := pbkdf2.Key([]byte(passphrase), salt, 210000, 32, sha256.New)
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return "", err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", err
+	}
+	if len(sealed) < gcm.NonceSize() {
+		return "", fmt.Errorf("encrypted secret too short")
+	}
+	nonce, ciphertext := sealed[:gcm.NonceSize()], sealed[gcm.NonceSize():]
+	plain, err := gcm.Open(nil, nonce, ciphertext, nil)
+	if err != nil {
+		return "", fmt.Errorf("decrypt secret (wrong passphrase?): %w", err)
+	}
+	return string(plain), nil
+}
+
+// backupManifest 描述归档内容与完整性校验信息。
+// backupManifest describes the archive contents and integrity checks.
+type backupManifest struct {
+	FormatVersion  int               `json:"formatVersion"`
+	CreatedAt      string            `json:"createdAt"`
+	FileCount      int               `json:"fileCount"`
+	SHA256         map[string]string `json:"sha256"`
+	JWTFingerprint string            `json:"jwtFingerprint"`
+	KeysEncrypted  bool              `json:"keysEncrypted"`
+}
+
+// keysPayload 是归档内 keys.json 的格式；带口令备份时 jwtSecret 为 AES-GCM 密文。
+// keysPayload is the keys.json format inside the archive; with a passphrase, jwtSecret holds AES-GCM ciphertext.
+type keysPayload struct {
+	JWTSecret   string `json:"jwtSecret"`
+	Encrypted   bool   `json:"encrypted"`
+	Fingerprint string `json:"fingerprint"`
+	Note        string `json:"note"`
+	CreatedAt   string `json:"createdAt"`
+	Salt        string `json:"salt,omitempty"`
+}
+
+type archiveEntry struct {
+	name     string
+	diskPath string
+}
+
+func collectDirEntries(root, prefix string) ([]archiveEntry, error) {
+	var result []archiveEntry
+	err := filepath.WalkDir(root, func(current string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(root, current)
+		if err != nil {
+			return err
+		}
+		result = append(result, archiveEntry{name: prefix + "/" + filepath.ToSlash(rel), diskPath: current})
+		return nil
+	})
+	return result, err
+}
+
+func runAdminBackup(args []string) int {
+	flags := flag.NewFlagSet("filebox admin backup", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	dataDir := flags.String("data", "./data", "data directory")
+	outPath := flags.String("out", "", "output backup archive path (.tar.gz)")
+	passphraseFile := flags.String("passphrase-file", "", "file containing the passphrase used to encrypt keys.json")
+	jwtSecretFlag := flags.String("jwt-secret", "", "JWT signing secret override (falls back to FILEBOX_JWT_SECRET then config/secrets.json)")
+	logging := addLoggingFlags(flags)
+	if err := flags.Parse(args); err != nil {
+		return 2
+	}
+	if flags.NArg() != 0 || strings.TrimSpace(*outPath) == "" {
+		printAdminUsage(os.Stderr)
+		return 2
+	}
+	logger, err := logging.newLogger()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 2
+	}
+	defer logger.Close()
+	result, reason := "failure", "command_failed"
+	defer func() {
+		logger.Event("ops", "operator=cli ip=- command=admin backup target=%s result=%s reason=%s", *dataDir, result, reason)
+	}()
+	fmt.Fprintln(os.Stdout, "note: stop the FileBox service before backup to guarantee a consistent snapshot")
+	handle, err := os.Open(filepath.Join(*dataDir, "filebox.db"))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "data directory %s has no readable filebox.db: %v\n", *dataDir, err)
+		return 1
+	}
+	handle.Close()
+	explicit := *jwtSecretFlag
+	if !flagWasSet(flags, "jwt-secret") {
+		explicit = os.Getenv("FILEBOX_JWT_SECRET")
+	}
+	secret, _, err := resolveJWTSecret(*dataDir, flagWasSet(flags, "jwt-secret"), envSet("FILEBOX_JWT_SECRET"), explicit, false)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		return 1
+	}
+	passphrase := ""
+	if strings.TrimSpace(*passphraseFile) != "" {
+		data, readErr := os.ReadFile(*passphraseFile)
+		if readErr != nil {
+			fmt.Fprintf(os.Stderr, "read passphrase file: %v\n", readErr)
+			return 1
+		}
+		passphrase = strings.TrimSpace(string(data))
+		if passphrase == "" {
+			fmt.Fprintln(os.Stderr, "passphrase file is empty")
+			return 1
+		}
+	}
+	manifest, err := buildBackupArchive(*dataDir, *outPath, secret, passphrase)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "backup failed: %v\n", err)
+		return 1
+	}
+	result, reason = "success", ""
+	fmt.Fprintf(os.Stdout, "backup written to %s\n", *outPath)
+	fmt.Fprintf(os.Stdout, "files archived: %d\n", manifest.FileCount)
+	fmt.Fprintf(os.Stdout, "jwt fingerprint: %s\n", manifest.JWTFingerprint)
+	if manifest.KeysEncrypted {
+		fmt.Fprintln(os.Stdout, "keys.json encrypted with AES-256-GCM (PBKDF2 from --passphrase-file)")
+	} else {
+		fmt.Fprintln(os.Stdout, "keys.json is plaintext; use --passphrase-file or a secure channel for production backups")
+	}
+	return 0
+}
+
+func buildBackupArchive(dataDir, outPath, secret, passphrase string) (backupManifest, error) {
+	manifest := backupManifest{
+		FormatVersion:  1,
+		CreatedAt:      time.Now().UTC().Format(time.RFC3339),
+		SHA256:         make(map[string]string),
+		JWTFingerprint: secretFingerprint(secret),
+	}
+	keys := keysPayload{
+		JWTSecret:   secret,
+		Fingerprint: manifest.JWTFingerprint,
+		Note:        "TOTP 与同步系统凭据由 SHA-256(jwtSecret) 派生 AES-GCM 密钥加密；恢复时必须使用与备份一致的 jwtSecret",
+		CreatedAt:   manifest.CreatedAt,
+	}
+	if passphrase != "" {
+		encrypted, salt, err := encryptSecret(secret, passphrase)
+		if err != nil {
+			return manifest, fmt.Errorf("encrypt keys.json: %w", err)
+		}
+		keys.JWTSecret = encrypted
+		keys.Encrypted = true
+		keys.Salt = salt
+		manifest.KeysEncrypted = true
+	}
+	keysJSON, err := json.MarshalIndent(keys, "", "  ")
+	if err != nil {
+		return manifest, err
+	}
+	entries := []archiveEntry{{name: "filebox.db", diskPath: filepath.Join(dataDir, "filebox.db")}}
+	for _, dir := range []string{"files", "brand"} {
+		root := filepath.Join(dataDir, dir)
+		if _, err := os.Stat(root); err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return manifest, err
+		}
+		collected, err := collectDirEntries(root, dir)
+		if err != nil {
+			return manifest, err
+		}
+		entries = append(entries, collected...)
+	}
+	type stagedFile struct {
+		name    string
+		content []byte
+	}
+	staged := make([]stagedFile, 0, len(entries)+1)
+	for _, entry := range entries {
+		content, err := os.ReadFile(entry.diskPath)
+		if err != nil {
+			return manifest, fmt.Errorf("read %s: %w", entry.diskPath, err)
+		}
+		manifest.SHA256[entry.name] = sha256Hex(content)
+		staged = append(staged, stagedFile{name: entry.name, content: content})
+	}
+	manifest.SHA256["keys.json"] = sha256Hex(keysJSON)
+	staged = append(staged, stagedFile{name: "keys.json", content: keysJSON})
+	manifest.FileCount = len(staged)
+	manifestJSON, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return manifest, err
+	}
+	tmp := outPath + ".tmp"
+	file, err := os.Create(tmp)
+	if err != nil {
+		return manifest, err
+	}
+	ok := false
+	defer func() {
+		file.Close()
+		if !ok {
+			os.Remove(tmp)
+		}
+	}()
+	gz := gzip.NewWriter(file)
+	tw := tar.NewWriter(gz)
+	writeStaged := func(name string, content []byte) error {
+		header := &tar.Header{Name: name, Mode: 0o600, Size: int64(len(content)), ModTime: time.Now()}
+		if err := tw.WriteHeader(header); err != nil {
+			return err
+		}
+		_, err := tw.Write(content)
+		return err
+	}
+	for _, item := range staged {
+		if err := writeStaged(item.name, item.content); err != nil {
+			return manifest, err
+		}
+	}
+	if err := writeStaged("manifest.json", manifestJSON); err != nil {
+		return manifest, err
+	}
+	if err := tw.Close(); err != nil {
+		return manifest, err
+	}
+	if err := gz.Close(); err != nil {
+		return manifest, err
+	}
+	if err := file.Close(); err != nil {
+		return manifest, err
+	}
+	if err := os.Rename(tmp, outPath); err != nil {
+		return manifest, err
+	}
+	ok = true
+	return manifest, nil
+}
+
+// safeArchiveName 拒绝绝对路径与 .. 穿越路径，防止恶意归档写越界。
+// safeArchiveName rejects absolute paths and .. traversal to keep extraction inside staging.
+func safeArchiveName(name string) bool {
+	if name == "" || strings.HasPrefix(name, "/") || strings.ContainsAny(name, `\:`) {
+		return false
+	}
+	cleaned := path.Clean(name)
+	if cleaned != name || cleaned == ".." || strings.HasPrefix(cleaned, "../") {
+		return false
+	}
+	for _, part := range strings.Split(cleaned, "/") {
+		if part == ".." {
+			return false
+		}
+	}
+	return true
+}
+
+func runAdminRestore(args []string) int {
+	flags := flag.NewFlagSet("filebox admin restore", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	dataDir := flags.String("data", "./data", "data directory")
+	inPath := flags.String("in", "", "backup archive path (.tar.gz)")
+	force := flags.Bool("force", false, "allow replacing a non-empty data directory / adopting a conflicting key")
+	yes := flags.Bool("yes", false, "confirm destructive restore (required together with --force)")
+	passphraseFile := flags.String("passphrase-file", "", "file containing the passphrase for an encrypted keys.json")
+	logging := addLoggingFlags(flags)
+	if err := flags.Parse(args); err != nil {
+		return 2
+	}
+	if flags.NArg() != 0 || strings.TrimSpace(*inPath) == "" {
+		printAdminUsage(os.Stderr)
+		return 2
+	}
+	logger, err := logging.newLogger()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 2
+	}
+	defer logger.Close()
+	result, reason := "failure", "command_failed"
+	defer func() {
+		logger.Event("ops", "operator=cli ip=- command=admin restore target=%s result=%s reason=%s", *dataDir, result, reason)
+	}()
+	fmt.Fprintln(os.Stdout, "note: stop the FileBox service before restore; the target data directory will be replaced")
+	forceMode := *force && *yes
+	archive, err := os.Open(*inPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "open archive: %v\n", err)
+		return 1
+	}
+	defer archive.Close()
+	target := filepath.Clean(*dataDir)
+	timestamp := time.Now().UTC().Format("20060102T150405")
+	staging := target + ".staging-" + timestamp
+	if err := os.MkdirAll(staging, 0o700); err != nil {
+		fmt.Fprintf(os.Stderr, "create staging directory: %v\n", err)
+		return 1
+	}
+	defer os.RemoveAll(staging)
+	gz, err := gzip.NewReader(archive)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "open gzip stream: %v\n", err)
+		return 1
+	}
+	defer gz.Close()
+	tr := tar.NewReader(gz)
+	extracted := map[string]bool{}
+	for {
+		header, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "read archive: %v\n", err)
+			return 1
+		}
+		name := header.Name
+		if !safeArchiveName(name) {
+			fmt.Fprintf(os.Stderr, "archive contains unsafe path %q\n", name)
+			return 1
+		}
+		if header.Typeflag == tar.TypeDir {
+			continue
+		}
+		if header.Typeflag != tar.TypeReg {
+			fmt.Fprintf(os.Stderr, "archive entry %q has unsupported type\n", name)
+			return 1
+		}
+		dest := filepath.Join(staging, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+			fmt.Fprintf(os.Stderr, "create directory for %q: %v\n", name, err)
+			return 1
+		}
+		out, err := os.Create(dest)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "extract %q: %v\n", name, err)
+			return 1
+		}
+		if _, err := io.Copy(out, tr); err != nil {
+			out.Close()
+			fmt.Fprintf(os.Stderr, "extract %q: %v\n", name, err)
+			return 1
+		}
+		out.Close()
+		extracted[name] = true
+	}
+	manifestData, err := os.ReadFile(filepath.Join(staging, "manifest.json"))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "archive has no valid manifest.json: %v\n", err)
+		return 1
+	}
+	var manifest backupManifest
+	if err := json.Unmarshal(manifestData, &manifest); err != nil {
+		fmt.Fprintf(os.Stderr, "parse manifest.json: %v\n", err)
+		return 1
+	}
+	if manifest.FormatVersion != 1 {
+		fmt.Fprintf(os.Stderr, "unsupported archive format version %d\n", manifest.FormatVersion)
+		return 1
+	}
+	for name := range extracted {
+		if name == "manifest.json" {
+			continue
+		}
+		want, ok := manifest.SHA256[name]
+		if !ok {
+			fmt.Fprintf(os.Stderr, "archive file %q is missing from manifest\n", name)
+			return 1
+		}
+		content, err := os.ReadFile(filepath.Join(staging, filepath.FromSlash(name)))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "read extracted %q: %v\n", name, err)
+			return 1
+		}
+		if sha256Hex(content) != want {
+			fmt.Fprintf(os.Stderr, "checksum mismatch for %q\n", name)
+			return 1
+		}
+	}
+	for name := range manifest.SHA256 {
+		if !extracted[name] {
+			fmt.Fprintf(os.Stderr, "manifest file %q is missing from archive\n", name)
+			return 1
+		}
+	}
+	keysData, err := os.ReadFile(filepath.Join(staging, "keys.json"))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "archive has no keys.json: %v\n", err)
+		return 1
+	}
+	var keys keysPayload
+	if err := json.Unmarshal(keysData, &keys); err != nil {
+		fmt.Fprintf(os.Stderr, "parse keys.json: %v\n", err)
+		return 1
+	}
+	if keys.Fingerprint != manifest.JWTFingerprint {
+		fmt.Fprintln(os.Stderr, "keys.json fingerprint does not match manifest")
+		return 1
+	}
+	archiveKey := keys.JWTSecret
+	if keys.Encrypted {
+		passphrase := ""
+		if strings.TrimSpace(*passphraseFile) != "" {
+			data, readErr := os.ReadFile(*passphraseFile)
+			if readErr != nil {
+				fmt.Fprintf(os.Stderr, "read passphrase file: %v\n", readErr)
+				return 1
+			}
+			passphrase = strings.TrimSpace(string(data))
+		}
+		if passphrase == "" {
+			fmt.Fprintln(os.Stderr, "keys.json is encrypted; provide --passphrase-file")
+			return 1
+		}
+		archiveKey, err = decryptSecret(keys.JWTSecret, keys.Salt, passphrase)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "%v\n", err)
+			return 1
+		}
+	}
+	if secretFingerprint(archiveKey) != manifest.JWTFingerprint {
+		fmt.Fprintln(os.Stderr, "decrypted key fingerprint mismatch")
+		return 1
+	}
+	existingKey, err := existingJWTSecret(target)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "read existing secret: %v\n", err)
+		return 1
+	}
+	keyConflict := existingKey != "" && secretFingerprint(existingKey) != manifest.JWTFingerprint
+	if keyConflict && !forceMode {
+		fmt.Fprintf(os.Stderr, "KEY_CONFLICT: existing data directory uses a different JWT secret (fingerprint %s); pass --force --yes to adopt the archive key\n", secretFingerprint(existingKey))
+		return 1
+	}
+	_, statErr := os.Stat(target)
+	targetExists := statErr == nil
+	if statErr != nil && !os.IsNotExist(statErr) {
+		fmt.Fprintf(os.Stderr, "stat target: %v\n", statErr)
+		return 1
+	}
+	if targetExists {
+		entries, err := os.ReadDir(target)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "read target data directory: %v\n", err)
+			return 1
+		}
+		if len(entries) > 0 && !forceMode {
+			fmt.Fprintf(os.Stderr, "target data directory %s is not empty; pass --force --yes to replace it (the old directory is kept as *.pre-restore-<timestamp>)\n", target)
+			return 1
+		}
+	}
+	if targetExists {
+		entries, err := os.ReadDir(target)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "read target data directory: %v\n", err)
+			return 1
+		}
+		if len(entries) > 0 {
+			backupTarget := target + ".pre-restore-" + timestamp
+			if err := os.Rename(target, backupTarget); err != nil {
+				fmt.Fprintf(os.Stderr, "rename existing data directory: %v\n", err)
+				return 1
+			}
+			fmt.Fprintf(os.Stdout, "previous data directory preserved at %s\n", backupTarget)
+		} else if err := os.Remove(target); err != nil {
+			fmt.Fprintf(os.Stderr, "remove empty target data directory: %v\n", err)
+			return 1
+		}
+	}
+	if err := os.Rename(staging, target); err != nil {
+		fmt.Fprintf(os.Stderr, "activate restored data directory: %v\n", err)
+		return 1
+	}
+	secretSource := "matched-existing"
+	if existingKey == "" {
+		secretSource = "archive-adopted"
+	} else if keyConflict {
+		secretSource = "archive-adopted-conflict"
+	}
+	secretFile := filepath.Join(target, "config", "secrets.json")
+	if err := os.MkdirAll(filepath.Dir(secretFile), 0o700); err != nil {
+		fmt.Fprintf(os.Stderr, "create config directory: %v\n", err)
+		return 1
+	}
+	if err := writeSecretsFile(secretFile, secretsFilePayload{JWTSecret: archiveKey}); err != nil {
+		fmt.Fprintf(os.Stderr, "write secrets.json: %v\n", err)
+		return 1
+	}
+	result, reason = "success", ""
+	fmt.Fprintf(os.Stdout, "restore complete: %d files, jwt fingerprint %s, secret source %s\n", manifest.FileCount, manifest.JWTFingerprint, secretSource)
+	return 0
 }
 
 func runAdminResetPassword(args []string) int {
@@ -738,6 +1411,8 @@ func printAdminUsage(writer io.Writer) {
 	fmt.Fprintln(writer, "       filebox admin reset-password --data=./data --username=admin --generate")
 	fmt.Fprintln(writer, "       filebox admin clear-ip-acl --data=./data --username=admin")
 	fmt.Fprintln(writer, "       filebox admin migrate-v010-paths --data=./data   # v010 yy/mm → v011 yy-mm")
+	fmt.Fprintln(writer, "       filebox admin backup --data=./data --out=backup.tar.gz [--passphrase-file=FILE]")
+	fmt.Fprintln(writer, "       filebox admin restore --data=./data --in=backup.tar.gz [--passphrase-file=FILE] [--force --yes]")
 }
 
 func printLocksUsage(writer io.Writer) {
@@ -775,6 +1450,35 @@ func envOr(key, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+// warnProductionDefaults 输出生产环境默认值警告，并在终端中使用醒目的红色显示。
+// warnProductionDefaults prints production-default warnings, using prominent red output in terminals.
+func warnProductionDefaults(warnings []string) {
+	if len(warnings) == 0 {
+		return
+	}
+	lines := append([]string{
+		"WARNING: using insecure default secrets in production!",
+		"----------------------------------------------------",
+	}, warnings...)
+	stderrInfo, err := os.Stderr.Stat()
+	terminal := err == nil && stderrInfo.Mode()&os.ModeCharDevice != 0
+	if terminal {
+		const boldRed = "\x1b[1;31m"
+		const reset = "\x1b[0m"
+		for index, line := range lines {
+			if index > 0 {
+				fmt.Fprint(os.Stderr, "\n")
+			}
+			fmt.Fprint(os.Stderr, boldRed, line)
+		}
+		fmt.Fprintln(os.Stderr, reset)
+		return
+	}
+	for _, line := range lines {
+		fmt.Fprintln(os.Stderr, line)
+	}
 }
 
 // envSet 报告环境变量是否已设置（非空）。

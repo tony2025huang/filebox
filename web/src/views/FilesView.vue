@@ -6,9 +6,9 @@
     </header>
     <nav class="sync-entry-link"><RouterLink to="/sync" class="icon-text-button"><RefreshCw :size="16" /> {{ t('nav.sync') }}</RouterLink></nav>
     <section class="content-wrap">
-      <div class="page-heading"><div><p class="eyebrow">WORKSPACE / {{ user.role === 'admin' ? t('files.workspaceAdmin') : t('files.workspaceUser') }}</p><h1>{{ t('files.heading') }}</h1><p class="muted">{{ t('files.copy') }}</p></div><div class="quota-block"><div class="quota-label"><span>{{ t('files.quota') }}</span><strong>{{ formatBytes(user.usedBytes) }} <em>/ {{ formatBytes(user.quotaBytes) }}</em></strong></div><div class="progress-track"><span :style="{ width: quotaPercent + '%' }"></span></div><button class="secondary-button collection-entry" @click="openCollectionCreate"><UploadCloud :size="16" /> {{ t('collection.create') }}</button></div></div>
+      <div class="page-heading"><div><p class="eyebrow">WORKSPACE / {{ user.role === 'admin' ? t('files.workspaceAdmin') : t('files.workspaceUser') }}</p><h1>{{ t('files.heading') }}</h1><p class="muted">{{ t('files.copy') }}</p></div><div class="quota-block"><div class="quota-label"><span>{{ t('files.quota') }}</span><strong>{{ formatBytes(user.usedBytes) }} <em>/ {{ formatBytes(user.quotaBytes) }}</em></strong></div><div class="progress-track"><span :style="{ width: quotaPercent + '%' }"></span></div></div></div>
       <div v-if="readOnly" class="alert read-only-notice">{{ t('readOnly.notice') }}</div>
-      <div class="dir-bar"><div class="breadcrumb"><button class="breadcrumb-link" :class="{ active: !currentDir }" @click="navigateDir('')">{{ t('files.root') }}</button><template v-for="(seg, i) in breadcrumbs" :key="seg"><span class="breadcrumb-sep">/</span><button class="breadcrumb-link" :class="{ active: i === breadcrumbs.length - 1 }" @click="navigateDir(breadcrumbPath(i))">{{ seg }}</button></template></div><button v-if="!readOnly" class="secondary-button" @click="openNewFolder"><FolderPlus :size="17" /> {{ t('files.newFolder') }}</button></div>
+      <div class="dir-bar"><div class="breadcrumb"><button class="breadcrumb-link" :class="{ active: !currentDir }" @click="navigateDir('')">{{ t('files.root') }}</button><template v-for="(seg, i) in breadcrumbs" :key="seg"><span class="breadcrumb-sep">/</span><button class="breadcrumb-link" :class="{ active: i === breadcrumbs.length - 1 }" @click="navigateDir(breadcrumbPath(i))">{{ seg }}</button></template></div><div class="dir-actions"><button v-if="!readOnly" class="secondary-button" @click="openNewFolder"><FolderPlus :size="17" /> {{ t('files.newFolder') }}</button><button v-if="!readOnly" class="secondary-button collection-entry" @click="openCollectionCreate"><UploadCloud :size="16" /> {{ t('collection.create') }}</button></div></div>
       <div v-if="childFolders.length" class="folder-list"><div v-for="folder in childFolders" :key="folder.id" class="folder-row"><button class="folder-entry" @click="navigateDir(folder.path)"><Folder :size="17" /> <strong>{{ folder.name }}</strong></button><div v-if="!readOnly" class="folder-actions"><button class="icon-button" :title="t('files.renameFolder')" @click="openRenameFolder(folder)"><Pencil :size="15" /></button><button class="icon-button danger-icon" :title="t('files.deleteFolder')" @click="removeFolder(folder)"><Trash2 :size="15" /></button></div></div></div>
       <div v-if="!readOnly" class="upload-zone" :class="{ dragging }" @dragover.prevent="dragging = true" @dragleave.prevent="dragging = false" @drop.prevent="handleDrop"><UploadCloud :size="26" /><div><strong>{{ t('files.dropTitle') }}</strong><span>{{ t('files.dropCopy') }}</span></div><button class="secondary-button" @click="fileInput?.click()"><Upload :size="17" /> {{ t('files.choose') }}</button><button class="secondary-button" @click="folderInput?.click()"><FolderUp :size="17" /> {{ t('files.uploadFolder') }}</button><input ref="fileInput" type="file" multiple hidden @change="handleInput" /><input ref="folderInput" type="file" webkitdirectory directory multiple hidden @change="handleFolderInput" /></div>
       <section class="collection-section"><div class="collection-section-header"><h2>{{ t('collection.my') }}</h2><button class="icon-button" :title="t('files.refresh')" @click="loadCollections"><RefreshCw :size="17" :class="{ spin: collectionsLoading }" /></button></div><div v-if="collectionsLoading" class="empty-state"><LoaderCircle :size="24" class="spin" /></div><div v-else-if="!collections.length" class="transfers-empty">{{ t('collection.noCollections') }}</div><div v-else class="collection-grid"><article v-for="item in collections" :key="item.id" class="collection-row"><strong>{{ item.name }}</strong><small>{{ item.uploadCount }} / {{ item.maxUploads || t('collection.unlimited') }}</small><span class="status-label" :class="{ disabled: item.status !== 'active' }"><i></i>{{ collectionStatusLabel(item) }}</span><button class="icon-text-button" @click="viewCollection(item)"><Eye :size="15" /> {{ t('collection.viewFiles') }}</button><a class="collection-link" :href="absoluteCollectionUrl(item)" target="_blank" rel="noopener">{{ absoluteCollectionUrl(item) }}</a><button class="icon-button" :title="t('collection.copy')" @click="copyCollection(item)"><Copy :size="15" /></button><button v-if="item.status === 'active'" class="icon-button danger-icon" :title="t('collection.revoke')" @click="revokeCollection(item)"><Trash2 :size="15" /></button><div v-if="collectionDetails?.id === item.id" class="collection-files"><div v-if="!collectionDetails.files?.length">{{ t('collection.noCollections') }}</div><div v-for="received in collectionDetails.files" :key="received.id" class="collection-file"><strong>{{ received.originalName }}</strong><span v-if="received.remark">{{ t('collection.remark') }}: {{ received.remark }}</span><small>{{ formatDate(received.createdAt) }}</small></div></div></article></div></section>
@@ -144,22 +144,21 @@ const quotaPercent = computed(() => Math.min(100, user.value.quotaBytes ? Math.r
 // Overall upload rate: sample the total loadedBytes of active uploads every second and smooth with a 3-second moving average.
 const overallRate = ref(0)
 let rateWindow = []
-let lastRateSample = 0
+let lastRateAt = 0
+let lastRateBytes = 0
 let rateTimer = null
 function sampleOverallRate() {
   const now = Date.now()
   const active = uploads.value.filter(u => u.running && !u.paused && !u.failed)
   const total = active.reduce((sum, item) => sum + (item.loadedBytes || 0), 0)
-  if (lastRateSample && now > lastRateSample) {
-    const bytesPerSecond = (total - lastRateSample) / ((now - lastRateSample) / 1000)
-    if (bytesPerSecond >= 0) {
-      rateWindow.push(bytesPerSecond)
-      if (rateWindow.length > 3) rateWindow.shift()
-      overallRate.value = rateWindow.reduce((sum, value) => sum + value, 0) / rateWindow.length
-    }
+  if (!active.length) { overallRate.value = 0; rateWindow = []; lastRateAt = 0; lastRateBytes = 0; return }
+  if (lastRateAt > 0) {
+    const elapsed = (now - lastRateAt) / 1000
+    const delta = total - lastRateBytes
+    if (elapsed > 0 && delta >= 0) { rateWindow.push(delta / elapsed); if (rateWindow.length > 3) rateWindow.shift(); overallRate.value = rateWindow.reduce((s, v) => s + v, 0) / rateWindow.length } else { rateWindow = [] }
   }
-  lastRateSample = total
-  if (!active.length) { overallRate.value = 0; rateWindow = []; lastRateSample = 0 }
+  lastRateAt = now
+  lastRateBytes = total
 }
 // formatRate 自适应单位显示速率（B/KB/MB/GB per s）。
 // formatRate formats a byte rate with adaptive units (B/KB/MB/GB per second).

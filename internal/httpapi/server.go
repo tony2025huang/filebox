@@ -75,11 +75,13 @@ type Server struct {
 // rateLimiter keeps one token bucket per authenticated user and evicts idle buckets.
 // rateLimiter 按用户维护令牌桶，并清理长期未访问的桶。
 type rateLimiter struct {
-	mu             sync.Mutex
-	buckets        map[int64]*rate.Limiter
-	lastSeen       map[int64]time.Time
-	publicBuckets  map[string]*rate.Limiter
-	publicLastSeen map[string]time.Time
+	mu              sync.Mutex
+	buckets         map[int64]*rate.Limiter
+	lastSeen        map[int64]time.Time
+	publicBuckets   map[string]*rate.Limiter
+	publicLastSeen  map[string]time.Time
+	requestBuckets  map[string]*rate.Limiter
+	requestLastSeen map[string]time.Time
 }
 
 type contextKey string
@@ -242,6 +244,9 @@ var brandAssets = map[string]brandAsset{
 }
 
 func NewServer(db *store.Store, config Config) *Server {
+	// JWT timestamps preserve sub-second ordering for password-change revocation.
+	// JWT 时间戳保留亚秒精度，避免密码变更撤销检查在同一秒内失去顺序信息。
+	jwt.TimePrecision = time.Nanosecond
 	// NewServer 创建 API 服务，并为未指定的 JWT 有效期设置七天默认值。
 	// NewServer creates the API server and defaults an unspecified JWT lifetime to seven days.
 	if config.JWTExpiry <= 0 {
@@ -285,6 +290,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/shares/{token}", s.requireAuth(s.getManagedShare))
 	mux.HandleFunc("GET /api/files/shared/{token}/meta", s.shareMeta)
 	mux.HandleFunc("GET /api/files/shared/{token}/download", s.shareDownload)
+	mux.HandleFunc("GET /api/files/shared/{token}/preview", s.sharePreview)
 	mux.HandleFunc("GET /api/shares/{token}/logs", s.requireAuth(s.shareLogs))
 	mux.HandleFunc("PUT /api/shares/{token}/extend", s.requireAuth(s.extendShare))
 	mux.HandleFunc("PUT /api/shares/{token}/increase", s.requireAuth(s.increaseShare))
@@ -1636,6 +1642,37 @@ func (l *rateLimiter) limiterForPublic(key string, bytesPerSec int64) *rate.Limi
 	return limiter
 }
 
+// allowPublicRequest 对匿名公开接口按来源 IP 做请求级限速（令牌桶，突发耗尽后按速率补充）。
+// allowPublicRequest rate-limits anonymous public endpoints per source IP with a token bucket.
+func (l *rateLimiter) allowPublicRequest(ip string, perMinute, burst int) bool {
+	if perMinute <= 0 {
+		return true
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.requestBuckets == nil {
+		l.requestBuckets = make(map[string]*rate.Limiter)
+	}
+	if l.requestLastSeen == nil {
+		l.requestLastSeen = make(map[string]time.Time)
+	}
+	now := time.Now()
+	for key, seen := range l.requestLastSeen {
+		if now.Sub(seen) > 10*time.Minute {
+			delete(l.requestLastSeen, key)
+			delete(l.requestBuckets, key)
+		}
+	}
+	limiter, ok := l.requestBuckets[ip]
+	limit := rate.Limit(float64(perMinute) / 60.0)
+	if !ok || limiter == nil || limiter.Limit() != limit {
+		limiter = rate.NewLimiter(limit, burst)
+		l.requestBuckets[ip] = limiter
+	}
+	l.requestLastSeen[ip] = now
+	return limiter.Allow()
+}
+
 func waitForUploadRate(ctx context.Context, limiter *rate.Limiter, bytes int64) error {
 	// waitForUploadRate waits in burst-sized pieces so large chunks remain compatible with small bursts.
 	// waitForUploadRate 按 burst 大小分段等待，确保大分片兼容较小的 burst。
@@ -2039,6 +2076,12 @@ func (s *Server) batchDownload(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "请选择要下载的文件")
 		return
 	}
+	// 限制批量操作数量，避免单次请求消耗过多资源。
+	// Cap batch size to avoid excessive resource use from a single request.
+	if len(input.IDs) > 500 {
+		writeError(w, http.StatusBadRequest, "批量操作数量超出上限（最多 500 个）")
+		return
+	}
 	// 去重并限定归属；任一文件不存在或无权访问则整体拒绝（避免部分下载误导）。
 	// Deduplicate and enforce ownership; reject the whole batch if any file is missing or forbidden.
 	seen := make(map[int64]bool)
@@ -2153,7 +2196,13 @@ func (s *Server) batchShare(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "请选择要分享的文件")
 		return
 	}
-	if input.ExpiresInHours < 1 {
+	// 限制批量操作数量，避免单次请求消耗过多资源。
+	// Cap batch size to avoid excessive resource use from a single request.
+	if len(input.FileIDs) > 500 {
+		writeError(w, http.StatusBadRequest, "批量操作数量超出上限（最多 500 个）")
+		return
+	}
+	if input.ExpiresInHours < 1 || input.ExpiresInHours > 87600 {
 		writeError(w, http.StatusBadRequest, "分享有效期无效")
 		return
 	}
@@ -2241,6 +2290,12 @@ func (s *Server) batchDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(input.IDs) == 0 {
 		writeErrorData(w, http.StatusBadRequest, "请至少选择一个文件", map[string]string{"code": "BATCH_DELETE_EMPTY"})
+		return
+	}
+	// 限制批量操作数量，避免单次请求消耗过多资源。
+	// Cap batch size to avoid excessive resource use from a single request.
+	if len(input.IDs) > 500 {
+		writeErrorData(w, http.StatusBadRequest, "批量操作数量超出上限（最多 500 个）", map[string]string{"code": "BATCH_LIMIT_EXCEEDED"})
 		return
 	}
 	for _, id := range input.IDs {
@@ -2331,7 +2386,9 @@ func (s *Server) createShare(w http.ResponseWriter, r *http.Request) {
 		reason = "invalid_request"
 		return
 	}
-	if input.ExpiresInHours < 1 {
+	// 分享有效期上限与收集箱一致为 10 年，避免转换为 time.Duration 时溢出。
+	// The 10-year cap matches collection expiry and prevents time.Duration conversion overflow.
+	if input.ExpiresInHours < 1 || input.ExpiresInHours > 87600 {
 		reason = "invalid_expiry"
 		writeError(w, http.StatusBadRequest, "分享有效期无效")
 		return
@@ -2599,6 +2656,11 @@ func (s *Server) shareMeta(w http.ResponseWriter, r *http.Request) {
 		s.serviceEvent(r, "share_view", "anonymous", "target=%s result=%s reason=%s", target, result, reason)
 		s.recordShareAudit(r, nil, shareOwnerID, "anonymous", "share_view", target, result, reason)
 	}()
+	if !s.rateLimiter.allowPublicRequest(s.requestIP(r), 30, 10) {
+		result, reason = "failure", "rate_limited"
+		writeError(w, http.StatusTooManyRequests, "请求过于频繁，请稍后重试")
+		return
+	}
 	share, err := s.store.GetShareByToken(r.Context(), token)
 	if err != nil {
 		if revoked, revokedErr := s.store.GetShareByTokenIncludingRevoked(r.Context(), token); revokedErr == nil && revoked.RevokedAt != "" {
@@ -2645,6 +2707,11 @@ func (s *Server) shareDownload(w http.ResponseWriter, r *http.Request) {
 		s.serviceEvent(r, "share_download", "anonymous", "target=%s result=%s reason=%s", target, result, reason)
 		s.recordShareAudit(r, nil, shareOwnerID, "anonymous", "share_download", target, result, reason)
 	}()
+	if !s.rateLimiter.allowPublicRequest(s.requestIP(r), 30, 10) {
+		result, reason = "failure", "rate_limited"
+		writeError(w, http.StatusTooManyRequests, "请求过于频繁，请稍后重试")
+		return
+	}
 	share, err := s.store.GetShareByToken(r.Context(), token)
 	if err != nil {
 		if revoked, revokedErr := s.store.GetShareByTokenIncludingRevoked(r.Context(), token); revokedErr == nil && revoked.RevokedAt != "" {
@@ -2706,6 +2773,58 @@ func (s *Server) shareDownload(w http.ResponseWriter, r *http.Request) {
 	defer handle.Close()
 	w.Header().Set("Content-Type", effectiveFileMIME(file))
 	w.Header().Set("Content-Disposition", contentDisposition(file.Name))
+	result, reason = "success", ""
+	http.ServeContent(w, r, file.Name, parseTime(file.CreatedAt), handle)
+}
+
+// sharePreview streams a shared file inline for preview without consuming a download slot.
+// sharePreview 以 inline 方式输出分享文件供预览，不消耗分享下载次数。
+func (s *Server) sharePreview(w http.ResponseWriter, r *http.Request) {
+	token := r.PathValue("token")
+	target := token
+	var shareOwnerID *int64
+	result, reason := "failure", "share_not_found"
+	defer func() {
+		s.serviceEvent(r, "share_preview", "anonymous", "target=%s result=%s reason=%s", target, result, reason)
+		s.recordShareAudit(r, nil, shareOwnerID, "anonymous", "share_preview", target, result, reason)
+	}()
+	share, err := s.store.GetShareByToken(r.Context(), token)
+	if err != nil {
+		if revoked, revokedErr := s.store.GetShareByTokenIncludingRevoked(r.Context(), token); revokedErr == nil && revoked.RevokedAt != "" {
+			shareOwnerID = &revoked.CreatedBy
+			reason = "share_revoked"
+			writeError(w, http.StatusForbidden, "分享已撤销")
+			return
+		}
+		writeError(w, http.StatusNotFound, "分享不存在")
+		return
+	}
+	shareOwnerID = &share.CreatedBy
+	file, err := s.store.FindFile(r.Context(), share.FileID)
+	if err != nil || file.Status != "ready" {
+		reason = "share_denied"
+		writeError(w, http.StatusNotFound, "分享不存在")
+		return
+	}
+	if !shareActive(share.ExpiresAt) {
+		reason = "share_expired"
+		writeError(w, http.StatusForbidden, "分享链接已过期")
+		return
+	}
+	handle, err := os.Open(filepath.Join(s.config.DataDir, file.StoragePath))
+	if err != nil {
+		reason = "content_not_found"
+		writeError(w, http.StatusNotFound, "文件内容不存在")
+		return
+	}
+	defer handle.Close()
+	contentType := effectiveFileMIME(file)
+	w.Header().Set("Content-Type", contentType)
+	if previewMIMEAllowed(contentType) {
+		w.Header().Set("Content-Disposition", "inline")
+	} else {
+		w.Header().Set("Content-Disposition", contentDisposition(file.Name))
+	}
 	result, reason = "success", ""
 	http.ServeContent(w, r, file.Name, parseTime(file.CreatedAt), handle)
 }
@@ -3687,6 +3806,16 @@ func (s *Server) authenticate(r *http.Request) (store.User, error) {
 	user, err := s.store.GetUser(id)
 	if err != nil || user.Disabled {
 		return store.User{}, errors.New("user unavailable")
+	}
+	issuedAt, err := token.Claims.GetIssuedAt()
+	if err != nil || issuedAt == nil {
+		return store.User{}, errors.New("invalid token")
+	}
+	if user.LastPasswordChange != "" {
+		lastChange, parseErr := time.Parse(time.RFC3339, user.LastPasswordChange)
+		if parseErr == nil && issuedAt.Time.Before(lastChange) {
+			return store.User{}, errors.New("invalid token")
+		}
 	}
 	return user, nil
 }
