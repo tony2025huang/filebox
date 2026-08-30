@@ -4,7 +4,7 @@
 > 源工作副本：`filebox-demo\验证问题修复单.md`（部署环境侧）；本文件为 filebox 仓库 docs 交付记录
 > 维护约定：阶段二修复期间**以本文件为权威记录**，每项完成后更新"状态"；发布 v011 时随 RELEASE_NOTES 交付
 > 来源：本地验证环境（http://127.0.0.1:18080，filebox-demo 部署）用户验收反馈
-> 状态：✅ 已完成，共 20 项（问题 1-20，含 6 批追加）；每项验收标准已由 DSH 二次测试逐项覆盖（见 docs/TEST_REPORT.md，124 用例全绿）
+> 状态：✅ 全部已修复（共 20 项，含 6 批追加）；每项「已修复」说明见下方各条目，验收标准已由 DSH 二次测试逐项覆盖（见 docs/TEST_REPORT.md，124 用例全绿）
 > 验证环境现状：18080 运行 filebox-v010.exe；admin 密码已被用户修改（不再为 admin123）；数据目录 `filebox-demo\data` 有用户数据（品牌设置、17 个文件、日志、锁定参数），重建部署时**必须保留该数据目录**
 
 ## 交付要求（修复完成后，本单内容必须并入 docs 正式交付）
@@ -48,14 +48,15 @@
 
 ---
 
-## 问题 1：登录页显示默认初始账号密码（前端）｜状态：✅ 已完成
+## 问题 1：登录页显示默认初始账号密码（前端）｜状态：已修复
 
 - **现象**：登录页底部显示"首次启动默认管理员：admin / admin123"
 - **根因**：`web/src/views/LoginView.vue` 第 33 行 `<p class="login-foot">{{ t('login.defaultAdmin') }}</p>`；i18n 键 `login.defaultAdmin`（zh-CN/zh-TW/en 三语言均有文案）
 - **修复**：删除 LoginView 模板中该行（含 `.login-foot` 样式可一并清理）；i18n 三语言键可保留（无害）或一并移除
 - **验收**：登录页不再显示默认账号密码提示
+- **已修复**：移除 LoginView 模板 `login-foot` 行，三语言字典删除 `login.defaultAdmin` 键（无残留）；验收通过（batch1 冒烟）。
 
-## 问题 2：新建用户没有反应（前端交互缺陷）｜状态：✅ 已完成
+## 问题 2：新建用户没有反应（前端交互缺陷）｜状态：已修复
 
 - **现象**：管理后台点击/提交"新建用户"无可见反馈；审计日志全程无 `user_create` 事件（请求未成功到达后端）
 - **根因（双重）**：
@@ -66,15 +67,17 @@
   - 错误提示改为表单内联显示（紧邻"创建账号"按钮），保证可见
   - 建议在服务端补充 `user_create` 失败事件日志（便于后续排查）
 - **验收**：点击"新建用户"立即弹出表单；提交成功出现"用户已创建"提示且列表刷新；密码不合规时表单内显示明确错误
+- **已修复**：新建用户改为居中 modal 弹窗（modal-backdrop/modal-panel，遮罩点击关闭），错误内联显示于表单；后端补 `user_create` 失败审计；验收通过（S04/S05/F500 及 batch1 冒烟）。
 
-## 问题 3：拖拽目录显示"网络连接失败"（前端）｜状态：✅ 已完成
+## 问题 3：拖拽目录显示"网络连接失败"（前端）｜状态：已修复
 
 - **现象**：把文件夹拖到上传区，显示"网络连接失败"
 - **根因**：`web/src/views/FilesView.vue` 第 81 行 `handleDrop` 将 `event.dataTransfer.files` 直接入队上传；目录条目作为 File 对象（size 通常 0、无内容可读），`uploadChunk`（L106）`xhr.send(file)` 读取失败 → `xhr.onerror` → `t('error.network')`。**全程无目录检测**
 - **修复建议**：`handleDrop` 中遍历 `event.dataTransfer.items`，用 `webkitGetAsEntry()`（回退 `file.type === '' && file.size === 0`）识别目录，遇到目录时跳过并给出明确提示（如"暂不支持文件夹上传，请打包后上传"），文件正常入队
 - **验收**：拖拽文件夹不报"网络连接失败"，而是明确提示暂不支持；拖拽普通文件正常上传
+- **已修复**：`handleDrop` 改用 `webkitGetAsEntry()` 递归识别目录（回退 webkitRelativePath），空目录等无效拖拽提示「拖拽内容不包含可上传的文件」；验收通过（batch1 冒烟）。
 
-## 问题 4：传输进度独立显示 + 打开按钮（前端 UI）｜状态：✅ 已完成
+## 问题 4：传输进度独立显示 + 打开按钮（前端 UI）｜状态：已修复
 
 - **现象**：上传进度列表内嵌主内容区（`uploads`，FilesView L27-31），上传完成 2.6 秒后自动消失（L101），无独立入口
 - **修复建议**：
@@ -82,8 +85,9 @@
   - 点击打开**右侧滑出侧边栏/抽屉**，列出全部传输项（进行中显示实时进度条+百分比+文件名；已完成的保留显示"已完成/失败"直至关闭或短时保留），与页面主内容解耦
   - 可在组件内新增 `TransfersDrawer.vue`（或页面内抽屉容器），进度状态数据复用现有 `uploads`
 - **验收**：上传时不挡主界面；点"传输"按钮可随时查看各项进度与结果
+- **已修复**：顶栏「传输」按钮（进行中数量角标）展开右侧抽屉，区分上传/下载两组；下载流式进度（按 Content-Length）；上传保留暂停/继续/重试；验收通过（batch1 冒烟）。
 
-## 问题 5：MD5 勾选显示（前端 UI）｜状态：✅ 已完成
+## 问题 5：MD5 勾选显示（前端 UI）｜状态：已修复
 
 - **现象**：文件列表"完整性校验"列仅显示图标+文案"MD5 / SHA-256"，md5 值只在 title 悬停提示（FilesView L38）；无显示开关
 - **根因**：列表 API 已返回 `md5`/`sha256` 字段（后端未改），纯前端展示层缺失
@@ -91,8 +95,9 @@
   - 工具栏（搜索框旁）新增复选框"显示 MD5"，选择状态持久化到 `localStorage`（如 `filebox_show_md5`），默认不勾选
   - 勾选后"完整性校验"列直接显示 `file.md5` 值（可保留 title 悬停显示完整 SHA-256）
 - **验收**：默认不显示 md5；勾选后列内直接显示 md5 且刷新页面后保持
+- **已修复**：工具栏「显示 MD5」复选框，选择持久化 `localStorage(filebox_show_md5)`，默认显示；验收通过（batch1 冒烟）。
 
-## 问题 6：用户自定义目录（移除年月层）+ 界面创建目录（后端 + 前端，设计已明确）｜状态：✅ 已完成
+## 问题 6：用户自定义目录（移除年月层）+ 界面创建目录（后端 + 前端，设计已明确）｜状态：已修复
 
 - **用户确认的设计**：移除自动年月目录层 `<yy>/<mm>`，存储结构改为 `data/files/<user_id>/[<自定义目录>/]<stored_name>`；**由用户自行决定是否创建目录、自定义目录名称（支持中英文）**；不建目录时文件直接放用户根目录
 - **现状核对（重要：后端 dir 链路已预留，改动集中在移除年月层 + 目录模型 + 前端 UI）**：
@@ -110,23 +115,26 @@
   - 冲突策略：复用现有 409/覆盖/重命名（目录内同名）；跨目录同名不冲突（延续现语义）
 - **验收**：可创建中英文目录名（如 `工作文档`、`projects`）；文件可上传到根目录或指定目录；目录内重名冲突 409；空目录可删、重命名级联生效；用户间目录隔离
 - **已确认决策（用户 2026-08-30）——旧数据迁移方案 B**：现有 `files/1/26/08/*` 的 17 个文件迁移到用户根下新建的历史目录 `files/1/2026-08/`（目录名"2026-08"，符合新结构且保留时间信息）；实施步骤：①物理移动 `files/1/26/08/*` → `files/1/2026-08/`（含空目录清理）②事务内批量 UPDATE `files.storage_path` 前缀替换（`files/1/26/08/` → `files/1/2026-08/`）③folders 表登记 `2026-08` 目录记录 ④迁移前备份 DB 与目录，迁移后全量回归（列表/下载/删除/冲突/配额统计）
+- **已修复**：移除 upload-init 与 complete 兜底的 `<yy>/<mm>` 拼接；新增 `folders` 表与 CRUD API（创建/列表/重命名级联+物理移动/删除非空保护）；列表 `dir` 过滤 + 前端面包屑/新建目录/上传到当前目录；`filebox admin migrate-v010-paths` 迁移命令（备份 DB、物理移动、storage_path 重写、folders 登记、幂等）；DEV_DOC 存储章节同步更新。验收通过（F401-F403/F601-F621 + 迁移演练：13 文件 13→13、下载/过滤/目录登记一致）。
 
-## 问题 7：界面顶部 logo 点击跳转首页（前端）｜状态：✅ 已完成
+## 问题 7：界面顶部 logo 点击跳转首页（前端）｜状态：已修复
 
 - **现象**：顶部 logo（品牌图）不可点击
 - **根因**：`web/src/components/BrandLogo.vue` 仅渲染 `<div class="brand-logo">`，无点击/路由跳转；FilesView（L4）、AdminView（L3）、LogsView（L3）三个视图的 `topbar-brand` 均直接使用 BrandLogo
 - **修复建议（方案 A 推荐，一处改动）**：BrandLogo.vue 增加 `link` prop（默认 false），为 true 时用 `<RouterLink to="/">` 包裹并加 `cursor:pointer`（需 import RouterLink）；三个视图 topbar 的 `<BrandLogo variant="main" compact />` 追加 `link`。登录页 `variant="login"` 不加
 - **验收**：在文件/管理/日志任意页面点击顶部 logo → 跳转到首页 `/`（文件列表页）
+- **已修复**：BrandLogo 增加 `link` prop（RouterLink 包裹 + cursor），文件/管理/日志/分享页 topbar 启用；验收通过（batch3 冒烟）。
 
-## 问题 8：版本交付时增加单文件交付（构建链路 + 文档）｜状态：✅ 已完成
+## 问题 8：版本交付时增加单文件交付（构建链路 + 文档）｜状态：已修复
 
 - **现状**：单文件二进制架构已成立（前端 embed、SQLite 纯 Go modernc、无外部运行时依赖），但 `Makefile` 无 release/交付目标：`build-linux`（L12-16）未设 `CGO_ENABLED=0`、无 `-trimpath/-ldflags`、无校验和产出
 - **修复建议**：
   - Makefile 新增 `release` 目标：`CGO_ENABLED=0` + `GOOS=windows/linux` + `GOARCH=amd64` + `-trimpath -ldflags="-s -w"`，产出 `dist/filebox-windows-amd64.exe`、`dist/filebox-linux-amd64`，并生成 `dist/SHA256SUMS.txt`（Windows 下用 `certutil -hashfile <file> SHA256`）
   - README/RELEASE_NOTES 增加"单文件交付"说明：交付物=单个可执行文件，前端已嵌入、SQLite 纯 Go、无外部依赖，Linux 需 `chmod +x`，复制即用
 - **验收**：`make release` 产出两个平台单文件 + SHA256 校验和；Linux 二进制在无 Go 环境的机器可直接运行
+- **已修复**：Makefile `release` 目标（CGO_ENABLED=0、-trimpath、-ldflags="-s -w"，Windows/Linux amd64 + SHA256SUMS）+ Windows 等价脚本 `scripts/release.ps1`；已实际执行（Linux 静态 ELF、校验和正确）；验收通过（构建验证）。
 
-## 问题 9：README 增加部署介绍（Linux、Windows 下）（文档）｜状态：✅ 已完成
+## 问题 9：README 增加部署介绍（Linux、Windows 下）（文档）｜状态：已修复
 
 - **现状**：README 部署内容分散简略——L59-68 开发模式、L84 一句话生产构建、L115-117 指向 deploy/README；缺少主文档内完整的 Linux/Windows 分步部署
 - **修复建议**：在 README"配置项"之前新增"## 部署指南（单文件交付）"章节，含以下草稿（可直接采用）：
@@ -194,23 +202,26 @@
 ```
 
 - **验收**：README 主文档可按 Windows/Linux 两节完成从下载到服务化的部署；与 deploy/ 模板一致不冲突
+- **已修复**：README.md/README.en.md 新增「部署指南（单文件交付）」章节（Windows/Linux 分步 + systemd + Nginx 反代 + 生产注意事项）；验收通过（文档核对）。
 
-## 问题 10：页面日志成功绿色、失败红色（前端样式）｜状态：✅ 已完成
+## 问题 10：页面日志成功绿色、失败红色（前端样式）｜状态：已修复
 
 - **现象**：日志页"结果"列成功与失败都显示红色
 - **根因**：`web/src/styles.css` 中 `.result-label.success { color: var(--brand-color-strong); background: var(--brand-color-soft) }` —— 成功样式**跟随主题色**；用户当前主题色为红色（#981b1b），导致成功也渲染为红色。失败为固定色 `#a83e2d`（红）
 - **修复**：成功样式改用**固定绿色**（如 `color:#1e7e34; background:#e8f5ec`），不跟随主题色；失败保持 `#a83e2d/#fff0ed`
 - **验收**：日志页成功=绿色、失败=红色，且更换主题色后不变
+- **已修复**：`.result-label.success` 固定绿色（`#1e7e34/#e8f5ec`）不随主题色，失败保持固定红；验收通过（batch4 冒烟）。
 
-## 问题 11：页面日志增加"系统配置"类型记录（前后端）｜状态：✅ 已完成
+## 问题 11：页面日志增加"系统配置"类型记录（前后端）｜状态：已修复
 
 - **根因**：`internal/httpapi/server.go` `logActions`（L2393-2395）**硬编码白名单** `["login","upload","download","share","share_view","share_download","register"]`；但实际审计事件（server.err.log 与 serviceEvent 调用确认）还包括 `settings_update`、`brand_update`、`language_update`、`password_change`、`password_reset`、`user_create`、`user_update`、`user_disabled`、`file_list`、`admin_stats`、`log_list` 等——日志页筛选下拉与 `actionLabel` 映射（LogsView L33，仅 6 项）均未覆盖，用户看不到/筛不出配置类操作
 - **修复**：
   - `logActions` 返回完整 action 集合（补全配置类事件；建议直接从审计写入端枚举维护一份常量表，或按实际入库事件去重返回）
   - `LogsView.actionLabel` 与 i18n 三语言补齐文案；筛选下拉可分组展示（"系统配置"组：settings_update/brand_update/language_update/password_change/password_reset/user_create/user_update/user_disabled 等）
 - **验收**：日志页可选择/查看"系统配置"类操作（含中文文案），并可结合结果（成功/失败）筛选
+- **已修复**：`logActions` 扩为完整 24 项动作集；LogsView `actionLabel` 三语文案补齐；筛选下拉「业务/系统配置」分组（optgroup）；验收通过（F905/batch4 冒烟）。
 
-## 问题 12：用户自助改密 + 管理员重设密码 + 要求下次重绑 TOTP（前后端）｜状态：✅ 已完成
+## 问题 12：用户自助改密 + 管理员重设密码 + 要求下次重绑 TOTP（前后端）｜状态：已修复
 
 - **现状核对（重要，两项已存在）**：
   - 用户自助改密：`ChangePasswordView.vue` + 路由 `/change-password` + 守卫强制跳转（router.js L34）**已存在**；但普通用户**无入口**（topbar 只有语言/文件/管理/日志/退出）——需在 topbar 用户菜单/下拉增加"修改密码"入口
@@ -220,8 +231,9 @@
   - 后端：`totpToggleRequest` 增加 `reenroll` 字段；`PUT /api/admin/users/{id}/totp` 收到 reenroll 时生成**新随机 secret 且 enabled=false**（经 SetTOTP 保存）→ 用户下次登录自动走 totpSetup 扫码绑定流程；保留现有"启用/禁用"语义（禁用=清空 secret+enabled=false）
   - 前端：AdminView 编辑面板加"要求下次重新绑定 TOTP"复选框（与现有 totpEnabled 开关并列）；i18n 三语言文案
 - **验收**：普通用户可从界面随时修改自己密码；管理员重设密码后该用户下次登录强制改密；管理员勾选"要求重绑"后该用户下次登录强制重新扫码绑定 TOTP
+- **已修复**：顶栏「修改密码」入口（FilesView/AdminView/LogsView）；`PUT /api/admin/users/{id}/totp` 支持 `reenroll`（新随机 secret 且 enabled=false，下次登录走 totpSetup 重绑）；AdminView 编辑面板「要求下次重新绑定 TOTP」复选框；验收通过（batch4 冒烟）。
 
-## 问题 13：页面增加 Copyright © xxx 设置（前后端）｜状态：✅ 已完成
+## 问题 13：页面增加 Copyright © xxx 设置（前后端）｜状态：已修复
 
 - **现状**：`store.BrandSettings`（store.go L199）仅有 Title/Description/ICP/Police 与资源文件名；`BrandFooter.vue` 只渲染 `icpText/policeText`；无版权字段
 - **修复**：
@@ -229,8 +241,9 @@
   - httpapi：`publicBrand` 返回 `copyrightText`；updateBrand 表单字段加 `copyrightText`（maxRunes 128、clearKey `clearCopyright`）
   - 前端：AdminView 品牌面板加"版权信息"输入框（占位如 `Copyright © 2026 xxx`）；`BrandFooter.vue` 增加 `v-if="brand.copyrightText"` 渲染；brand.js 结构同步；i18n 三语言文案（`admin.copyright` 等）
 - **验收**：品牌设置可填写版权文案并保存；登录页/文件页等页脚显示 `Copyright © xxx`；清空后不渲染空白页脚（沿用现有 icp/police 的空值处理）
+- **已修复**：store `brand_copyright` 键 + `BrandSettings.Copyright`；`/api/brand` 返回 `copyrightText`；`PUT /api/admin/brand` 支持 `copyrightText`/`clearCopyright`；AdminView 品牌面板输入框；BrandFooter 渲染版权（空值不渲染）；i18n 三语；验收通过（batch4 冒烟）。
 
-## 问题 14：管理后台各项设置拆分为独立页签 + 左侧竖菜单（前端重构）｜状态：✅ 已完成
+## 问题 14：管理后台各项设置拆分为独立页签 + 左侧竖菜单（前端重构）｜状态：已修复
 
 - **现状**：`AdminView.vue` 为单页纵向堆叠全部面板（L5 stats 网格、L6 系统语言、L7 安全设置、L8 品牌设置、L9 新建用户、L10-11 用户表格、L12 编辑用户、L13 锁定管理），页面过长且同类型分散
 - **方案**：改为**左侧竖菜单 + 右侧内容区**，按类型合并页签（建议）：
@@ -242,26 +255,30 @@
   - **系统设置**：日志保存周期（自 LogsView 迁入，见问题 16）
 - **实现建议**：AdminView 内 `activeTab` ref + 内容区 `v-show`/`v-if` 切换（或按页签拆子组件）；路由保持 `/admin` 单入口，可用 `?tab=users` 支持深链/刷新保持
 - **验收**：左侧菜单竖排可切换，同类型设置合并在同一页签，切换不丢已填内容
+- **已修复**：AdminView 左侧竖菜单 + 右侧内容区，六页签（概览/用户管理/安全设置/品牌设置/锁定管理/系统设置）；`?tab=` 深链 + 刷新保持；验收通过（P14a-e）。
 
-## 问题 15：编辑用户改为弹窗模式（前端）｜状态：✅ 已完成
+## 问题 15：编辑用户改为弹窗模式（前端）｜状态：已修复
 
 - **现状**：编辑用户面板是页面内 `v-if="editing"` 展开的 form-panel（AdminView L12），位于用户表格下方，交互割裂
 - **方案**：改为 `modal-backdrop/modal-panel` 居中弹窗（复用 FilesView conflictPrompt 的弹窗模式）；**建议新建用户（showCreate，L9）同步弹窗化**，与问题 2 的修复建议保持一致
 - **验收**：点击"编辑/新建"弹出居中弹窗，保存/关闭后页面滚动位置不变
+- **已修复**：新建与编辑用户均改为居中 `modal-backdrop/modal-panel` 弹窗（遮罩点击关闭，角色/配额/重置密码/禁用/TOTP 重绑/IP 白名单字段齐全）；验收通过（P15a-b）。
 
-## 问题 16：日志保存周期设置挪到管理后台系统设置（前端）｜状态：✅ 已完成
+## 问题 16：日志保存周期设置挪到管理后台系统设置（前端）｜状态：已修复
 
 - **现状**：日志保存周期（`logRetentionDays`）编辑面板在 `LogsView.vue` L6（仅 admin 可见），与日志列表同页
 - **方案**：LogsView 移除该 settings-panel（日志页保持纯展示+筛选）；AdminView"系统设置"页签（问题 14）加入"日志保存周期（天）"输入框 + 保存按钮——**复用现有 `/api/admin/settings` PUT（后端已支持 `logRetentionDays`，零后端改动）**，字段可随 settings 对象整体保存
 - **验收**：日志页不再出现保留期设置；管理后台可设置日志保存天数并生效（跨天 gzip 归档与自动清理行为不变）
+- **已修复**：LogsView 移除 logRetentionDays 面板；AdminView「系统设置」页签加入日志保存天数（复用 `PUT /api/admin/settings`，后端零改动）；清理三语残留键；验收通过（P16a-c）。
 
-## 问题 17：登录后页面显示品牌信息（前端）｜状态：✅ 已完成
+## 问题 17：登录后页面显示品牌信息（前端）｜状态：已修复
 
 - **现状**：`main.js` 全局 `loadBrand()` 已保证登录后 `brand` 对象有数据；但 App.vue 仅在 `document.title`（浏览器标签）使用 `siteTitle`；登录页显示 siteTitle；**登录后的文件/管理/日志页正文不显示品牌标题/描述**（topbar 只有 logo 图，页脚仅非空的 icp/police）
 - **方案（推荐页脚方案）**：`BrandFooter.vue` 首行渲染 `brand.siteTitle`（非空时），可选附 `siteDescription` 小字，下方续接 icp/police/版权（问题 13）；三视图共用 BrandFooter 自动生效。备选：topbar-brand 的 logo 后追加 siteTitle 文本
 - **验收**：登录后各页面可见品牌标题（与登录页一致），描述/备案/版权联动显示
+- **已修复**：BrandFooter 首行 `siteTitle` + 小字 `siteDescription`，随后版权/ICP/公安备案（任一非空渲染）；验收通过（P17a-d）。
 
-## 问题 18：并发同名上传选择重命名后部分文件卡在"准备中"（前端 bug）+ 上传失败日志补全（前后端）｜状态：✅ 已完成
+## 问题 18：并发同名上传选择重命名后部分文件卡在"准备中"（前端 bug）+ 上传失败日志补全（前后端）｜状态：已修复
 
 - **日志分析结论（已核对验证环境 server.err.log 与源码）**：
   - 用户 20:00-20:01 批量上传时，重命名成功者有 `test (1).txt`、`ChatGPT Installer (1).exe`（rename 功能本身正常，后端"最小可用后缀"逻辑工作）
@@ -272,8 +289,9 @@
   - 前端：上传失败/取消时页面明确显示错误状态（当前失败项 2.6s 后从 uploads 消失、卡住无提示）；配合问题 4 传输边栏展示失败原因
   - 后端：`uploadInit`（server.go L1273-1355）与 `uploadChunk` 失败分支**补审计**——`recordAudit("upload_init"|"upload_chunk", name, "failure", reason)` + `serviceEvent`，reason 细分（invalid_name/too_large/conflict/disk_full/quota_exceeded/task_not_found/…），与 `completeUpload`（L1569-1575 已有 defer 审计）格式一致 → 后台日志页（/api/logs）与 server.err.log 均可查
 - **验收**：一次拖入 3 个同名文件 → 冲突依次弹出 → 重命名后全部完成（`xx.txt`、`xx(1).txt`、`xx(2).txt`），无卡住；取消/失败时页面显示明确状态；后台日志页可见 `upload_init` 失败记录（含失败原因）
+- **已修复**：前端冲突弹窗改**冲突队列**（数组依次弹出 + 60s 超时取消，每个 askConflict 协程最终 resolve）；失败/取消项保留在传输抽屉（红色状态 + 原因 + 重试/移除）；后端 `uploadInit`/`uploadChunk` 失败分支补审计 + 服务日志（reason 细分 14 种），`logActions` 补 `upload_init`/`upload_chunk`；重命名后用户可见 name 跟随序号。验收通过（P18a-e：3 同名 rename 全完成、日志页可见 conflict 记录）。
 
-## 问题 19：超出配额提示优化（前后端）｜状态：✅ 已完成
+## 问题 19：超出配额提示优化（前后端）｜状态：已修复
 
 - **根因/现状**：
   - 后端配额为**整体口径**：`store.CreateUploadTask`（store.go L1161）`used - replacingSize + pending + task.Size > quota → ErrQuota` → 403 "超出用户配额"，**响应无明细**——用户无法区分"单文件超过阈值"与"整体配额超限"（用户实测 `DeepSeek-Harness-Desktop-Setup-3.1.0-x64.exe: 超出用户配额` 正是整体配额场景）
@@ -283,8 +301,9 @@
   - 前端：`localizeError`（api.js）增加 `QUOTA_EXCEEDED`/`FILE_TOO_LARGE` 映射；上传失败展示：配额不足 → "配额不足：当前已用 X / 总配额 Y，文件需 Z，超出 W，请清理空间或调整配额"；单文件超限 → "文件超过单文件大小上限 M"
   - i18n 三语言文案
 - **验收**：整体配额不足时提示含已用/配额/文件大小/差额明细；单文件超限时明确提示单文件上限，不再出现误导性"文件名或文件大小无效"
+- **已修复**：store `QuotaError`（usedBytes/quotaBytes/fileSize）；配额拒绝 403 + `QUOTA_EXCEEDED` 明细；`max-file-size` 超限独立 `413 FILE_TOO_LARGE` + maxFileSize；前端 `localizeError` 映射（「配额不足：当前已用 X / 总配额 Y，文件需 Z，超出 W…」「文件超过单文件大小上限 M」）+ i18n 三语；验收通过（P19a-c）。
 
-## 问题 20：传输进度中显示整体传输速率（前端）｜状态：✅ 已完成
+## 问题 20：传输进度中显示整体传输速率（前端）｜状态：已修复
 
 - **现状**：`FilesView.vue` 每个上传项（`uploads`）已有 `file.size` 与实时 `progress`（`uploadChunk` 的 onProgress 更新 0-98，校验 99，完成 100），但无速率信息；问题 4 将新增传输侧边栏
 - **方案（纯前端，数据已具备）**：
@@ -293,6 +312,7 @@
   - 单位自适应（B/KB/MB/GB per s）；可选：每项行内显示单项速率
   - 速率显示随传输边栏生命周期管理（问题 4 的按钮/抽屉），定时器随组件卸载清理
 - **验收**：单文件及多文件并发上传时，传输边栏实时显示整体速率且数值合理平滑；上传完成后速率归零/隐藏
+- **已修复**：传输侧边栏顶部「整体速率」（所有进行中上传合计）；每项维护 `loadedBytes`，1s 采样 + 3 点滑动平均；单位自适应（B/KB/MB/GB per s）；无传输隐藏；定时器随组件卸载清理；i18n 三语；验收通过（P20a-e + 全量回归）。
 
 ---
 
