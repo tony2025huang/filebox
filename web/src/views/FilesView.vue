@@ -35,7 +35,7 @@
 </template>
 
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { RouterLink, useRouter } from 'vue-router'
 import { api, clearSession, computeFileSHA256, localizeError } from '../api'
 import BrandFooter from '../components/BrandFooter.vue'
@@ -171,8 +171,8 @@ async function finishExistingUpload(item) { if (item.paused) return; await conti
 async function continueChunks(item) { const body = await api(`/api/files/${item.taskId}/status`); item.chunkSize = body.data.chunkSize; item.chunksTotal = body.data.totalChunks; item.uploaded = [...(body.data.uploadedChunks || [])].sort((a, b) => a - b); const missing = Array.from({ length: item.chunksTotal }, (_, index) => index).filter(index => !item.uploaded.includes(index)); item.pending.clear(); removeQueued(item); updateChunkProgress(item); if (!missing.length) return; enqueueChunks(item, missing); await waitForChunks(item) }
 function requestUploadInit(item, resolve = '') { item.resolve = resolve; return api('/api/files/upload-init', { method: 'POST', body: JSON.stringify({ name: item.file.name, size: item.file.size, chunkSize: item.file.size <= 8 * 1024 * 1024 ? item.file.size : 4194304, mime: item.file.type, sha256: item.sha256, ...(item.dir ? { dir: item.dir } : {}), ...(resolve ? { resolve } : {}) }) }) }
 function pauseUpload(item) { item.paused = true; item.status = t('files.paused'); removeQueued(item); item.controllers.forEach(controller => controller.abort()); wakeWorkers() }
-async function resumeUpload(item) { if (item.running) return; item.paused = false; item.failed = false; item.canContinue = false; item.status = t('files.uploading'); await startUpload(item) }
-async function retryUpload(item) { item.failed = false; item.error = ''; item.paused = false; await startUpload(item) }
+async function resumeUpload(item) { if (item.running) return; item.paused = false; item.failed = false; item.canContinue = false; item.status = t('files.uploading'); await runGated(item) }
+async function retryUpload(item) { item.failed = false; item.error = ''; item.paused = false; await runGated(item) }
 // removeUploadLater 仅对成功项做短时保留后移除；失败/取消项保留在面板中，
 // 由用户重试或点击关闭（dismissUpload）处理，避免"2.6 秒后消失、无提示"。
 // removeUploadLater auto-removes only successful items; failed/cancelled ones stay in
@@ -214,12 +214,14 @@ function fileIcon(mime = '', name = '') {
   if (value === 'application/pdf' || ext === 'pdf') return FileText
   if (value === 'application/json' || ['json', 'jsonl'].includes(ext)) return FileJson
   if (['zip', 'rar', '7z', 'tar', 'gz', 'bz2', 'xz'].includes(ext)) return FileArchive
-  if (value.startsWith('text/') || ['txt', 'md', 'log', 'csv', 'html', 'htm', 'xml', 'yaml', 'yml', 'toml', 'ini', 'conf', 'js', 'ts', 'jsx', 'tsx', 'vue', 'css', 'scss', 'go', 'rs', 'py', 'java', 'c', 'h', 'cpp', 'sh', 'bat', 'ps1', 'sql'].includes(ext)) return FileText
-  if (['xls', 'xlsx', 'csv', 'tsv'].includes(ext)) return FileSpreadsheet
+  // 代码与表格类优先于通用 text 分支，避免被 text/ 提前命中。
+  // Code and spreadsheet extensions are checked before the generic text branch.
+  if (['js', 'ts', 'jsx', 'tsx', 'vue', 'css', 'scss', 'go', 'rs', 'py', 'java', 'c', 'h', 'cpp', 'sh', 'bat', 'ps1', 'sql', 'html', 'htm', 'xml', 'yaml', 'yml', 'toml', 'ini', 'conf'].includes(ext)) return FileCode
+  if (['xls', 'xlsx', 'tsv'].includes(ext) || value === 'text/csv' || ['csv'].includes(ext)) return FileSpreadsheet
+  if (value.startsWith('text/') || ['txt', 'md', 'log', 'csv'].includes(ext)) return FileText
   if (['doc', 'docx', 'rtf', 'odt'].includes(ext)) return FileText
   if (['ppt', 'pptx', 'odp'].includes(ext)) return FileText
   if (['exe', 'msi', 'dmg', 'appimage', 'deb', 'rpm'].includes(ext)) return FileType
-  if (['js', 'ts', 'go', 'rs', 'py', 'java', 'c', 'cpp', 'sh', 'sql', 'html', 'css'].includes(ext)) return FileCode
   return File
 }
 function previewType(mime = '') { const value = mime.toLowerCase().split(';')[0]; if (value.startsWith('image/')) return 'image'; if (value.startsWith('video/')) return 'video'; if (value === 'application/pdf') return 'pdf'; return 'text' }

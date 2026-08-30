@@ -1634,7 +1634,8 @@ func (s *Server) checkInstantUpload(w http.ResponseWriter, r *http.Request) {
 	if nameErr != nil || name == "" {
 		// 未提供文件名时无法做同名判断，保持纯秒传语义。
 		// Without a name there is no same-name check; keep pure instant-upload semantics.
-		s.recordAudit(r, &user.ID, user.Username, "upload", file.Name, "success", "instant")
+		s.recordAudit(r, &user.ID, user.Username, "upload", input.Name, "success", "instant")
+		s.serviceEvent(r, "upload", user.Username, "name=%s size=%d result=success reason=instant", input.Name, input.Size)
 		writeData(w, http.StatusOK, "检查完成", map[string]any{"instant": true, "file": publicFile(file)})
 		return
 	}
@@ -1653,10 +1654,10 @@ func (s *Server) checkInstantUpload(w http.ResponseWriter, r *http.Request) {
 	if !errors.Is(conflictErr, store.ErrNotFound) {
 		log.Printf("find upload conflict during instant check: %v", conflictErr)
 	}
-	// 秒传命中：记录审计（此前无任何日志，问题 9）。
-	// Instant-upload hit: record an audit row (previously nothing was logged).
-	s.recordAudit(r, &user.ID, user.Username, "upload", file.Name, "success", "instant")
-	s.serviceEvent(r, "upload", user.Username, "name=%s size=%d result=success reason=instant", file.Name, file.Size)
+	// 秒传命中：记录审计（此前无任何日志，问题 9）；target 用本次上传名。
+	// Instant-upload hit: record an audit row (previously nothing was logged); the target is the submitted name.
+	s.recordAudit(r, &user.ID, user.Username, "upload", input.Name, "success", "instant")
+	s.serviceEvent(r, "upload", user.Username, "name=%s size=%d result=success reason=instant", input.Name, input.Size)
 	writeData(w, http.StatusOK, "检查完成", map[string]any{"instant": true, "file": publicFile(file)})
 }
 
@@ -1895,6 +1896,9 @@ func (s *Server) batchDownload(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/zip")
 	w.Header().Set("Content-Disposition", contentDisposition("filebox-batch-download.zip"))
 	zw := zip.NewWriter(w)
+	// zip 内同名文件追加序号（不同目录的同名文件避免互相覆盖）。
+	// Same-name files inside the zip get a numeric suffix so they do not overwrite each other.
+	entryNames := make(map[string]int)
 	for _, file := range files {
 		path := filepath.Join(s.config.DataDir, file.StoragePath)
 		handle, err := os.Open(path)
@@ -1902,7 +1906,14 @@ func (s *Server) batchDownload(w http.ResponseWriter, r *http.Request) {
 			zw.Close()
 			return
 		}
-		entry, err := zw.Create(file.Name)
+		entryName := file.Name
+		if entryNames[entryName] > 0 {
+			extension := filepath.Ext(entryName)
+			stem := strings.TrimSuffix(entryName, extension)
+			entryName = fmt.Sprintf("%s (%d)%s", stem, entryNames[entryName], extension)
+		}
+		entryNames[file.Name]++
+		entry, err := zw.Create(entryName)
 		if err != nil {
 			handle.Close()
 			zw.Close()
