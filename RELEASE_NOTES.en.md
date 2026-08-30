@@ -4,9 +4,9 @@ Stage 2 release notes
 
 [中文](RELEASE_NOTES.md)
 
-## v0.1.1 (v011) release notes
+## v0.1.1 (v011 validation-feedback fixes) release notes
 
-v011 is the validation-feedback fix release built after v0.1.0 (Stage 1) and delivered alongside Stage 2 in the **same single binary** (`filebox-v011.exe` / `filebox-windows-amd64.exe`). It covers all 20 items of the local validation feedback list (authoritative record: `docs/validation-feedback-v011.md`).
+v011 is a **validation-feedback fix batch independent of the Stage 2 feature work** (source: user acceptance feedback from the local validation environment, 20 items, authoritative record in `docs/validation-feedback-v011.md`), released together with v0.2.0 (Stage 2). All fixes and enhancements are merged into the v0.2.0 single binary (`filebox-v011.exe` / `filebox-windows-amd64.exe`).
 
 ### Fixes
 

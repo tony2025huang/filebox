@@ -4,9 +4,9 @@
 
 [English](RELEASE_NOTES.en.md)
 
-## v0.1.1（v011）发布说明
+## v0.1.1（v011 验证反馈修复）发布说明
 
-v011 是 v0.1.0（阶段一）之后、与阶段二同仓交付的验证反馈修复版本，**修复与增强全部并入 v0.2.0 单二进制**（`filebox-v011.exe` / `filebox-windows-amd64.exe`）。本单对应本地验证环境的用户验收反馈（验证问题修复单，20 项，权威记录见 `docs/validation-feedback-v011.md`）。
+v011 是**独立于阶段二功能开发**的验证反馈修复批次（来源：本地验证环境用户验收反馈，20 项，权威记录见 `docs/validation-feedback-v011.md`），随 v0.2.0（阶段二）版本一并发布，修复与增强全部并入 v0.2.0 单二进制（`filebox-v011.exe` / `filebox-windows-amd64.exe`）。
 
 ### 修复清单
 
