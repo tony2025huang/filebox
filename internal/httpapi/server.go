@@ -170,6 +170,11 @@ type updateUserRequest struct {
 	Password   string  `json:"password"`
 }
 
+type readOnlyRequest struct {
+	From  string `json:"from"`
+	Until string `json:"until"`
+}
+
 type logSettingsRequest struct {
 	LogRetentionDays    *int    `json:"logRetentionDays"`
 	LockThreshold       *int    `json:"lockThreshold"`
@@ -291,6 +296,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/admin/users", s.requireAdmin(s.listUsers))
 	mux.HandleFunc("POST /api/admin/users", s.requireAdmin(s.createUser))
 	mux.HandleFunc("PUT /api/admin/users/{id}", s.requireAdmin(s.updateUser))
+	mux.HandleFunc("PUT /api/admin/users/{id}/read-only", s.requireAdmin(s.updateUserReadOnly))
 	mux.HandleFunc("DELETE /api/admin/users/{id}", s.requireAdmin(s.deleteUser))
 	mux.HandleFunc("GET /api/admin/stats", s.requireAdmin(s.stats))
 	mux.HandleFunc("GET /api/admin/settings", s.requireAdmin(s.getSettings))
@@ -1311,6 +1317,9 @@ func (s *Server) uploadInit(w http.ResponseWriter, r *http.Request) {
 	// uploadInit 先校验文件名、大小、同名处理和磁盘空间，再以事务预留用户配额。
 	// uploadInit validates the name, size, conflict mode, and disk space before transactionally reserving user quota.
 	user := currentUser(r.Context())
+	if s.rejectReadOnly(w, r, user, "upload_init", "") {
+		return
+	}
 	var input uploadInitRequest
 	if !decodeJSON(w, r, &input) {
 		s.recordAudit(r, &user.ID, user.Username, "upload_init", "", "failure", "invalid_request")
@@ -1424,6 +1433,9 @@ func (s *Server) uploadChunk(w http.ResponseWriter, r *http.Request) {
 	// uploadChunk streams one exact-sized chunk to disk and records its hash.
 	user := currentUser(r.Context())
 	taskID := r.PathValue("taskID")
+	if s.rejectReadOnly(w, r, user, "upload_chunk", taskID) {
+		return
+	}
 	index, err := strconv.Atoi(r.PathValue("index"))
 	if err != nil {
 		s.recordAudit(r, &user.ID, user.Username, "upload_chunk", taskID, "failure", "invalid_index")
@@ -1698,6 +1710,9 @@ func (s *Server) checkInstantUpload(w http.ResponseWriter, r *http.Request) {
 	// checkInstantUpload 在当前用户范围内查询 ready 文件，不创建新的上传内容。
 	// checkInstantUpload searches the current user's ready files without creating upload content.
 	user := currentUser(r.Context())
+	if s.rejectReadOnly(w, r, user, "upload", "") {
+		return
+	}
 	var input instantCheckRequest
 	if !decodeJSON(w, r, &input) {
 		return
@@ -1783,6 +1798,9 @@ func (s *Server) completeUpload(w http.ResponseWriter, r *http.Request) {
 	// completeUpload computes SHA-256 and MD5 from temporary content, then commits the record and final path in one transaction.
 	user := currentUser(r.Context())
 	taskID := r.PathValue("taskID")
+	if s.rejectReadOnly(w, r, user, "upload", taskID) {
+		return
+	}
 	task, err := s.store.GetUploadTask(r.Context(), taskID)
 	if errors.Is(err, store.ErrNotFound) || task.UserID != user.ID || task.Status != "pending" {
 		writeError(w, http.StatusNotFound, "上传任务不存在")
@@ -2048,6 +2066,9 @@ func (s *Server) batchDownload(w http.ResponseWriter, r *http.Request) {
 // batchDelete deletes selected files atomically and removes their physical content after commit.
 func (s *Server) batchDelete(w http.ResponseWriter, r *http.Request) {
 	user := currentUser(r.Context())
+	if s.rejectReadOnly(w, r, user, "delete", "batch") {
+		return
+	}
 	var input struct {
 		IDs []int64 `json:"ids"`
 	}
@@ -2121,6 +2142,9 @@ func uniqueZipEntryName(name string, used map[string]struct{}) string {
 // createShare 校验文件归属并创建随机、限时的分享链接。
 func (s *Server) createShare(w http.ResponseWriter, r *http.Request) {
 	user := currentUser(r.Context())
+	if s.rejectReadOnly(w, r, user, "share", r.PathValue("id")) {
+		return
+	}
 	target := r.PathValue("id")
 	result, reason := "failure", "not_found"
 	defer func() {
@@ -2281,6 +2305,9 @@ func (s *Server) shareDownload(w http.ResponseWriter, r *http.Request) {
 // deleteShares 撤销当前用户文件的全部分享，并对他人文件保持 404。
 func (s *Server) deleteShares(w http.ResponseWriter, r *http.Request) {
 	user := currentUser(r.Context())
+	if s.rejectReadOnly(w, r, user, "share", r.PathValue("id")) {
+		return
+	}
 	target := r.PathValue("id")
 	result, reason := "failure", "not_found"
 	defer func() {
@@ -2430,6 +2457,9 @@ func validateFolderName(name string) (string, error) {
 // createFolder creates a user folder; an empty parent means the root directory.
 func (s *Server) createFolder(w http.ResponseWriter, r *http.Request) {
 	user := currentUser(r.Context())
+	if s.rejectReadOnly(w, r, user, "folder_create", "") {
+		return
+	}
 	var input folderRequest
 	if !decodeJSON(w, r, &input) {
 		return
@@ -2484,6 +2514,9 @@ func (s *Server) listFolders(w http.ResponseWriter, r *http.Request) {
 // renameFolder renames a folder and cascades the change to child folders and files.
 func (s *Server) renameFolder(w http.ResponseWriter, r *http.Request) {
 	user := currentUser(r.Context())
+	if s.rejectReadOnly(w, r, user, "folder_rename", r.PathValue("id")) {
+		return
+	}
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "目录编号无效")
@@ -2521,6 +2554,9 @@ func (s *Server) renameFolder(w http.ResponseWriter, r *http.Request) {
 // deleteFolder deletes an empty folder and rejects non-empty directories with 400.
 func (s *Server) deleteFolder(w http.ResponseWriter, r *http.Request) {
 	user := currentUser(r.Context())
+	if s.rejectReadOnly(w, r, user, "folder_delete", r.PathValue("id")) {
+		return
+	}
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "目录编号无效")
@@ -2547,6 +2583,9 @@ func (s *Server) deleteFolder(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) deleteFile(w http.ResponseWriter, r *http.Request) {
 	user := currentUser(r.Context())
+	if s.rejectReadOnly(w, r, user, "delete", r.PathValue("id")) {
+		return
+	}
 	target := r.PathValue("id")
 	if id, parseErr := strconv.ParseInt(target, 10, 64); parseErr == nil {
 		if file, findErr := s.store.FindFile(r.Context(), id); findErr == nil {
@@ -2708,6 +2747,47 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request) {
 		s.serviceEvent(r, "password_reset", admin.Username, "target=%s result=success", user.Username)
 	}
 	writeData(w, http.StatusOK, "用户已更新", publicUser(user))
+}
+
+// updateUserReadOnly 保存管理员为指定用户设置的一次性只读窗口。
+// updateUserReadOnly stores an administrator-managed one-time read-only window.
+func (s *Server) updateUserReadOnly(w http.ResponseWriter, r *http.Request) {
+	admin := currentUser(r.Context())
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "用户编号无效")
+		return
+	}
+	var input readOnlyRequest
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	input.From = strings.TrimSpace(input.From)
+	input.Until = strings.TrimSpace(input.Until)
+	if (input.From == "") != (input.Until == "") {
+		writeErrorData(w, http.StatusBadRequest, "只读时段必须同时设置开始和结束时间", map[string]string{"code": "INVALID_READ_ONLY_WINDOW"})
+		return
+	}
+	if input.From != "" {
+		from, fromErr := time.Parse(time.RFC3339, input.From)
+		until, untilErr := time.Parse(time.RFC3339, input.Until)
+		if fromErr != nil || untilErr != nil || from.After(until) {
+			writeErrorData(w, http.StatusBadRequest, "只读时段无效", map[string]string{"code": "INVALID_READ_ONLY_WINDOW"})
+			return
+		}
+	}
+	user, err := s.store.UpdateUserReadOnly(r.Context(), id, input.From, input.Until)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "用户不存在")
+		return
+	}
+	if err != nil {
+		log.Printf("update user read-only window: %v", err)
+		writeError(w, http.StatusInternalServerError, "保存只读时段失败")
+		return
+	}
+	s.serviceEvent(r, "user_read_only_update", admin.Username, "target=%s from_set=%t until_set=%t result=success", user.Username, input.From != "", input.Until != "")
+	writeData(w, http.StatusOK, "只读时段已更新", publicUser(user))
 }
 
 func (s *Server) updateUserTOTP(w http.ResponseWriter, r *http.Request) {
@@ -3206,6 +3286,36 @@ func currentUser(ctx context.Context) store.User {
 	return user
 }
 
+// userReadOnly 判断用户当前是否处于包含边界的只读时段；管理员不受该限制。
+// userReadOnly checks an inclusive read-only window; administrators are exempt.
+func (s *Server) userReadOnly(user store.User) bool {
+	return userReadOnlyAt(user, time.Now().UTC())
+}
+
+func userReadOnlyAt(user store.User, now time.Time) bool {
+	if user.Role == "admin" || user.ReadOnlyFrom == "" || user.ReadOnlyUntil == "" {
+		return false
+	}
+	from, fromErr := time.Parse(time.RFC3339, user.ReadOnlyFrom)
+	until, untilErr := time.Parse(time.RFC3339, user.ReadOnlyUntil)
+	if fromErr != nil || untilErr != nil || from.After(until) {
+		return false
+	}
+	return !now.Before(from) && !now.After(until)
+}
+
+// rejectReadOnly 统一拒绝只读时段内的写操作，并记录原动作和拒绝原因。
+// rejectReadOnly rejects writes during a read-only window and records the original action and reason.
+func (s *Server) rejectReadOnly(w http.ResponseWriter, r *http.Request, user store.User, action, target string) bool {
+	if !s.userReadOnly(user) {
+		return false
+	}
+	s.recordAudit(r, &user.ID, user.Username, action, target, "failure", "read_only")
+	s.serviceEvent(r, action, user.Username, "target=%s result=failure reason=read_only", target)
+	writeErrorData(w, http.StatusForbidden, "当前账号处于只读时段，仅可查看和下载", map[string]string{"code": "READ_ONLY"})
+	return true
+}
+
 func decodeJSON(w http.ResponseWriter, r *http.Request, destination any) bool {
 	defer r.Body.Close()
 	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
@@ -3232,7 +3342,8 @@ func writeErrorData(w http.ResponseWriter, status int, message string, data any)
 }
 
 func publicUser(user store.User) map[string]any {
-	return map[string]any{"id": user.ID, "username": user.Username, "role": user.Role, "language": user.Language, "quotaBytes": user.QuotaBytes, "usedBytes": user.UsedBytes, "folderCount": user.FolderCount, "fileCount": user.FileCount, "disabled": user.Disabled, "mustChangePassword": user.MustChangePassword, "totpEnabled": user.TOTPEnabled, "ipAclEnabled": user.IPACLEnabled, "ipWhitelist": user.IPWhitelist, "createdAt": user.CreatedAt}
+	readOnly := userReadOnlyAt(user, time.Now().UTC())
+	return map[string]any{"id": user.ID, "username": user.Username, "role": user.Role, "language": user.Language, "quotaBytes": user.QuotaBytes, "usedBytes": user.UsedBytes, "folderCount": user.FolderCount, "fileCount": user.FileCount, "disabled": user.Disabled, "mustChangePassword": user.MustChangePassword, "totpEnabled": user.TOTPEnabled, "ipAclEnabled": user.IPACLEnabled, "ipWhitelist": user.IPWhitelist, "readOnlyFrom": user.ReadOnlyFrom, "readOnlyUntil": user.ReadOnlyUntil, "readOnly": readOnly, "createdAt": user.CreatedAt}
 }
 
 func isValidLang(value string) bool {

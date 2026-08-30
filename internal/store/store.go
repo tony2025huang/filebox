@@ -104,6 +104,8 @@ type User struct {
 	LastUsedTOTP       string `json:"-"`
 	IPACLEnabled       bool   `json:"-"`
 	IPWhitelist        string `json:"-"`
+	ReadOnlyFrom       string `json:"readOnlyFrom"`
+	ReadOnlyUntil      string `json:"readOnlyUntil"`
 	CreatedAt          string `json:"createdAt"`
 	UpdatedAt          string `json:"updatedAt"`
 }
@@ -509,6 +511,8 @@ func (s *Store) migrateUsersSchema() error {
 		{"last_used_totp", "ALTER TABLE users ADD COLUMN last_used_totp TEXT"},
 		{"ip_acl_enabled", "ALTER TABLE users ADD COLUMN ip_acl_enabled INTEGER NOT NULL DEFAULT 0"},
 		{"ip_whitelist", "ALTER TABLE users ADD COLUMN ip_whitelist TEXT NOT NULL DEFAULT ''"},
+		{"read_only_from", "ALTER TABLE users ADD COLUMN read_only_from TEXT"},
+		{"read_only_until", "ALTER TABLE users ADD COLUMN read_only_until TEXT"},
 	} {
 		if !columns[definition.name] {
 			if _, err := s.DB.Exec(definition.sql); err != nil {
@@ -735,19 +739,19 @@ func (s *Store) ClearIPACL(username string) (bool, error) {
 func (s *Store) GetUserByUsername(username string) (User, error) {
 	// GetUserByUsername 按唯一用户名读取账户及其登录锁定状态。
 	// GetUserByUsername loads an account and its login-lock state by unique username.
-	return scanUser(s.DB.QueryRow("SELECT id, username, password_hash, role, language, quota_bytes, used_bytes, disabled, failed_attempts, COALESCE(locked_until, ''), COALESCE(must_change_password, 0), COALESCE(totp_secret, ''), COALESCE(totp_enabled, 0), COALESCE(last_used_totp, ''), COALESCE(ip_acl_enabled, 0), COALESCE(ip_whitelist, ''), created_at, updated_at FROM users WHERE username = ?", username))
+	return scanUser(s.DB.QueryRow("SELECT id, username, password_hash, role, language, quota_bytes, used_bytes, disabled, failed_attempts, COALESCE(locked_until, ''), COALESCE(must_change_password, 0), COALESCE(totp_secret, ''), COALESCE(totp_enabled, 0), COALESCE(last_used_totp, ''), COALESCE(ip_acl_enabled, 0), COALESCE(ip_whitelist, ''), COALESCE(read_only_from, ''), COALESCE(read_only_until, ''), created_at, updated_at FROM users WHERE username = ?", username))
 }
 
 func (s *Store) GetUser(id int64) (User, error) {
 	// GetUser 按账户 ID 读取用户记录。
 	// GetUser loads a user record by account ID.
-	return scanUser(s.DB.QueryRow("SELECT id, username, password_hash, role, language, quota_bytes, used_bytes, disabled, failed_attempts, COALESCE(locked_until, ''), COALESCE(must_change_password, 0), COALESCE(totp_secret, ''), COALESCE(totp_enabled, 0), COALESCE(last_used_totp, ''), COALESCE(ip_acl_enabled, 0), COALESCE(ip_whitelist, ''), created_at, updated_at FROM users WHERE id = ?", id))
+	return scanUser(s.DB.QueryRow("SELECT id, username, password_hash, role, language, quota_bytes, used_bytes, disabled, failed_attempts, COALESCE(locked_until, ''), COALESCE(must_change_password, 0), COALESCE(totp_secret, ''), COALESCE(totp_enabled, 0), COALESCE(last_used_totp, ''), COALESCE(ip_acl_enabled, 0), COALESCE(ip_whitelist, ''), COALESCE(read_only_from, ''), COALESCE(read_only_until, ''), created_at, updated_at FROM users WHERE id = ?", id))
 }
 
 func scanUser(row *sql.Row) (User, error) {
 	var user User
 	var disabled, mustChange, totpEnabled, ipACLEnabled int
-	err := row.Scan(&user.ID, &user.Username, &user.PasswordHash, &user.Role, &user.Language, &user.QuotaBytes, &user.UsedBytes, &disabled, &user.FailedAttempts, &user.LockedUntil, &mustChange, &user.TOTPSecret, &totpEnabled, &user.LastUsedTOTP, &ipACLEnabled, &user.IPWhitelist, &user.CreatedAt, &user.UpdatedAt)
+	err := row.Scan(&user.ID, &user.Username, &user.PasswordHash, &user.Role, &user.Language, &user.QuotaBytes, &user.UsedBytes, &disabled, &user.FailedAttempts, &user.LockedUntil, &mustChange, &user.TOTPSecret, &totpEnabled, &user.LastUsedTOTP, &ipACLEnabled, &user.IPWhitelist, &user.ReadOnlyFrom, &user.ReadOnlyUntil, &user.CreatedAt, &user.UpdatedAt)
 	user.Disabled = disabled != 0
 	user.MustChangePassword = mustChange != 0
 	user.TOTPEnabled = totpEnabled != 0
@@ -777,6 +781,24 @@ func (s *Store) CreateUser(ctx context.Context, username, passwordHash, role str
 func (s *Store) UpdateUserLanguage(ctx context.Context, id int64, language string) (User, error) {
 	now := time.Now().UTC().Format(time.RFC3339)
 	result, err := s.DB.ExecContext(ctx, "UPDATE users SET language = ?, updated_at = ? WHERE id = ?", language, now, id)
+	if err != nil {
+		return User{}, err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return User{}, err
+	}
+	if count == 0 {
+		return User{}, ErrNotFound
+	}
+	return s.GetUser(id)
+}
+
+// UpdateUserReadOnly 设置或清除用户的一次性只读时段。
+// UpdateUserReadOnly stores or clears a user's one-time read-only window.
+func (s *Store) UpdateUserReadOnly(ctx context.Context, id int64, from, until string) (User, error) {
+	now := time.Now().UTC().Format(time.RFC3339)
+	result, err := s.DB.ExecContext(ctx, "UPDATE users SET read_only_from = ?, read_only_until = ?, updated_at = ? WHERE id = ?", nullableString(from), nullableString(until), now, id)
 	if err != nil {
 		return User{}, err
 	}
@@ -1249,7 +1271,7 @@ func (s *Store) ListUsers(ctx context.Context, keyword string, page, pageSize in
 	if err := s.DB.QueryRowContext(ctx, "SELECT COUNT(id) FROM users WHERE username LIKE ?", pattern).Scan(&total); err != nil {
 		return nil, 0, err
 	}
-	rows, err := s.DB.QueryContext(ctx, "SELECT id, username, password_hash, role, language, quota_bytes, used_bytes, disabled, failed_attempts, COALESCE(locked_until, ''), COALESCE(must_change_password, 0), COALESCE(totp_secret, ''), COALESCE(totp_enabled, 0), COALESCE(last_used_totp, ''), COALESCE(ip_acl_enabled, 0), COALESCE(ip_whitelist, ''), created_at, updated_at, (SELECT COUNT(id) FROM folders WHERE folders.user_id = users.id), (SELECT COUNT(id) FROM files WHERE files.user_id = users.id AND files.status = 'ready') FROM users WHERE username LIKE ? ORDER BY id LIMIT ? OFFSET ?", pattern, pageSize, (page-1)*pageSize)
+	rows, err := s.DB.QueryContext(ctx, "SELECT id, username, password_hash, role, language, quota_bytes, used_bytes, disabled, failed_attempts, COALESCE(locked_until, ''), COALESCE(must_change_password, 0), COALESCE(totp_secret, ''), COALESCE(totp_enabled, 0), COALESCE(last_used_totp, ''), COALESCE(ip_acl_enabled, 0), COALESCE(ip_whitelist, ''), COALESCE(read_only_from, ''), COALESCE(read_only_until, ''), created_at, updated_at, (SELECT COUNT(id) FROM folders WHERE folders.user_id = users.id), (SELECT COUNT(id) FROM files WHERE files.user_id = users.id AND files.status = 'ready') FROM users WHERE username LIKE ? ORDER BY id LIMIT ? OFFSET ?", pattern, pageSize, (page-1)*pageSize)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -1258,7 +1280,7 @@ func (s *Store) ListUsers(ctx context.Context, keyword string, page, pageSize in
 	for rows.Next() {
 		var user User
 		var disabled, mustChange, totpEnabled, ipACLEnabled int
-		if err := rows.Scan(&user.ID, &user.Username, &user.PasswordHash, &user.Role, &user.Language, &user.QuotaBytes, &user.UsedBytes, &disabled, &user.FailedAttempts, &user.LockedUntil, &mustChange, &user.TOTPSecret, &totpEnabled, &user.LastUsedTOTP, &ipACLEnabled, &user.IPWhitelist, &user.CreatedAt, &user.UpdatedAt, &user.FolderCount, &user.FileCount); err != nil {
+		if err := rows.Scan(&user.ID, &user.Username, &user.PasswordHash, &user.Role, &user.Language, &user.QuotaBytes, &user.UsedBytes, &disabled, &user.FailedAttempts, &user.LockedUntil, &mustChange, &user.TOTPSecret, &totpEnabled, &user.LastUsedTOTP, &ipACLEnabled, &user.IPWhitelist, &user.ReadOnlyFrom, &user.ReadOnlyUntil, &user.CreatedAt, &user.UpdatedAt, &user.FolderCount, &user.FileCount); err != nil {
 			return nil, 0, err
 		}
 		user.Disabled = disabled != 0

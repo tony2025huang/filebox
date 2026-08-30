@@ -134,6 +134,12 @@ Object.assign(en, { 'collection.expiresAt': 'Expires at', 'collection.maxFileByt
 Object.assign(zhTW, { 'admin.disableAccount': '停用此帳號', 'admin.zeroDisabled': '0 表示關閉' })
 Object.assign(en, { 'admin.disableAccount': 'Disable this account', 'admin.zeroDisabled': '0 disables this setting' })
 
+// readOnly keys are kept identical across all three locale dictionaries.
+// readOnly 键集在三种语言中保持一致，避免管理端和文件页出现未翻译状态。
+Object.assign(zhCN, { 'readOnly.label': '只读时段', 'readOnly.from': '开始时间', 'readOnly.until': '结束时间', 'readOnly.clear': '清除时间', 'readOnly.notice': '当前账号处于只读时段，仅可查看和下载', 'readOnly.error': '当前账号处于只读时段，仅可查看和下载', 'readOnly.invalidWindow': '只读时段无效：请同时填写合法的开始和结束时间' })
+Object.assign(zhTW, { 'readOnly.label': '唯讀時段', 'readOnly.from': '開始時間', 'readOnly.until': '結束時間', 'readOnly.clear': '清除時間', 'readOnly.notice': '目前帳號處於唯讀時段，僅可查看和下載', 'readOnly.error': '目前帳號處於唯讀時段，僅可查看和下載', 'readOnly.invalidWindow': '唯讀時段無效：請同時填寫合法的開始和結束時間' })
+Object.assign(en, { 'readOnly.label': 'Read-only window', 'readOnly.from': 'Start time', 'readOnly.until': 'End time', 'readOnly.clear': 'Clear time', 'readOnly.notice': 'This account is in a read-only window. Only viewing and downloading are allowed.', 'readOnly.error': 'This account is in a read-only window. Only viewing and downloading are allowed.', 'readOnly.invalidWindow': 'Invalid read-only window: enter both a valid start and end time.' })
+
 export const dictionaries = { 'zh-CN': zhCN, 'zh-TW': zhTW, en }
 export const currentLocale = ref('zh-CN')
 export const systemLocale = ref('zh-CN')
