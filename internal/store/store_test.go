@@ -374,6 +374,66 @@ func TestShareStorageAndSettings(t *testing.T) {
 	}
 }
 
+func TestShareManagementPreservesRevocationAndOwnership(t *testing.T) {
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.EnsureAdmin("admin", "admin123", 1024*1024); err != nil {
+		t.Fatal(err)
+	}
+	user, err := db.GetUserByUsername("admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := db.DB.Exec("INSERT INTO files(user_id, name, stored_name, size, mime, sha256, md5, status, storage_path, created_at) VALUES(?, 'managed.txt', 'managed.txt', 1, 'text/plain', 'sha', 'md5', 'ready', 'files/admin/managed.txt', ?)", user.ID, time.Now().UTC().Format(time.RFC3339))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fileID, _ := result.LastInsertId()
+	ctx := context.Background()
+	if err := db.CreateShare(ctx, fileID, user.ID, "managed-token", time.Now().UTC().Add(time.Hour), 2); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AddAuditLogWithShareOwner(ctx, nil, &user.ID, "anonymous", "share_download", "managed-token", "127.0.0.1", "failure", "share_limit"); err != nil {
+		t.Fatal(err)
+	}
+	ownerLogs, total, err := db.ListAuditLogs(ctx, &user.ID, "share_download", "", "", 1, 20)
+	if err != nil || total != 1 || len(ownerLogs) != 1 || ownerLogs[0].Reason != "share_limit" {
+		t.Fatalf("owner-visible share logs = %+v, total=%d, err=%v", ownerLogs, total, err)
+	}
+	if err := db.UpdateShareExpiry(ctx, "managed-token", time.Now().UTC().Add(48*time.Hour), user.ID+1); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("cross-owner expiry error = %v", err)
+	}
+	if err := db.UpdateShareExpiry(ctx, "managed-token", time.Now().UTC().Add(48*time.Hour), user.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.UpdateShareMaxDownloads(ctx, "managed-token", 3, user.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.UpdateShareMaxDownloads(ctx, "managed-token", 2, user.ID); !errors.Is(err, ErrConflict) {
+		t.Fatalf("decreasing max downloads error = %v", err)
+	}
+	shares, err := db.ListSharesByOwner(ctx, user.ID)
+	if err != nil || len(shares) != 1 || shares[0].FileName != "managed.txt" || shares[0].MaxDownloads != 3 {
+		t.Fatalf("managed shares = %+v, %v", shares, err)
+	}
+	if err := db.DeleteShareByToken(ctx, "managed-token", user.ID+1); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("cross-owner revoke error = %v", err)
+	}
+	if err := db.DeleteShareByToken(ctx, "managed-token", user.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.GetShareByToken(ctx, "managed-token"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("revoked share default lookup = %v", err)
+	}
+	revoked, err := db.GetShareByTokenIncludingRevoked(ctx, "managed-token")
+	if err != nil || revoked.RevokedAt == "" {
+		t.Fatalf("revoked share lookup = %+v, %v", revoked, err)
+	}
+}
+
 // TestRenameFolderClearsDeletedRows: 目录重命名会把其下 ready 文件的 storage_path
 // 前缀改写为新目录；若目标前缀下残留同名的软删除记录（删除后重传再改目录），
 // UNIQUE(storage_path) 会冲突。deleted 内容已物理删除，重命名前应清理。

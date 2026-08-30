@@ -189,11 +189,13 @@ type ChunkInfo struct {
 type Share struct {
 	ID            int64  `json:"id"`
 	FileID        int64  `json:"fileId"`
+	FileName      string `json:"fileName,omitempty"`
 	Token         string `json:"token"`
 	CreatedBy     int64  `json:"createdBy"`
 	ExpiresAt     string `json:"expiresAt"`
 	DownloadCount int64  `json:"downloadCount"`
 	MaxDownloads  int    `json:"maxDownloads"`
+	RevokedAt     string `json:"revokedAt,omitempty"`
 	CreatedAt     string `json:"createdAt"`
 }
 
@@ -211,15 +213,16 @@ type Folder struct {
 // AuditLog 表示一次登录、上传或下载等操作的审计记录。
 // AuditLog represents an audit record for a login, upload, download, or related operation.
 type AuditLog struct {
-	ID        int64  `json:"id"`
-	UserID    *int64 `json:"userId,omitempty"`
-	Username  string `json:"username"`
-	Action    string `json:"action"`
-	Target    string `json:"target"`
-	IP        string `json:"ip"`
-	Result    string `json:"result"`
-	Reason    string `json:"reason,omitempty"`
-	CreatedAt string `json:"createdAt"`
+	ID           int64  `json:"id"`
+	UserID       *int64 `json:"userId,omitempty"`
+	ShareOwnerID *int64 `json:"shareOwnerId,omitempty"`
+	Username     string `json:"username"`
+	Action       string `json:"action"`
+	Target       string `json:"target"`
+	IP           string `json:"ip"`
+	Result       string `json:"result"`
+	Reason       string `json:"reason,omitempty"`
+	CreatedAt    string `json:"createdAt"`
 }
 
 // LogSettings 定义日志留存和登录失败锁定策略。
@@ -387,6 +390,7 @@ CREATE TABLE IF NOT EXISTS audit_logs (
   ip TEXT NOT NULL,
   result TEXT NOT NULL CHECK(result IN ('success', 'failure')),
   reason TEXT,
+  share_owner_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_audit_logs_user_created ON audit_logs(user_id, created_at DESC);
@@ -418,6 +422,9 @@ CREATE TABLE IF NOT EXISTS ip_failures (
 		return err
 	}
 	if err := s.migrateSharesSchema(); err != nil {
+		return err
+	}
+	if err := s.migrateAuditLogsSchema(); err != nil {
 		return err
 	}
 	return s.migrateCollectionsSchema()
@@ -470,7 +477,7 @@ CREATE INDEX IF NOT EXISTS idx_upload_collection_files_file ON upload_collection
 // migrateSharesSchema creates sharing records after any legacy files-table rebuild has finished.
 // migrateSharesSchema 在旧 files 表迁移完成后创建分享表，避免外键阻断升级。
 func (s *Store) migrateSharesSchema() error {
-	_, err := s.DB.Exec(`CREATE TABLE IF NOT EXISTS shares (
+	if _, err := s.DB.Exec(`CREATE TABLE IF NOT EXISTS shares (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
   token TEXT NOT NULL UNIQUE,
@@ -478,9 +485,38 @@ func (s *Store) migrateSharesSchema() error {
   expires_at TEXT NOT NULL,
   download_count INTEGER NOT NULL DEFAULT 0,
   max_downloads INTEGER NOT NULL DEFAULT 0,
+  revoked_at TEXT,
   created_at TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_shares_file ON shares(file_id);`)
+CREATE INDEX IF NOT EXISTS idx_shares_file ON shares(file_id);
+CREATE INDEX IF NOT EXISTS idx_shares_created_by ON shares(created_by, created_at DESC);`); err != nil {
+		return err
+	}
+	columns, err := tableColumns(s.DB, "shares")
+	if err != nil {
+		return err
+	}
+	if !columns["revoked_at"] {
+		if _, err := s.DB.Exec("ALTER TABLE shares ADD COLUMN revoked_at TEXT"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// migrateAuditLogsSchema adds share ownership to existing databases so anonymous share events can be shown to their creator.
+// migrateAuditLogsSchema 为旧数据库补充分享者归属字段，使匿名分享事件可以展示给创建者。
+func (s *Store) migrateAuditLogsSchema() error {
+	columns, err := tableColumns(s.DB, "audit_logs")
+	if err != nil {
+		return err
+	}
+	if !columns["share_owner_id"] {
+		if _, err := s.DB.Exec("ALTER TABLE audit_logs ADD COLUMN share_owner_id INTEGER REFERENCES users(id) ON DELETE SET NULL"); err != nil {
+			return err
+		}
+	}
+	_, err = s.DB.Exec("CREATE INDEX IF NOT EXISTS idx_audit_logs_share_owner_created ON audit_logs(share_owner_id, created_at DESC)")
 	return err
 }
 
@@ -1766,9 +1802,23 @@ VALUES(?, ?, ?, ?, 0, ?, ?)`, fileID, token, createdBy, expiresAt.UTC().Format(t
 // GetShareByToken returns one sharing link and maps an unknown token to ErrNotFound.
 // GetShareByToken 按 token 读取分享记录，未知 token 映射为 ErrNotFound。
 func (s *Store) GetShareByToken(ctx context.Context, token string) (Share, error) {
+	return s.getShareByToken(ctx, token, false)
+}
+
+// GetShareByTokenIncludingRevoked returns a link for audit classification, including soft-revoked records.
+// GetShareByTokenIncludingRevoked 返回包含软撤销记录的分享链接，供审计分类使用。
+func (s *Store) GetShareByTokenIncludingRevoked(ctx context.Context, token string) (Share, error) {
+	return s.getShareByToken(ctx, token, true)
+}
+
+func (s *Store) getShareByToken(ctx context.Context, token string, includeRevoked bool) (Share, error) {
+	where := "token = ?"
+	if !includeRevoked {
+		where += " AND revoked_at IS NULL"
+	}
 	var share Share
-	err := s.DB.QueryRowContext(ctx, `SELECT id, file_id, token, created_by, expires_at, download_count, max_downloads, created_at
-FROM shares WHERE token = ?`, token).Scan(&share.ID, &share.FileID, &share.Token, &share.CreatedBy, &share.ExpiresAt, &share.DownloadCount, &share.MaxDownloads, &share.CreatedAt)
+	err := s.DB.QueryRowContext(ctx, `SELECT id, file_id, token, created_by, expires_at, download_count, max_downloads, COALESCE(revoked_at, ''), created_at
+FROM shares WHERE `+where, token).Scan(&share.ID, &share.FileID, &share.Token, &share.CreatedBy, &share.ExpiresAt, &share.DownloadCount, &share.MaxDownloads, &share.RevokedAt, &share.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Share{}, ErrNotFound
 	}
@@ -1778,7 +1828,7 @@ FROM shares WHERE token = ?`, token).Scan(&share.ID, &share.FileID, &share.Token
 // ListSharesByFile lists all sharing links for a file for owner-facing management views.
 // ListSharesByFile 列出文件的全部分享链接，供文件所有者管理和展示。
 func (s *Store) ListSharesByFile(ctx context.Context, fileID int64) ([]Share, error) {
-	rows, err := s.DB.QueryContext(ctx, `SELECT id, file_id, token, created_by, expires_at, download_count, max_downloads, created_at
+	rows, err := s.DB.QueryContext(ctx, `SELECT id, file_id, token, created_by, expires_at, download_count, max_downloads, COALESCE(revoked_at, ''), created_at
 FROM shares WHERE file_id = ? ORDER BY created_at DESC, id DESC`, fileID)
 	if err != nil {
 		return nil, err
@@ -1787,7 +1837,28 @@ FROM shares WHERE file_id = ? ORDER BY created_at DESC, id DESC`, fileID)
 	shares := make([]Share, 0)
 	for rows.Next() {
 		var share Share
-		if err := rows.Scan(&share.ID, &share.FileID, &share.Token, &share.CreatedBy, &share.ExpiresAt, &share.DownloadCount, &share.MaxDownloads, &share.CreatedAt); err != nil {
+		if err := rows.Scan(&share.ID, &share.FileID, &share.Token, &share.CreatedBy, &share.ExpiresAt, &share.DownloadCount, &share.MaxDownloads, &share.RevokedAt, &share.CreatedAt); err != nil {
+			return nil, err
+		}
+		shares = append(shares, share)
+	}
+	return shares, rows.Err()
+}
+
+// ListSharesByOwner lists all links created by one user and joins the visible file name.
+// ListSharesByOwner 列出用户创建的全部分享，并 JOIN 返回可见文件名。
+func (s *Store) ListSharesByOwner(ctx context.Context, userID int64) ([]Share, error) {
+	rows, err := s.DB.QueryContext(ctx, `SELECT s.id, s.file_id, f.name, s.token, s.created_by, s.expires_at, s.download_count, s.max_downloads, COALESCE(s.revoked_at, ''), s.created_at
+FROM shares s JOIN files f ON f.id = s.file_id
+WHERE s.created_by = ? ORDER BY s.created_at DESC, s.id DESC`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	shares := make([]Share, 0)
+	for rows.Next() {
+		var share Share
+		if err := rows.Scan(&share.ID, &share.FileID, &share.FileName, &share.Token, &share.CreatedBy, &share.ExpiresAt, &share.DownloadCount, &share.MaxDownloads, &share.RevokedAt, &share.CreatedAt); err != nil {
 			return nil, err
 		}
 		shares = append(shares, share)
@@ -1798,11 +1869,69 @@ FROM shares WHERE file_id = ? ORDER BY created_at DESC, id DESC`, fileID)
 // DeleteSharesByFile revokes every sharing link for a file and returns the number removed.
 // DeleteSharesByFile 撤销文件的全部分享链接并返回删除条数。
 func (s *Store) DeleteSharesByFile(ctx context.Context, fileID int64) (int64, error) {
-	result, err := s.DB.ExecContext(ctx, "DELETE FROM shares WHERE file_id = ?", fileID)
+	result, err := s.DB.ExecContext(ctx, "UPDATE shares SET revoked_at = ? WHERE file_id = ? AND revoked_at IS NULL", time.Now().UTC().Format(time.RFC3339), fileID)
 	if err != nil {
 		return 0, err
 	}
 	return result.RowsAffected()
+}
+
+// UpdateShareExpiry extends a link without allowing its expiry to move backwards.
+// UpdateShareExpiry 延长分享有效期，并保证新时间不会缩短原有效期。
+func (s *Store) UpdateShareExpiry(ctx context.Context, token string, newExpiresAt time.Time, ownerID int64) error {
+	value := newExpiresAt.UTC().Format(time.RFC3339)
+	result, err := s.DB.ExecContext(ctx, `UPDATE shares SET expires_at = CASE WHEN expires_at > ? THEN expires_at ELSE ? END
+WHERE token = ? AND created_by = ? AND revoked_at IS NULL`, value, value, token, ownerID)
+	if err != nil {
+		return err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if count != 1 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// UpdateShareMaxDownloads raises a link limit atomically and rejects decreases.
+// UpdateShareMaxDownloads 原子提高分享次数上限，并拒绝降低上限。
+func (s *Store) UpdateShareMaxDownloads(ctx context.Context, token string, newMax int, ownerID int64) error {
+	result, err := s.DB.ExecContext(ctx, `UPDATE shares SET max_downloads = ?
+WHERE token = ? AND created_by = ? AND revoked_at IS NULL AND max_downloads > 0 AND (? = 0 OR ? > max_downloads)`, newMax, token, ownerID, newMax, newMax)
+	if err != nil {
+		return err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if count != 1 {
+		current, lookupErr := s.GetShareByTokenIncludingRevoked(ctx, token)
+		if lookupErr != nil || current.CreatedBy != ownerID || current.RevokedAt != "" {
+			return ErrNotFound
+		}
+		return ErrConflict
+	}
+	return nil
+}
+
+// DeleteShareByToken soft-revokes one owner-scoped link and preserves its audit history.
+// DeleteShareByToken 软撤销单条归属分享，并保留其审计历史。
+func (s *Store) DeleteShareByToken(ctx context.Context, token string, ownerID int64) error {
+	result, err := s.DB.ExecContext(ctx, "UPDATE shares SET revoked_at = ? WHERE token = ? AND created_by = ? AND revoked_at IS NULL", time.Now().UTC().Format(time.RFC3339), token, ownerID)
+	if err != nil {
+		return err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if count != 1 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // IncrementShareDownloads atomically consumes one available download slot.
@@ -1810,7 +1939,7 @@ func (s *Store) DeleteSharesByFile(ctx context.Context, fileID int64) (int64, er
 func (s *Store) IncrementShareDownloads(ctx context.Context, token string, maxDownloads int) (bool, error) {
 	_ = maxDownloads
 	result, err := s.DB.ExecContext(ctx, `UPDATE shares SET download_count = download_count + 1
-WHERE token = ? AND expires_at > ? AND (max_downloads = 0 OR download_count < max_downloads)`, token, time.Now().UTC().Format(time.RFC3339))
+WHERE token = ? AND revoked_at IS NULL AND expires_at > ? AND (max_downloads = 0 OR download_count < max_downloads)`, token, time.Now().UTC().Format(time.RFC3339))
 	if err != nil {
 		return false, err
 	}
@@ -2419,7 +2548,7 @@ func (s *Store) Stats(ctx context.Context) (map[string]int64, error) {
 		"users":          "SELECT COUNT(id) FROM users",
 		"files":          "SELECT COUNT(id) FROM files WHERE status = 'ready'",
 		"bytes":          "SELECT COALESCE(SUM(size), 0) FROM files WHERE status = 'ready'",
-		"shares":         "SELECT COUNT(id) FROM shares WHERE expires_at > ?",
+		"shares":         "SELECT COUNT(id) FROM shares WHERE revoked_at IS NULL AND expires_at > ?",
 		"shareDownloads": "SELECT COALESCE(SUM(download_count), 0) FROM shares",
 	}
 	for key, query := range queries {
@@ -2560,6 +2689,12 @@ func normalizeThemeColor(value string) string {
 }
 
 func (s *Store) AddAuditLog(ctx context.Context, userID *int64, username, action, target, ip, result, reason string) error {
+	return s.AddAuditLogWithShareOwner(ctx, userID, nil, username, action, target, ip, result, reason)
+}
+
+// AddAuditLogWithShareOwner records an audit event and links anonymous share activity to its creator.
+// AddAuditLogWithShareOwner 写入审计事件，并将匿名分享活动关联到分享创建者。
+func (s *Store) AddAuditLogWithShareOwner(ctx context.Context, userID, shareOwnerID *int64, username, action, target, ip, result, reason string) error {
 	// AddAuditLog 在写入新记录前按留存天数惰性清理旧记录，并与写入保持同一事务。
 	// AddAuditLog lazily prunes old records by retention days before inserting, in the same transaction.
 	settings, err := s.GetLogSettings(ctx)
@@ -2576,7 +2711,7 @@ func (s *Store) AddAuditLog(ctx context.Context, userID *int64, username, action
 		return err
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	if _, err := tx.ExecContext(ctx, "INSERT INTO audit_logs(user_id, username, action, target, ip, result, reason, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?)", userID, username, action, target, ip, result, nullableString(reason), now); err != nil {
+	if _, err := tx.ExecContext(ctx, "INSERT INTO audit_logs(user_id, share_owner_id, username, action, target, ip, result, reason, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)", userID, shareOwnerID, username, action, target, ip, result, nullableString(reason), now); err != nil {
 		tx.Rollback()
 		return err
 	}
@@ -2589,8 +2724,8 @@ func (s *Store) ListAuditLogs(ctx context.Context, userID *int64, action, result
 	where := []string{"1 = 1"}
 	args := []any{}
 	if userID != nil {
-		where = append(where, "user_id = ?")
-		args = append(args, *userID)
+		where = append(where, "(user_id = ? OR share_owner_id = ?)")
+		args = append(args, *userID, *userID)
 	}
 	if action != "" {
 		where = append(where, "action = ?")
@@ -2612,7 +2747,7 @@ func (s *Store) ListAuditLogs(ctx context.Context, userID *int64, action, result
 	}
 	queryArgs := append([]any{}, args...)
 	queryArgs = append(queryArgs, pageSize, (page-1)*pageSize)
-	rows, err := s.DB.QueryContext(ctx, "SELECT id, user_id, username, action, target, ip, result, COALESCE(reason, ''), created_at FROM audit_logs WHERE "+condition+" ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?", queryArgs...)
+	rows, err := s.DB.QueryContext(ctx, "SELECT id, user_id, share_owner_id, username, action, target, ip, result, COALESCE(reason, ''), created_at FROM audit_logs WHERE "+condition+" ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?", queryArgs...)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -2620,7 +2755,33 @@ func (s *Store) ListAuditLogs(ctx context.Context, userID *int64, action, result
 	logs := make([]AuditLog, 0)
 	for rows.Next() {
 		var entry AuditLog
-		if err := rows.Scan(&entry.ID, &entry.UserID, &entry.Username, &entry.Action, &entry.Target, &entry.IP, &entry.Result, &entry.Reason, &entry.CreatedAt); err != nil {
+		if err := rows.Scan(&entry.ID, &entry.UserID, &entry.ShareOwnerID, &entry.Username, &entry.Action, &entry.Target, &entry.IP, &entry.Result, &entry.Reason, &entry.CreatedAt); err != nil {
+			return nil, 0, err
+		}
+		logs = append(logs, entry)
+	}
+	return logs, total, rows.Err()
+}
+
+// ListShareAuditLogs returns download activity for an owner-scoped share token.
+// ListShareAuditLogs 返回归属分享 token 的下载活动。
+func (s *Store) ListShareAuditLogs(ctx context.Context, token string, ownerID int64, page, pageSize int) ([]AuditLog, int, error) {
+	args := []any{token, ownerID}
+	condition := "action = 'share_download' AND target = ? AND share_owner_id = ?"
+	var total int
+	if err := s.DB.QueryRowContext(ctx, "SELECT COUNT(id) FROM audit_logs WHERE "+condition, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	queryArgs := append(args, pageSize, (page-1)*pageSize)
+	rows, err := s.DB.QueryContext(ctx, "SELECT id, user_id, share_owner_id, username, action, target, ip, result, COALESCE(reason, ''), created_at FROM audit_logs WHERE "+condition+" ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?", queryArgs...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	logs := make([]AuditLog, 0)
+	for rows.Next() {
+		var entry AuditLog
+		if err := rows.Scan(&entry.ID, &entry.UserID, &entry.ShareOwnerID, &entry.Username, &entry.Action, &entry.Target, &entry.IP, &entry.Result, &entry.Reason, &entry.CreatedAt); err != nil {
 			return nil, 0, err
 		}
 		logs = append(logs, entry)
@@ -2635,8 +2796,8 @@ func (s *Store) ListUsedActions(ctx context.Context, userID int64, admin bool) (
 	query := "SELECT action FROM audit_logs"
 	args := []any{}
 	if !admin {
-		query += " WHERE user_id = ?"
-		args = append(args, userID)
+		query += " WHERE (user_id = ? OR share_owner_id = ?)"
+		args = append(args, userID, userID)
 	}
 	query += " GROUP BY action ORDER BY MAX(id) DESC"
 	rows, err := s.DB.QueryContext(ctx, query, args...)

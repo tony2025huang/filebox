@@ -147,6 +147,14 @@ type shareRequest struct {
 	MaxDownloads   int `json:"maxDownloads"`
 }
 
+type shareExtendRequest struct {
+	ExpiresInHours int `json:"expiresInHours"`
+}
+
+type shareIncreaseRequest struct {
+	MaxDownloads int `json:"maxDownloads"`
+}
+
 type registerRequest struct {
 	Username string `json:"username"`
 	Password string `json:"password"`
@@ -268,9 +276,16 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/files/progress/stream", s.requireAuth(s.uploadProgressStream))
 	mux.HandleFunc("GET /api/files/{id}/preview", s.requireAuth(s.preview))
 	mux.HandleFunc("POST /api/files/{id}/share", s.requireAuth(s.createShare))
+	mux.HandleFunc("GET /api/files/{id}/shares", s.requireAuth(s.listFileShares))
 	mux.HandleFunc("DELETE /api/files/{id}/shares", s.requireAuth(s.deleteShares))
+	mux.HandleFunc("GET /api/shares", s.requireAuth(s.listShares))
+	mux.HandleFunc("GET /api/shares/{token}", s.requireAuth(s.getManagedShare))
 	mux.HandleFunc("GET /api/files/shared/{token}/meta", s.shareMeta)
 	mux.HandleFunc("GET /api/files/shared/{token}/download", s.shareDownload)
+	mux.HandleFunc("GET /api/shares/{token}/logs", s.requireAuth(s.shareLogs))
+	mux.HandleFunc("PUT /api/shares/{token}/extend", s.requireAuth(s.extendShare))
+	mux.HandleFunc("PUT /api/shares/{token}/increase", s.requireAuth(s.increaseShare))
+	mux.HandleFunc("DELETE /api/shares/{token}", s.requireAuth(s.deleteShare))
 	mux.HandleFunc("POST /api/collections", s.requireAuth(s.createCollection))
 	mux.HandleFunc("GET /api/collections", s.requireAuth(s.listCollections))
 	mux.HandleFunc("GET /api/collections/{id}", s.requireAuth(s.getCollection))
@@ -2211,17 +2226,90 @@ func (s *Server) createShare(w http.ResponseWriter, r *http.Request) {
 	writeError(w, http.StatusInternalServerError, "创建分享链接失败")
 }
 
-// shareMeta exposes only public file and sharing metadata for anonymous viewers.
-// shareMeta 向匿名访问者仅公开文件和分享元数据。
-func (s *Server) shareMeta(w http.ResponseWriter, r *http.Request) {
-	token := r.PathValue("token")
-	target := token
-	result, reason := "failure", "share_not_found"
-	defer func() {
-		s.serviceEvent(r, "share_view", "anonymous", "target=%s result=%s reason=%s", target, result, reason)
-		s.recordAudit(r, nil, "anonymous", "share_view", target, result, reason)
-	}()
-	share, err := s.store.GetShareByToken(r.Context(), token)
+// shareStatus reports the owner-facing state without changing the persisted share record.
+// shareStatus 返回管理端状态，不修改持久化的分享记录。
+func shareStatus(share store.Share) (string, int64) {
+	if share.RevokedAt != "" {
+		return "revoked", 0
+	}
+	deadline, err := time.Parse(time.RFC3339, share.ExpiresAt)
+	if err != nil || !time.Now().UTC().Before(deadline) {
+		return "expired", 0
+	}
+	if share.MaxDownloads > 0 && share.DownloadCount >= int64(share.MaxDownloads) {
+		return "limit_reached", int64(time.Until(deadline).Seconds())
+	}
+	return "active", int64(time.Until(deadline).Seconds())
+}
+
+func managedShareData(share store.Share) map[string]any {
+	status, remaining := shareStatus(share)
+	return map[string]any{
+		"id": share.ID, "fileId": share.FileID, "fileName": share.FileName, "token": share.Token, "url": "/" + share.Token,
+		"createdBy": share.CreatedBy, "expiresAt": share.ExpiresAt, "downloadCount": share.DownloadCount,
+		"maxDownloads": share.MaxDownloads, "revokedAt": share.RevokedAt, "createdAt": share.CreatedAt,
+		"status": status, "remainingSeconds": remaining,
+	}
+}
+
+// listShares lists every share created by the current user for the management screen.
+// listShares 列出当前用户创建的全部分享，供管理页面使用。
+func (s *Server) listShares(w http.ResponseWriter, r *http.Request) {
+	user := currentUser(r.Context())
+	shares, err := s.store.ListSharesByOwner(r.Context(), user.ID)
+	if err != nil {
+		log.Printf("list shares: %v", err)
+		writeError(w, http.StatusInternalServerError, "获取分享列表失败")
+		return
+	}
+	items := make([]map[string]any, 0, len(shares))
+	for _, share := range shares {
+		items = append(items, managedShareData(share))
+	}
+	writeData(w, http.StatusOK, "获取成功", map[string]any{"items": items})
+}
+
+// listFileShares lists links attached to one owned file and keeps cross-user access at 404.
+// listFileShares 列出单个归属文件的分享，并将跨用户访问统一隐藏为 404。
+func (s *Server) listFileShares(w http.ResponseWriter, r *http.Request) {
+	user := currentUser(r.Context())
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "文件不存在")
+		return
+	}
+	file, err := s.store.FindFile(r.Context(), id)
+	if err != nil || file.Status != "ready" || (file.UserID != user.ID && user.Role != "admin") {
+		writeError(w, http.StatusNotFound, "文件不存在")
+		return
+	}
+	shares, err := s.store.ListSharesByFile(r.Context(), id)
+	if err != nil {
+		log.Printf("list file shares: %v", err)
+		writeError(w, http.StatusInternalServerError, "获取分享列表失败")
+		return
+	}
+	items := make([]map[string]any, 0, len(shares))
+	for _, share := range shares {
+		share.FileName = file.Name
+		items = append(items, managedShareData(share))
+	}
+	writeData(w, http.StatusOK, "获取成功", map[string]any{"items": items})
+}
+
+func (s *Server) managedShare(r *http.Request) (store.Share, store.User, error) {
+	user := currentUser(r.Context())
+	share, err := s.store.GetShareByTokenIncludingRevoked(r.Context(), r.PathValue("token"))
+	if err != nil || (share.CreatedBy != user.ID && user.Role != "admin") {
+		return store.Share{}, user, store.ErrNotFound
+	}
+	return share, user, nil
+}
+
+// getManagedShare returns owner/admin-only usage details for one share.
+// getManagedShare 返回仅创建者/管理员可见的单条分享使用情况。
+func (s *Server) getManagedShare(w http.ResponseWriter, r *http.Request) {
+	share, _, err := s.managedShare(r)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "分享不存在")
 		return
@@ -2231,7 +2319,153 @@ func (s *Server) shareMeta(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "分享不存在")
 		return
 	}
-	target = file.Name
+	share.FileName = file.Name
+	writeData(w, http.StatusOK, "获取成功", managedShareData(share))
+}
+
+// shareLogs returns only download events belonging to one owner/admin-visible share.
+// shareLogs 仅返回归属该分享的下载事件，创建者和管理员可见。
+func (s *Server) shareLogs(w http.ResponseWriter, r *http.Request) {
+	share, _, err := s.managedShare(r)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "分享不存在")
+		return
+	}
+	page, pageSize := pagination(r)
+	logs, total, err := s.store.ListShareAuditLogs(r.Context(), share.Token, share.CreatedBy, page, pageSize)
+	if err != nil {
+		log.Printf("list share logs: %v", err)
+		writeError(w, http.StatusInternalServerError, "获取分享日志失败")
+		return
+	}
+	writeData(w, http.StatusOK, "获取成功", map[string]any{"items": logs, "page": page, "pageSize": pageSize, "total": total})
+}
+
+// extendShare replaces the expiry with now+hours, while the store preserves a later old deadline.
+// extendShare 将有效期设置为当前时间加小时数，存储层会保留更晚的原截止时间。
+func (s *Server) extendShare(w http.ResponseWriter, r *http.Request) {
+	share, user, err := s.managedShare(r)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "分享不存在")
+		return
+	}
+	if s.rejectReadOnly(w, r, user, "share", share.Token) {
+		return
+	}
+	var input shareExtendRequest
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	if input.ExpiresInHours < 1 || input.ExpiresInHours > 87600 {
+		writeError(w, http.StatusBadRequest, "分享有效期无效")
+		return
+	}
+	if err := s.store.UpdateShareExpiry(r.Context(), share.Token, time.Now().UTC().Add(time.Duration(input.ExpiresInHours)*time.Hour), share.CreatedBy); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "分享不存在")
+		} else {
+			log.Printf("extend share: %v", err)
+			writeError(w, http.StatusInternalServerError, "延期分享失败")
+		}
+		return
+	}
+	updated, _ := s.store.GetShareByTokenIncludingRevoked(r.Context(), share.Token)
+	if file, fileErr := s.store.FindFile(r.Context(), share.FileID); fileErr == nil {
+		updated.FileName = file.Name
+	}
+	s.recordAudit(r, &user.ID, user.Username, "share_extend", share.Token, "success", "extend")
+	writeData(w, http.StatusOK, "分享有效期已更新", managedShareData(updated))
+}
+
+// increaseShare raises the download allowance, including the finite-to-unlimited transition.
+// increaseShare 提高下载次数上限，并支持从有限次数提升为不限次数。
+func (s *Server) increaseShare(w http.ResponseWriter, r *http.Request) {
+	share, user, err := s.managedShare(r)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "分享不存在")
+		return
+	}
+	if s.rejectReadOnly(w, r, user, "share", share.Token) {
+		return
+	}
+	var input shareIncreaseRequest
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	if input.MaxDownloads < 0 || input.MaxDownloads > 100000 || share.MaxDownloads == 0 || (input.MaxDownloads != 0 && input.MaxDownloads <= share.MaxDownloads) {
+		writeError(w, http.StatusBadRequest, "分享次数限制无效")
+		return
+	}
+	if err := s.store.UpdateShareMaxDownloads(r.Context(), share.Token, input.MaxDownloads, share.CreatedBy); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "分享不存在")
+		} else if errors.Is(err, store.ErrConflict) {
+			writeError(w, http.StatusBadRequest, "分享次数限制无效")
+		} else {
+			log.Printf("increase share: %v", err)
+			writeError(w, http.StatusInternalServerError, "增加分享次数失败")
+		}
+		return
+	}
+	updated, _ := s.store.GetShareByTokenIncludingRevoked(r.Context(), share.Token)
+	if file, fileErr := s.store.FindFile(r.Context(), share.FileID); fileErr == nil {
+		updated.FileName = file.Name
+	}
+	s.recordAudit(r, &user.ID, user.Username, "share_increase", share.Token, "success", "increase")
+	writeData(w, http.StatusOK, "分享次数已更新", managedShareData(updated))
+}
+
+// deleteShare soft-revokes one share while retaining it for later audit classification.
+// deleteShare 软撤销单条分享，并保留记录以便后续审计分类。
+func (s *Server) deleteShare(w http.ResponseWriter, r *http.Request) {
+	share, user, err := s.managedShare(r)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "分享不存在")
+		return
+	}
+	if s.rejectReadOnly(w, r, user, "share", share.Token) {
+		return
+	}
+	if err := s.store.DeleteShareByToken(r.Context(), share.Token, share.CreatedBy); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "分享不存在")
+		} else {
+			log.Printf("revoke share: %v", err)
+			writeError(w, http.StatusInternalServerError, "撤销分享失败")
+		}
+		return
+	}
+	s.recordAudit(r, &user.ID, user.Username, "share_revoke", share.Token, "success", "revoke")
+	writeData(w, http.StatusOK, "分享已撤销", map[string]any{"token": share.Token})
+}
+
+// shareMeta exposes only public file and sharing metadata for anonymous viewers.
+// shareMeta 向匿名访问者仅公开文件和分享元数据。
+func (s *Server) shareMeta(w http.ResponseWriter, r *http.Request) {
+	token := r.PathValue("token")
+	target := token
+	var shareOwnerID *int64
+	result, reason := "failure", "share_not_found"
+	defer func() {
+		s.serviceEvent(r, "share_view", "anonymous", "target=%s result=%s reason=%s", target, result, reason)
+		s.recordShareAudit(r, nil, shareOwnerID, "anonymous", "share_view", target, result, reason)
+	}()
+	share, err := s.store.GetShareByToken(r.Context(), token)
+	if err != nil {
+		if revoked, revokedErr := s.store.GetShareByTokenIncludingRevoked(r.Context(), token); revokedErr == nil && revoked.RevokedAt != "" {
+			shareOwnerID = &revoked.CreatedBy
+			reason = "share_revoked"
+		}
+		writeError(w, http.StatusNotFound, "分享不存在")
+		return
+	}
+	shareOwnerID = &share.CreatedBy
+	file, err := s.store.FindFile(r.Context(), share.FileID)
+	if err != nil || file.Status != "ready" {
+		reason = "share_denied"
+		writeError(w, http.StatusNotFound, "分享不存在")
+		return
+	}
 	if !shareActive(share.ExpiresAt) {
 		reason = "share_expired"
 		writeError(w, http.StatusNotFound, "分享链接已过期")
@@ -2256,22 +2490,30 @@ func (s *Server) shareMeta(w http.ResponseWriter, r *http.Request) {
 func (s *Server) shareDownload(w http.ResponseWriter, r *http.Request) {
 	token := r.PathValue("token")
 	target := token
+	var shareOwnerID *int64
 	result, reason := "failure", "share_not_found"
 	defer func() {
 		s.serviceEvent(r, "share_download", "anonymous", "target=%s result=%s reason=%s", target, result, reason)
-		s.recordAudit(r, nil, "anonymous", "share_download", target, result, reason)
+		s.recordShareAudit(r, nil, shareOwnerID, "anonymous", "share_download", target, result, reason)
 	}()
 	share, err := s.store.GetShareByToken(r.Context(), token)
 	if err != nil {
+		if revoked, revokedErr := s.store.GetShareByTokenIncludingRevoked(r.Context(), token); revokedErr == nil && revoked.RevokedAt != "" {
+			shareOwnerID = &revoked.CreatedBy
+			reason = "share_revoked"
+			writeError(w, http.StatusForbidden, "分享已撤销")
+			return
+		}
 		writeError(w, http.StatusNotFound, "分享不存在")
 		return
 	}
+	shareOwnerID = &share.CreatedBy
 	file, err := s.store.FindFile(r.Context(), share.FileID)
 	if err != nil || file.Status != "ready" {
+		reason = "share_denied"
 		writeError(w, http.StatusNotFound, "分享不存在")
 		return
 	}
-	target = file.Name
 	if !shareActive(share.ExpiresAt) {
 		reason = "share_expired"
 		writeError(w, http.StatusForbidden, "分享链接已过期")
@@ -2284,8 +2526,26 @@ func (s *Server) shareDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !allowed {
-		reason = "share_limit"
-		writeErrorData(w, http.StatusForbidden, "分享次数已用完", map[string]string{"code": "SHARE_DOWNLOAD_LIMIT"})
+		current, currentErr := s.store.GetShareByTokenIncludingRevoked(r.Context(), token)
+		switch {
+		case currentErr == nil && current.RevokedAt != "":
+			reason = "share_revoked"
+		case currentErr == nil && !shareActive(current.ExpiresAt):
+			reason = "share_expired"
+		case currentErr == nil && current.MaxDownloads > 0 && current.DownloadCount >= int64(current.MaxDownloads):
+			reason = "share_limit"
+		default:
+			reason = "share_denied"
+		}
+		if reason == "share_limit" {
+			writeErrorData(w, http.StatusForbidden, "分享次数已用完", map[string]string{"code": "SHARE_DOWNLOAD_LIMIT"})
+		} else if reason == "share_expired" {
+			writeError(w, http.StatusForbidden, "分享链接已过期")
+		} else if reason == "share_revoked" {
+			writeError(w, http.StatusForbidden, "分享已撤销")
+		} else {
+			writeError(w, http.StatusForbidden, "分享下载被拒绝")
+		}
 		return
 	}
 	handle, err := os.Open(filepath.Join(s.config.DataDir, file.StoragePath))
@@ -3041,6 +3301,7 @@ func (s *Server) logActions(w http.ResponseWriter, r *http.Request) {
 	// (deduplicated by recency), so regular users are not offered filters they never triggered.
 	all := []string{
 		"login", "register", "upload", "upload_init", "upload_chunk", "download", "delete", "share", "share_view", "share_download",
+		"share_extend", "share_increase", "share_revoke",
 		"settings_update", "brand_update", "language_update", "password_change", "password_reset",
 		"user_create", "user_update", "user_disabled", "totp_update", "ip_acl_update",
 		"folder_create", "folder_list", "folder_rename", "folder_delete", "collection", "upload_collect", "upload_collect_fail",
@@ -3191,6 +3452,14 @@ func (s *Server) recordAudit(r *http.Request, userID *int64, username, action, t
 	// recordAudit centralizes source-IP and outcome recording; the store lazily prunes records by retention settings.
 	if err := s.store.AddAuditLog(r.Context(), userID, username, action, target, s.requestIP(r), result, reason); err != nil {
 		log.Printf("write audit log: %v", err)
+	}
+}
+
+// recordShareAudit adds creator ownership to anonymous share events without exposing it in the request identity.
+// recordShareAudit 为匿名分享事件记录创建者归属，但不伪造请求用户身份。
+func (s *Server) recordShareAudit(r *http.Request, userID, shareOwnerID *int64, username, action, target, result, reason string) {
+	if err := s.store.AddAuditLogWithShareOwner(r.Context(), userID, shareOwnerID, username, action, target, s.requestIP(r), result, reason); err != nil {
+		log.Printf("write share audit log: %v", err)
 	}
 }
 

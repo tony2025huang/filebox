@@ -563,6 +563,10 @@ func TestSharingLifecycleAndAtomicDownloadLimit(t *testing.T) {
 	if limited.Code != http.StatusForbidden {
 		t.Fatalf("limited share download status = %d", limited.Code)
 	}
+	var limitReason string
+	if err := db.DB.QueryRow("SELECT reason FROM audit_logs WHERE action = 'share_download' AND target = ? ORDER BY id DESC LIMIT 1", shareToken).Scan(&limitReason); err != nil || limitReason != "share_limit" {
+		t.Fatalf("limited audit reason = %q, %v", limitReason, err)
+	}
 	stats := testJSONRequest(t, handler, http.MethodGet, "/api/admin/stats", token, "")
 	if stats.Code != http.StatusOK {
 		t.Fatalf("stats status = %d", stats.Code)
@@ -582,6 +586,10 @@ func TestSharingLifecycleAndAtomicDownloadLimit(t *testing.T) {
 	if expiredDownload.Code != http.StatusForbidden {
 		t.Fatalf("expired share download status = %d", expiredDownload.Code)
 	}
+	var expiredReason string
+	if err := db.DB.QueryRow("SELECT reason FROM audit_logs WHERE action = 'share_download' AND target = ? ORDER BY id DESC LIMIT 1", shareToken).Scan(&expiredReason); err != nil || expiredReason != "share_expired" {
+		t.Fatalf("expired audit reason = %q, %v", expiredReason, err)
+	}
 	revoked := testJSONRequest(t, handler, http.MethodDelete, "/api/files/"+strconv.FormatInt(id, 10)+"/shares", token, "")
 	if revoked.Code != http.StatusOK || responseData(t, revoked)["removed"] != float64(1) {
 		t.Fatalf("revoke share = %d: %s", revoked.Code, revoked.Body.String())
@@ -589,6 +597,67 @@ func TestSharingLifecycleAndAtomicDownloadLimit(t *testing.T) {
 	missing := testJSONRequest(t, handler, http.MethodGet, "/api/files/shared/"+shareToken+"/meta", "", "")
 	if missing.Code != http.StatusNotFound {
 		t.Fatalf("revoked share meta status = %d", missing.Code)
+	}
+}
+
+func TestShareManagementAndOwnerDownloadLogs(t *testing.T) {
+	db, handler := newTestServer(t)
+	token := testAdminToken(t, handler)
+	file := uploadTestFile(t, handler, token, "managed-share.txt", "text/plain", []byte("managed share"))
+	id := int64(file["id"].(float64))
+	created := testJSONRequest(t, handler, http.MethodPost, "/api/files/"+strconv.FormatInt(id, 10)+"/share", token, `{"expiresInHours":1,"maxDownloads":1}`)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create managed share = %d: %s", created.Code, created.Body.String())
+	}
+	shareToken := responseData(t, created)["token"].(string)
+	list := testJSONRequest(t, handler, http.MethodGet, "/api/shares", token, "")
+	if list.Code != http.StatusOK {
+		t.Fatalf("list shares = %d: %s", list.Code, list.Body.String())
+	}
+	items := responseData(t, list)["items"].([]any)
+	if len(items) != 1 || items[0].(map[string]any)["fileName"] != "managed-share.txt" || items[0].(map[string]any)["status"] != "active" {
+		t.Fatalf("share list = %#v", items)
+	}
+	detail := testJSONRequest(t, handler, http.MethodGet, "/api/shares/"+shareToken, token, "")
+	if detail.Code != http.StatusOK || responseData(t, detail)["downloadCount"] != float64(0) {
+		t.Fatalf("share detail = %d: %s", detail.Code, detail.Body.String())
+	}
+	extend := testJSONRequest(t, handler, http.MethodPut, "/api/shares/"+shareToken+"/extend", token, `{"expiresInHours":48}`)
+	if extend.Code != http.StatusOK || responseData(t, extend)["fileName"] != "managed-share.txt" {
+		t.Fatalf("extend share = %d: %s", extend.Code, extend.Body.String())
+	}
+	increase := testJSONRequest(t, handler, http.MethodPut, "/api/shares/"+shareToken+"/increase", token, `{"maxDownloads":2}`)
+	if increase.Code != http.StatusOK || responseData(t, increase)["maxDownloads"] != float64(2) {
+		t.Fatalf("increase share = %d: %s", increase.Code, increase.Body.String())
+	}
+	if down := testBinaryRequest(t, handler, http.MethodGet, "/api/files/shared/"+shareToken+"/download", "", nil); down.Code != http.StatusOK {
+		t.Fatalf("managed share download = %d: %s", down.Code, down.Body.String())
+	}
+	logs := testJSONRequest(t, handler, http.MethodGet, "/api/shares/"+shareToken+"/logs", token, "")
+	if logs.Code != http.StatusOK {
+		t.Fatalf("share logs = %d: %s", logs.Code, logs.Body.String())
+	}
+	logItems := responseData(t, logs)["items"].([]any)
+	if len(logItems) != 1 || logItems[0].(map[string]any)["result"] != "success" || logItems[0].(map[string]any)["shareOwnerId"] != float64(1) {
+		t.Fatalf("share logs = %#v", logItems)
+	}
+	revoked := testJSONRequest(t, handler, http.MethodDelete, "/api/shares/"+shareToken, token, "")
+	if revoked.Code != http.StatusOK {
+		t.Fatalf("single revoke = %d: %s", revoked.Code, revoked.Body.String())
+	}
+	if meta := testJSONRequest(t, handler, http.MethodGet, "/api/files/shared/"+shareToken+"/meta", "", ""); meta.Code != http.StatusNotFound {
+		t.Fatalf("revoked meta = %d: %s", meta.Code, meta.Body.String())
+	}
+	if down := testBinaryRequest(t, handler, http.MethodGet, "/api/files/shared/"+shareToken+"/download", "", nil); down.Code != http.StatusForbidden {
+		t.Fatalf("revoked download = %d: %s", down.Code, down.Body.String())
+	}
+	var revokedReason string
+	if err := db.DB.QueryRow("SELECT reason FROM audit_logs WHERE action = 'share_download' AND target = ? ORDER BY id DESC LIMIT 1", shareToken).Scan(&revokedReason); err != nil || revokedReason != "share_revoked" {
+		t.Fatalf("revoked audit reason = %q, %v", revokedReason, err)
+	}
+	ownerLogs := testJSONRequest(t, handler, http.MethodGet, "/api/logs?action=share_download", token, "")
+	if ownerLogs.Code != http.StatusOK || responseData(t, ownerLogs)["total"] != float64(2) {
+		t.Fatalf("owner share logs = %d: %s", ownerLogs.Code, ownerLogs.Body.String())
 	}
 }
 

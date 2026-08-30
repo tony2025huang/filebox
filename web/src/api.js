@@ -20,6 +20,7 @@ const settingsMessageKeys = {
 }
 
 const codeKeys = { DISK_FULL: 'error.diskFull', PASSWORD_CHANGE_REQUIRED: 'error.passwordChangeRequired', REGISTER_DISABLED: 'error.registerDisabled', FILE_TOO_LARGE: 'error.fileTooLarge', SHARE_DOWNLOAD_LIMIT: 'error.shareLimit', BATCH_DELETE_EMPTY: 'error.batchDeleteEmpty', INVALID_FILE_ID: 'error.invalidFileId', INVALID_READ_ONLY_WINDOW: 'readOnly.invalidWindow', READ_ONLY: 'readOnly.error', COLLECTION_LIMIT: 'collection.limitReached', COLLECTION_EXPIRED: 'collection.expired', COLLECTION_REVOKED: 'collection.revoked', COLLECTION_FILE_TOO_LARGE: 'collection.fileTooLarge', QUOTA_EXCEEDED: 'error.quotaExceeded' }
+const shareMessageKeys = { '分享已撤销': 'error.shareRevoked', '分享下载被拒绝': 'error.shareDenied', '获取分享列表失败': 'error.shareListFailed', '获取分享日志失败': 'error.shareLogsFailed', '延期分享失败': 'error.shareExtendFailed', '增加分享次数失败': 'error.shareIncreaseFailed' }
 
 // computeFileSHA256 computes the client checksum and reports progress for the upload row.
 // computeFileSHA256 计算客户端 SHA-256，并向上传项报告校验进度。
@@ -79,6 +80,7 @@ export function localizeError(error = {}) {
     return t('error.fileTooLargeDetail', { max: formatErrorBytes(max) })
   }
   if (code && codeKeys[code]) return t(codeKeys[code])
+  if (error.backendMessage && shareMessageKeys[error.backendMessage]) return t(shareMessageKeys[error.backendMessage])
   if (error.backendMessage && settingsMessageKeys[error.backendMessage]) return t(settingsMessageKeys[error.backendMessage])
   if (error.backendMessage && messageKeys[error.backendMessage]) return t(messageKeys[error.backendMessage])
   if (error.message && messageKeys[error.message]) return t(messageKeys[error.message])

@@ -6,6 +6,7 @@ import LogsView from './views/LogsView.vue'
 import ChangePasswordView from './views/ChangePasswordView.vue'
 import ShareView from './views/ShareView.vue'
 import UploadView from './views/UploadView.vue'
+import SharesView from './views/SharesView.vue'
 
 const router = createRouter({
   history: createWebHistory(),
@@ -14,6 +15,7 @@ const router = createRouter({
     { path: '/change-password', component: ChangePasswordView, meta: { titleKey: 'page.changePassword' } },
     { path: '/', component: FilesView, meta: { titleKey: 'page.files' } },
     { path: '/logs', component: LogsView, meta: { titleKey: 'page.logs' } },
+    { path: '/shares', component: SharesView, meta: { titleKey: 'page.shares' } },
     { path: '/admin', component: AdminView, meta: { admin: true, titleKey: 'page.admin' } },
     { path: '/u/:token', component: UploadView, meta: { public: true, uploadCollection: true, titleKey: 'collection.upload' } },
     { path: '/:token', component: ShareView, meta: { public: true, share: true, titleKey: 'share.heading' } },
