@@ -10,7 +10,7 @@ const messageKeys = {
   '不能删除当前管理员': 'error.cannotDeleteSelf', '文件校验值不匹配': 'error.checksumMismatch', '文件名包含非法字符，禁止上传': 'error.invalidFilename',
   '注册功能未开放': 'error.registerDisabled', '分享链接已过期': 'error.shareExpired', '分享次数已用完': 'error.shareLimit', '分享不存在': 'error.shareNotFound',
   '分片大小必须在 2MB-8MB 之间': 'error.invalidChunkSize', '目录无效': 'error.invalidDir', '上传限速无效': 'error.invalidRateLimit',
-  '分享有效期无效': 'error.invalidShareHours', '分享次数限制无效': 'error.invalidShareMax'
+  '分享有效期无效': 'error.invalidShareHours', '分享次数限制无效': 'error.invalidShareMax', '同步任务参数无效': 'sync.invalid', '目标系统参数无效': 'sync.invalid'
 }
 
 const settingsMessageKeys = {
@@ -19,7 +19,7 @@ const settingsMessageKeys = {
   '密码复杂度无效': 'error.invalidPasswordComplexity', 'IP 锁定窗口无效': 'error.invalidIPLockWindow', 'IP 锁定阈值无效': 'error.invalidIPLockThreshold', 'IP 解锁时长无效': 'error.invalidIPUnlockMinutes'
 }
 
-const codeKeys = { DISK_FULL: 'error.diskFull', PASSWORD_CHANGE_REQUIRED: 'error.passwordChangeRequired', REGISTER_DISABLED: 'error.registerDisabled', FILE_TOO_LARGE: 'error.fileTooLarge', SHARE_DOWNLOAD_LIMIT: 'error.shareLimit', BATCH_DELETE_EMPTY: 'error.batchDeleteEmpty', INVALID_FILE_ID: 'error.invalidFileId', INVALID_READ_ONLY_WINDOW: 'readOnly.invalidWindow', READ_ONLY: 'readOnly.error', COLLECTION_LIMIT: 'collection.limitReached', COLLECTION_EXPIRED: 'collection.expired', COLLECTION_REVOKED: 'collection.revoked', COLLECTION_FILE_TOO_LARGE: 'collection.fileTooLarge', QUOTA_EXCEEDED: 'error.quotaExceeded' }
+const codeKeys = { DISK_FULL: 'error.diskFull', PASSWORD_CHANGE_REQUIRED: 'error.passwordChangeRequired', REGISTER_DISABLED: 'error.registerDisabled', FILE_TOO_LARGE: 'error.fileTooLarge', SHARE_DOWNLOAD_LIMIT: 'error.shareLimit', BATCH_DELETE_EMPTY: 'error.batchDeleteEmpty', INVALID_FILE_ID: 'error.invalidFileId', INVALID_READ_ONLY_WINDOW: 'readOnly.invalidWindow', READ_ONLY: 'readOnly.error', COLLECTION_LIMIT: 'collection.limitReached', COLLECTION_EXPIRED: 'collection.expired', COLLECTION_REVOKED: 'collection.revoked', COLLECTION_FILE_TOO_LARGE: 'collection.fileTooLarge', QUOTA_EXCEEDED: 'error.quotaExceeded', SYNC_TASK_RUNNING: 'sync.confirmRunning' }
 const shareMessageKeys = { '分享已撤销': 'error.shareRevoked', '分享下载被拒绝': 'error.shareDenied', '获取分享列表失败': 'error.shareListFailed', '获取分享日志失败': 'error.shareLogsFailed', '延期分享失败': 'error.shareExtendFailed', '增加分享次数失败': 'error.shareIncreaseFailed' }
 
 // computeFileSHA256 computes the client checksum and reports progress for the upload row.
@@ -79,12 +79,13 @@ export function localizeError(error = {}) {
     const max = Number(error.data?.maxFileSize) || 0
     return t('error.fileTooLargeDetail', { max: formatErrorBytes(max) })
   }
+  if (code === 'SYNC_SYSTEM_REFERENCED') return t('sync.referenced', { count: Number(error.data?.references) || 0 })
   if (code && codeKeys[code]) return t(codeKeys[code])
   if (error.backendMessage && shareMessageKeys[error.backendMessage]) return t(shareMessageKeys[error.backendMessage])
   if (error.backendMessage && settingsMessageKeys[error.backendMessage]) return t(settingsMessageKeys[error.backendMessage])
   if (error.backendMessage && messageKeys[error.backendMessage]) return t(messageKeys[error.backendMessage])
   if (error.message && messageKeys[error.message]) return t(messageKeys[error.message])
-  const statusKeys = { 401: 'error.authRequired', 403: 'error.adminRequired', 409: 'error.conflict', 413: 'error.uploadFailed', 503: 'error.diskFull' }
+  const statusKeys = { 401: 'error.authRequired', 403: 'error.adminRequired', 409: 'error.conflict', 413: 'error.uploadFailed', 502: 'sync.networkError', 503: 'error.diskFull' }
   if (statusKeys[error.status]) return t(statusKeys[error.status])
   return error.backendMessage || error.message || t('error.requestFailed')
 }

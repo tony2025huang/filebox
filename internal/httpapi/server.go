@@ -68,6 +68,8 @@ type Server struct {
 	store       *store.Store
 	config      Config
 	rateLimiter rateLimiter
+	syncMu      sync.Mutex
+	syncLocks   map[int64]*sync.Mutex
 }
 
 // rateLimiter keeps one token bucket per authenticated user and evicts idle buckets.
@@ -245,7 +247,7 @@ func NewServer(db *store.Store, config Config) *Server {
 	if config.JWTExpiry <= 0 {
 		config.JWTExpiry = 7 * 24 * time.Hour
 	}
-	return &Server{store: db, config: config, rateLimiter: rateLimiter{buckets: make(map[int64]*rate.Limiter), lastSeen: make(map[int64]time.Time), publicBuckets: make(map[string]*rate.Limiter), publicLastSeen: make(map[string]time.Time)}}
+	return &Server{store: db, config: config, rateLimiter: rateLimiter{buckets: make(map[int64]*rate.Limiter), lastSeen: make(map[int64]time.Time), publicBuckets: make(map[string]*rate.Limiter), publicLastSeen: make(map[string]time.Time)}, syncLocks: make(map[int64]*sync.Mutex)}
 }
 
 func (s *Server) Handler() http.Handler {
@@ -308,6 +310,19 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/files/{id}", s.requireAuth(s.deleteFile))
 	mux.HandleFunc("GET /api/logs", s.requireAuth(s.listLogs))
 	mux.HandleFunc("GET /api/logs/actions", s.requireAuth(s.logActions))
+	mux.HandleFunc("GET /api/sync/systems", s.requireAuth(s.listSyncSystems))
+	mux.HandleFunc("POST /api/sync/systems", s.requireAuth(s.createSyncSystem))
+	mux.HandleFunc("PUT /api/sync/systems/{id}", s.requireAuth(s.updateSyncSystem))
+	mux.HandleFunc("DELETE /api/sync/systems/{id}", s.requireAuth(s.deleteSyncSystem))
+	mux.HandleFunc("GET /api/sync/systems/{id}/browse", s.requireAuth(s.browseSyncSystem))
+	mux.HandleFunc("POST /api/sync/systems/{id}/mkdir", s.requireAuth(s.mkdirSyncSystem))
+	mux.HandleFunc("GET /api/sync/tasks", s.requireAuth(s.listSyncTasks))
+	mux.HandleFunc("POST /api/sync/tasks", s.requireAuth(s.createSyncTask))
+	mux.HandleFunc("GET /api/sync/tasks/{id}", s.requireAuth(s.getSyncTask))
+	mux.HandleFunc("PUT /api/sync/tasks/{id}", s.requireAuth(s.updateSyncTask))
+	mux.HandleFunc("DELETE /api/sync/tasks/{id}", s.requireAuth(s.deleteSyncTask))
+	mux.HandleFunc("POST /api/sync/tasks/{id}/run", s.requireAuth(s.runSyncTaskNow))
+	mux.HandleFunc("GET /api/sync/tasks/{id}/logs", s.requireAuth(s.listSyncTaskLogs))
 
 	mux.HandleFunc("GET /api/admin/users", s.requireAdmin(s.listUsers))
 	mux.HandleFunc("POST /api/admin/users", s.requireAdmin(s.createUser))

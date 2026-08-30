@@ -170,6 +170,7 @@ func runServe(args []string) error {
 	// Background cleanup: hourly, remove abandoned upload tasks older than 24 hours and their temp chunk directories.
 	cleanupContext, stopCleanup := context.WithCancel(context.Background())
 	cleanupDone := make(chan struct{})
+	server.StartSyncScheduler(cleanupContext)
 	defer func() {
 		stopCleanup()
 		<-cleanupDone
@@ -181,6 +182,11 @@ func runServe(args []string) error {
 		for {
 			select {
 			case <-ticker.C:
+				if settings, settingsErr := db.GetLogSettings(cleanupContext); settingsErr == nil {
+					if _, pruneErr := db.PruneSyncLogs(cleanupContext, settings.LogRetentionDays); pruneErr != nil && !errors.Is(cleanupContext.Err(), context.Canceled) {
+						logger.Event("cleanup", "operator=system ip=- command=prune-sync-logs result=failure reason=%s", pruneErr.Error())
+					}
+				}
 				expired, err := db.ListExpiredUploadTasks(cleanupContext, 24*time.Hour)
 				if err != nil {
 					if errors.Is(cleanupContext.Err(), context.Canceled) {
