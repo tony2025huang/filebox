@@ -1,6 +1,15 @@
 # Requirement Change Log
 
-## 2026-08-30 - 功能 5（批量分享 + 详细下载进度）
+## 2026-08-30 - v012 批次 G（功能 11：同步功能 filebox↔sftp）
+
+- **目标系统（remote_systems）**：独立配置（名称/主机/端口/用户名/密码或密钥含 passphrase），凭据 AES-GCM 加密存储（密钥派生自 JWTSecret）；CRUD；被任务引用时拒绝删除；`/systems/{id}/browse` 远端目录浏览、`/mkdir` 建目录（复用已存凭据）。
+- **同步任务（sync_tasks）**：direction push/pull、remote_system_id、源/目标路径、conflict_policy（overwrite/skip/rename）、schedule_type（once/periodic）+ cron 5 段、enabled、last_run/last_result；CRUD；`/tasks/{id}/run` 立即执行（同任务互斥防并发重叠）；越权 404。
+- **执行引擎**：push = FileBox 文件遍历 → SFTP 自动建目录层级上传；pull = SFTP 递归下载 → FileBox 自动建目录、计入属主配额；每文件进度写入 sync_logs.detail。
+- **调度器**：后台 goroutine 每分钟扫描 enabled+periodic 任务（robfig/cron 匹配）自动触发；重启恢复；`PruneSyncLogs` 按 LogRetentionDays（默认 30 天）清理。
+- **前端**：SyncView 新页面（任务列表/新建编辑弹窗/目标系统管理/详情日志）、SFTP 目录浏览、cron 输入+常用预设；i18n 三语 631 键。
+- 验证：go test/vet/build 全绿；**DSH 在 Linux 真实环境完成端到端验证**——密码/密钥/密钥+passphrase 认证、push（自动建目录）、pull（子目录保留+入库）、cron 周期自动触发（整分钟）、冲突 skip/overwrite、越权 404、凭据加密；本地 regress 26/26、batchC 17/17 无回归。提交 `d1c5b0c`。
+
+## 2026-08-30 - v012 批次 F（功能 5：批量分享 + 下载详细进度）
 
 - **批量分享**：新增 `POST /api/files/batch-share`，一次校验整批归属后为每个文件创建独立链接，统一应用有效期/下载次数参数；审计动作 `batch_share`，结果同步出现在分享管理页。
 - **详细下载进度**：单文件和批量 ZIP 下载都由前端按响应流逐块读取，传输抽屉显示已传输字节、总字节、百分比和 B/KB/MB/GB 每秒速率，并支持 `AbortController` 取消；批量 ZIP 响应补充 `Content-Length`。
