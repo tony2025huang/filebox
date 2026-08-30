@@ -1,5 +1,12 @@
 # Requirement Change Log
 
+## 2026-08-30 - v012 批次 B（功能 3/4/10：创建用户安全项 + 品牌布局 + XFF 开关）
+
+- **功能 3（创建用户直接设置 TOTP/IP 白名单）**：`POST /api/admin/users` 请求体新增 `totpEnabled`/`reenroll`/`ipAclEnabled`/`ipWhitelist`——TOTP 启用时生成一次性 secret（enabled=true 且响应含 `totpSecret` 供管理员转交；仅 reenroll 时生成 secret 但 enabled=false，用户下次登录重绑），IP ACL 创建即应用（`normalizeWhitelist` 校验）；前端创建用户弹窗新增「安全设置」区块，提交带新字段，TOTP 启用时展示 secret。后端回归测试覆盖（`TestCreateUserSecuritySettings`）。
+- **功能 4（品牌设置布局优化）**：品牌页签「界面主色」取消独占一行，改为紧凑两列网格（主色与 ICP/版权同排），整体布局更紧凑；i18n 无新增键。
+- **功能 10（公网 XFF 信任开关，默认关）**：settings 新增 `trustProxy`（默认 false，migrate 自动补默认值）；仅当开关开启**且**请求直连 IP 落在 `--trusted-proxies` 白名单内时，`requestIP` 才解析 `X-Forwarded-For`（从右向左取第一个非可信 IP）；AdminView「系统设置」页签新增「信任 X-Forwarded-For」复选框；`TestRequestIPRequiresTrustProxySetting` 单测。
+- 批次 B 验证：go test/vet/build 全绿；18081 回归套件（regress 26/26、transfer 19/19、share 24/24）无回归；提交 `58910e9`。
+
 ## 2026-08-30 - v012 补充批次（问题 8 补强 + 优化项 + Linux 部署验证）
 
 - **问题 8（拖拽补强）**：`/api/brand` 公开返回 `maxFileSize`；`queueFiles` 前置校验——超过单文件大小上限的文件跳过并提示（「N 个文件超过单文件大小上限 M，已跳过」），批量 >50 文件时确认提示（「共 N 个文件，确定全部上传吗？」）；多文件/多目录拖拽（webkitGetAsEntry 递归）原有能力保留。

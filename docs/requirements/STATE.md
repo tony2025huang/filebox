@@ -1,6 +1,6 @@
 # FileBox Requirement State
 
-Updated: 2026-08-29 (Stage 2 delivered as v0.2.0)
+Updated: 2026-08-30 (v012 批次 B：功能 3/4/10 已交付；功能 6 设计已确认待开发)
 
 | Requirement | State | Notes |
 |---|---|---|
@@ -60,3 +60,7 @@ Updated: 2026-08-29 (Stage 2 delivered as v0.2.0)
 | Upload failure logging (v011 feedback) | done | `upload_init` and `upload_chunk` record audit rows and service events on every rejection with granular reasons (invalid_name/too_large/conflict/disk_full/quota_exceeded/…); visible in the admin log page and server.err.log. Failed uploads stay in the transfer drawer with a retry/dismiss action. |
 | Quota error details (v011 feedback) | done | Quota rejection returns `QUOTA_EXCEEDED` with usedBytes/quotaBytes/fileSize; oversized files return `413 FILE_TOO_LARGE` with maxFileSize; the UI shows a formatted shortfall message and the single-file limit instead of the misleading generic error. |
 | Overall transfer rate (v011 feedback) | done | The transfer drawer shows the combined upload rate (B/KB/MB/GB per s) sampled every second and smoothed over 3 points; each upload tracks `loadedBytes`; the panel hides and the timer is cleaned up when no transfer is active or the component unmounts. |
+| Create user with TOTP/IP allowlist directly (v012 功能3) | done | `POST /api/admin/users` accepts `totpEnabled`/`reenroll`/`ipAclEnabled`/`ipWhitelist`; one-time TOTP secret returned in the response; create-user modal gains a security section. |
+| Brand layout: theme color not alone on a line (v012 功能4) | done | Theme color moved into the compact two-column brand grid instead of occupying its own row. |
+| Public-deployment XFF trust toggle, default off (v012 功能10) | done | `settings.trustProxy` (default false) gates `X-Forwarded-For` parsing behind `--trusted-proxies`; admin system tab checkbox. |
+| External-user upload collection links (v012 功能6) | designed | Design confirmed by user (all logged-in users can create; files land under creator's `uploads/<token>/`; limits = expiry + upload count + per-file size; route `/u/:token`; optional remark field labeled 备注). Awaiting codex implementation. |
