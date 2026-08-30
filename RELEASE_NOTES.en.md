@@ -4,6 +4,32 @@ Stage 2 release notes
 
 [中文](RELEASE_NOTES.md)
 
+## v0.1.1 (v011) release notes
+
+v011 is the validation-feedback fix release built after v0.1.0 (Stage 1) and delivered alongside Stage 2 in the **same single binary** (`filebox-v011.exe` / `filebox-windows-amd64.exe`). It covers all 20 items of the local validation feedback list (authoritative record: `docs/validation-feedback-v011.md`).
+
+### Fixes
+
+- **Concurrent same-name upload stall (item 18)**: conflict prompts are now a queue with a 60s cancel timeout, so dropping several same-name files resolves them one by one without leaving uploads stuck in "preparing"; renamed duplicates expose numbered user-visible names (`xx.txt`, `xx (1).txt`, `xx (2).txt`).
+- **Upload failure logging (item 18)**: every rejection of upload initialization and chunk upload records an audit row and service event with a granular reason (invalid name / too large / conflict / disk full / quota exceeded / task not found / chunk size mismatch / etc.), filterable in the admin log page; failed/cancelled uploads stay in the transfer drawer with the reason and retry/dismiss actions.
+- **Quota message improvements (item 19)**: quota rejection returns `QUOTA_EXCEEDED` with used/quota/file-size details and a formatted shortfall message; files over `--max-file-size` clearly state the single-file limit instead of the misleading generic name/size error.
+- **Folder rename soft-delete conflict fix (D-S2-3)**: renaming a folder whose path rewrite collides with a soft-deleted row no longer returns 500; covered by a unit test.
+
+### Enhancements
+
+- **User-defined folders (item 6)**: automatic year/month storage layer removed; create/rename/delete Chinese-or-English folders (non-empty protected), breadcrumbs, upload into the current folder; `migrate-v010-paths` migrates legacy data in one command.
+- **Transfer drawer + overall rate (items 4/20)**: a topbar "Transfers" button opens a drawer (uploads/downloads, streaming download progress); the drawer header shows the combined upload rate in real time (adaptive units, moving-average smoothing).
+- **Tabbed admin console (items 14/15/16)**: left tab navigation (overview/users/security/branding/locks/system) with `?tab=` deep-links; create/edit user modal dialogs; log retention moved to the System tab.
+- **Log experience (items 10/11)**: fixed green/red result colors independent of the theme; 20+ "system configuration" actions filterable with trilingual labels.
+- **Account security (item 12)**: "Change password" entry in topbars; admins can "Require TOTP re-enrollment".
+- **Branding & delivery (items 13/17/7/8/9)**: copyright text setting and a footer brand block (title + description, then copyright/ICP/police); topbar logo navigates home; single-binary delivery (`make release`/`release.ps1` with SHA256 checksums); README deployment guide (Windows/Linux).
+- **Login & upload UX (items 1/2/3/5)**: default-account hint removed; create-user modal with inline errors; directory drag-and-drop shows a clear message instead of a network error; MD5 column toggle (persisted).
+
+### Data and deployment
+
+- Storage layout changed (year/month layer removed): run `filebox-v011.exe admin migrate-v010-paths --data=<data-dir>` before upgrading (backs up the DB, migrates physical folders and path records, idempotent).
+- Binary named `filebox-v011.exe` to avoid confusion with the intermediate `filebox.exe`; user data in `--data` (branding/files/logs/lock settings) is fully preserved after migration.
+
 ## Overview
 
 `v0.2.0` is the FileBox Stage 2 release. Built on v0.1.0 (Stage 1), it completes the transfer and collaboration features while remaining a single-binary deployment for Windows/Linux.

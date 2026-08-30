@@ -1,51 +1,45 @@
 # Requirement Change Log
 
-## 2026-08-30 - v011 验证反馈批次（问题 20，并入阶段二 v0.2.0 交付）
+## 2026-08-30 - v011 验证反馈修复批次（问题 1-20，随 v0.2.0 交付）
 
-- **问题 20（整体传输速率）**：传输侧边栏顶部新增「整体速率」面板（`Gauge` 图标 + 文案），显示所有进行中上传的合计速率；每个上传项维护 `loadedBytes`（= `file.size × progress / 100`，校验/秒传/完成各阶段同步），1 秒定时器采样总量差值计算速率，3 点滑动平均平滑；单位自适应（B/KB/MB/GB per s）；无进行中上传时速率归零并隐藏面板；定时器随组件卸载清理（`onBeforeUnmount`）。纯前端改动，i18n 三语言文案（`files.overallRate`）。
+### 批次 1（问题 1-6：用户实测反馈 + 自定义目录）
 
-## 2026-08-30 - v011 验证反馈批次（问题 18-19，并入阶段二 v0.2.0 交付）
+- 登录页不再展示初始默认账号提示：移除 LoginView 的 `login-foot` 渲染，并删除 zh-CN/zh-TW/en 三字典中的 `login.defaultAdmin` 键（不再引用，无残留）。
+- 新建用户改为居中 modal 弹窗（复用 modal-backdrop/modal-panel 模式），错误内联显示紧邻「创建账号」按钮，提交成功刷新列表；服务端补 `user_create` 失败审计（含原因）。
+- 拖拽目录不再误报「网络连接失败」：`handleDrop` 用 `webkitGetAsEntry()` 递归识别目录条目，空目录等无效拖拽给出明确中文提示「拖拽内容不包含可上传的文件」。
+- 新增独立传输面板：顶栏「传输」按钮（带进行中数量角标）展开右侧抽屉，区分「上传」与「下载」两组；上传项保留暂停/继续/重试，下载项新增流式进度（按 Content-Length 计算百分比）。
+- 文件列表 md5 直接展示 + 开关：完整性列默认直接显示 `file.md5`（悬停 title 含完整 MD5/SHA-256）；工具栏「显示 MD5」开关持久化到 `localStorage(filebox_show_md5)`，默认显示。
+- **问题 6（用户自定义目录）**：移除自动年月目录层，存储结构改为 `data/files/<user_id>[/<自定义目录>/]<stored_name>`；新增 `folders` 表与目录 CRUD API（创建/列表/重命名级联/删除非空保护）；上传目标 = 当前目录；列表 `dir` 过滤 + 面包屑导航；用户隔离、配额按用户；`filebox admin migrate-v010-paths` 迁移旧 `yy/mm` 结构（备份 DB、物理移动、storage_path 重写、登记目录，幂等）。
 
-- **问题 18（并发同名上传卡死 + 上传失败日志）**：
-  - 前端：FilesView 冲突弹窗由单个 ref 改为**冲突队列**（`conflictQueue` 数组 + `activeConflict` 计算属性），并发多个同名文件同时 409 时依次弹出处理，每个 `askConflict` 协程最终必定 resolve；未决冲突 60 秒超时按取消处理，杜绝协程永久挂死卡「准备中」；弹窗显示「还有 N 个同名文件待处理」提示。
-  - 前端：上传失败/取消项不再 2.2 秒后静默消失——失败项保留在传输抽屉（红色状态 + 失败原因 + 重试/移除按钮，`transfer-failed`/`transfer-error-text` 样式），由用户重试或点击关闭。
-  - 后端：`uploadInit` 与 `uploadChunk` 失败分支补审计——`recordAudit("upload_init"|"upload_chunk", name, "failure", reason)` + `serviceEvent`，reason 细分（invalid_name/too_large/conflict/disk_full/quota_exceeded/task_not_found/invalid_index/rate_limited/size_mismatch/…），后台日志页（/api/logs）与 server.err.log 均可查；`logActions` 白名单补 `upload_init`/`upload_chunk`，日志页 actionLabel/reasonLabel 三语文案补齐。
-  - 附带修复：重命名（同名后缀）上传完成后用户可见 `name` 同步跟随 `stored_name`（如 `multi.txt` → `multi (1).txt`），列表/下载中多个同名文件可区分（此前仅磁盘名区分、界面显示相同原名）。
-- **问题 19（超出配额提示优化）**：
-  - 后端：store 新增 `QuotaError`（含 usedBytes/quotaBytes/fileSize），`CreateUploadTask` 配额超限时返回明细；`uploadInit` 配额拒绝响应升级为 `403 + code:"QUOTA_EXCEEDED" + usedBytes/quotaBytes/fileSize`；`max-file-size` 超限与非法名分离——独立 `413 + code:"FILE_TOO_LARGE" + maxFileSize`，文案「文件超过单文件大小上限」，不再误导为「文件名或文件大小无效」。
-  - 前端：`localizeError` 增加 `QUOTA_EXCEEDED`（格式化「配额不足：当前已用 X / 总配额 Y，文件需 Z，超出 W，请清理空间或调整配额」）与 `FILE_TOO_LARGE`（「文件超过单文件大小上限 M」）映射；i18n 三语言文案。
+### 批次 2（问题 7-9：logo 跳转 + 单文件交付 + 部署文档）
 
-## 2026-08-30 - v011 验证反馈批次（问题 14-17，并入阶段二 v0.2.0 交付）
+- **问题 7**：`BrandLogo.vue` 增加 `link` prop（RouterLink 包裹 + cursor），文件/管理/日志/分享页顶栏 logo 点击跳转首页 `/`；登录页与品牌面板预览不加。
+- **问题 8**：Makefile 新增 `release` 目标（CGO_ENABLED=0、-trimpath、-ldflags="-s -w"，Windows/Linux amd64 + SHA256SUMS）+ Windows 等价脚本 `scripts/release.ps1`；已实际执行验证（Linux 静态 ELF、校验和正确）。
+- **问题 9**：README.md/README.en.md 新增「部署指南（单文件交付）」章节（Windows/Linux 分步 + systemd + Nginx 反代 + 生产注意事项）。
 
-- **问题 14（管理后台页签化）**：AdminView 重构为左侧垂直菜单 + 右侧内容区布局（`admin-layout`/`admin-sidebar`/`admin-tab`），六个页签：概览（统计卡 + 系统默认语言）、用户管理（搜索 + 表格 + 新建）、安全设置（密码策略 + IP 锁定）、品牌设置（含版权字段）、锁定管理（IP/用户锁定）、系统设置（日志周期 + 注册开关 + 上传限速）；`?tab=` 查询参数深链，切换页签时同步 URL，刷新后保持所在页签。
-- **问题 15（用户弹窗）**：新建/编辑用户由页面内嵌面板改为居中模态框（`modal-backdrop`/`modal-panel`，遮罩点击关闭，带标题/关闭按钮/完整表单），编辑弹窗保留角色、配额、重置密码、禁用、TOTP 启用与重新绑定、IP 白名单等全部字段，保存仍走 `PUT /users/{id}` + `/totp` + `/ip-acl` 三请求。
-- **问题 16（日志周期迁移）**：LogsView 移除 logRetentionDays 设置面板（含 settings/saveSettings 脚本），日志页只保留筛选与列表；日志保存天数设置迁入 AdminView「系统设置」页签，复用既有 `PUT /api/admin/settings`（后端零改动）；同步清理三语字典中已无引用的 `logs.retention*` 键。
-- **问题 17（页脚品牌信息）**：BrandFooter 首行渲染 `brand.siteTitle`（粗体），其下小字显示 `siteDescription`，随后依次显示版权、ICP、公安备案；任一非空即渲染，全部为空则不显示。
-- **D-S2-3 修复（目录重命名 + 软删除记录冲突 500）**：目录重命名级联改写其下文件 `storage_path` 前缀时，若目标前缀下残留同名的软删除记录（先删除后重传同名文件再改目录名），`UNIQUE(files.storage_path)` 冲突导致 `PATCH /api/folders/{id}` 返回 500。修复：`RenameFolder` 在改写前清理目标前缀下的 `status='deleted'` 记录（其内容已物理删除）；另修正 `isUniqueError` 只匹配 `UNIQUE` 约束失败，避免把 `FOREIGN KEY constraint failed` 误判为同名冲突。新增单测 `TestRenameFolderClearsDeletedRows`。
+### 批次 3（问题 10-13：日志配色 + 系统配置分组 + 改密/TOTP 重绑 + 版权）
 
-## 2026-08-30 - v011 验证反馈批次（问题 10-13，并入阶段二 v0.2.0 交付）
+- **问题 10**：`.result-label.success` 固定绿色（`#1e7e34/#e8f5ec`）不随主题色；失败固定红（`#a83e2d/#fff0ed`）。
+- **问题 11**：`logActions` 扩为完整 24 项动作集；LogsView `actionLabel` 三语文案补齐；筛选下拉按「业务/系统配置」分组（optgroup）。
+- **问题 12**：顶栏「修改密码」入口（跳转 /change-password，普通用户可自助改密）；`PUT /api/admin/users/{id}/totp` 支持 `reenroll`（新 secret 且 enabled=false，用户下次登录重绑）；AdminView「要求下次重新绑定 TOTP」复选框。
+- **问题 13**：store `brand_copyright` 键 + `BrandSettings.Copyright`；`/api/brand` 返回 `copyrightText`；`PUT /api/admin/brand` 支持 `copyrightText`/`clearCopyright`；AdminView 品牌面板输入框；BrandFooter 渲染版权（空值不渲染空白页脚）；i18n 三语。
 
-- **问题 10（日志成功绿/失败红）**：`.result-label.success` 改用固定绿色（`color:#1e7e34; background:#e8f5ec`），不再跟随主题色；失败保持固定红 `#a83e2d/#fff0ed`；更换主题色后成功/失败配色不变。
-- **问题 11（日志"系统配置"类型）**：`logActions` 由 7 项硬编码扩为完整 24 项（新增 settings_update/brand_update/language_update/password_change/password_reset/user_create/user_update/user_disabled/totp_update/ip_acl_update/folder_*/file_list/admin_stats/log_list/register）；LogsView `actionLabel` 补全映射（i18n 三语），筛选下拉按「业务/系统配置」分组（optgroup）。
-- **问题 12（自助改密入口 + TOTP 重绑）**：FilesView/AdminView/LogsView 顶栏新增「修改密码」入口（跳转既有 /change-password 页，普通用户可随时自助改密；管理员重设密码强制改密原已具备）；后端 `PUT /api/admin/users/{id}/totp` 新增 `reenroll` 字段——为 true 时生成新随机 secret 且 enabled=false，用户下次登录自动进入 TOTP 扫码绑定流程（复用现有 totpSetup 分支）；AdminView 编辑面板新增「要求下次重新绑定 TOTP」复选框。
-- **问题 13（Copyright © 设置）**：store 新增 `brand_copyright` 键与 `BrandSettings.Copyright`（migrate 默认值/Get/Update/emptyBrandSettings 同步）；`/api/brand` 返回 `copyrightText`，`PUT /api/admin/brand` 支持 `copyrightText`（≤128 字）与 `clearCopyright`；前端品牌面板新增「版权信息」输入框、`BrandFooter` 按 `v-if` 渲染版权（与 ICP/公安同规则，空值不留空白）；i18n 三语（admin.copyright/admin.copyrightPlaceholder）。
+### 批次 4（问题 14-17：管理后台页签化 + 用户弹窗 + 日志周期迁移 + 页脚品牌）
 
-## 2026-08-30 - v011 验证反馈批次（问题 7/8/9，并入阶段二 v0.2.0 交付）
+- **问题 14**：AdminView 左侧竖菜单 + 右侧内容区，六页签（概览/用户管理/安全设置/品牌设置/锁定管理/系统设置）；`?tab=` 深链 + 刷新保持。
+- **问题 15**：新建/编辑用户改为居中 `modal-backdrop/modal-panel` 弹窗（遮罩点击关闭，角色/配额/重置密码/禁用/TOTP 重绑/IP 白名单字段齐全，保存仍走三请求）。
+- **问题 16**：LogsView 移除 logRetentionDays 面板；日志保存天数迁入 AdminView「系统设置」页签（复用 `PUT /api/admin/settings`，后端零改动）；清理 `logs.retention*` 残留键。
+- **问题 17**：BrandFooter 首行 `siteTitle` + 小字 `siteDescription`，随后版权/ICP/公安备案，任一非空即渲染。
+- **D-S2-3 修复（目录重命名 + 软删除记录冲突 500）**：`RenameFolder` 改写 storage_path 前清理目标前缀下 `status='deleted'` 记录；`isUniqueError` 只匹配 `UNIQUE` 约束失败（避免 FK 误判）；新增单测 `TestRenameFolderClearsDeletedRows`。
 
-- **问题 7（logo 跳转）**：`BrandLogo.vue` 增加 `link` prop（默认 false），为 true 时以 `<RouterLink to="/">` 包裹并带 cursor 样式；文件/管理/日志/分享页顶栏 logo 均加 `link`，登录页与品牌面板预览不加；点击顶栏 logo 跳转首页 `/`。
-- **问题 8（单文件交付）**：Makefile 新增 `release` 目标（`CGO_ENABLED=0` + `GOOS=windows/linux` + `GOARCH=amd64` + `-trimpath -ldflags="-s -w"`，产出 `dist/filebox-windows-amd64.exe`、`dist/filebox-linux-amd64` 与 `dist/SHA256SUMS.txt`，Windows 下用 certutil 生成校验和）；补充 Windows 等价脚本 `scripts/release.ps1`；已实际执行验证：Linux 产物为静态 ELF（`go version -m` 确认 GOOS=linux、CGO 关闭），校验和正确生成。
-- **问题 9（README 部署指南）**：README.md/README.en.md 在「配置项」前新增「部署指南（单文件交付）」章节（Windows 与 Linux 分步部署 + systemd 单元 + Nginx 反代 + 生产通用注意事项），参数与配置项表核对一致。
+### 批次 5（问题 18-19：并发冲突队列 + 上传失败日志 + 配额/超限明细）
 
-## 2026-08-30 - v011 验证反馈批次（问题 6：用户自定义目录，并入阶段二 v0.2.0 交付）
+- **问题 18**：前端冲突弹窗改**冲突队列**（数组依次弹出 + 60s 超时取消），并发同名不再互相覆盖卡「准备中」；失败/取消项保留在传输抽屉（红色状态 + 原因 + 重试/移除）；后端 `uploadInit`/`uploadChunk` 失败分支补 `recordAudit` + `serviceEvent`（reason 细分 invalid_name/too_large/conflict/disk_full/quota_exceeded/task_not_found/…），`logActions` 补 `upload_init`/`upload_chunk`；重命名后用户可见 name 跟随序号。
+- **问题 19**：store `QuotaError`（usedBytes/quotaBytes/fileSize）；配额拒绝 403 + `QUOTA_EXCEEDED` 明细；`max-file-size` 超限独立 `413 FILE_TOO_LARGE` + maxFileSize；前端 `localizeError` 映射（「配额不足：当前已用 X / 总配额 Y，文件需 Z，超出 W…」「文件超过单文件大小上限 M」）+ i18n 三语。
 
-- **移除自动年月目录层**：存储结构由 `data/files/<user_id>/<yy>/<mm>[/<dir>]` 改为 `data/files/<user_id>[/<自定义目录>/]<stored_name>`（upload-init 与 complete 兜底均去掉 `<yy>/<mm>` 拼接）；不建目录时文件直接放用户根目录。
-- **新增 folders 模型与 CRUD API**：SQLite `folders` 表（user_id 归属、parent_id 父子、name、path 唯一 `UNIQUE(user_id, path)`、created_at）；`POST/GET/PATCH/DELETE /api/folders`：创建（中英文目录名，父目录可选）、列表、重命名（事务性级联更新子目录 path 与文件 storage_path 前缀 + 物理移动磁盘目录）、删除（仅空目录，非空返回 400「目录非空，无法删除」）。
-- **上传指定父目录 + 目录记录自动补齐**：upload-init 的 `dir` 字段沿用（上传到当前浏览目录）；`EnsureFolderPath` 按 mkdir -p 语义补齐缺失目录记录，保证导航与上传一致。
-- **列表按目录过滤 + 面包屑**：`GET /api/files?dir=<path>` 返回该目录下文件；普通用户无 dir 参数仅返回根目录层文件（子目录文件只在目录视图出现，管理员无 dir 仍为全部文件）。
-- **前端文件页**：面包屑导航（根目录可点击逐层进入）、「新建文件夹」按钮与弹窗（支持中文名）、子目录行（进入/重命名/删除，删除非空有确认且后端拒绝）、上传目标 = 当前目录。
-- **冲突策略**：目录内同名文件仍走 409/覆盖/重命名；跨目录同名不冲突；配额仍按用户维度（目录内文件计入配额）。
-- **旧数据迁移（用户已确认方案 B）**：新增 `filebox admin migrate-v010-paths --data=...` 命令——迁移前备份 DB（`filebox.db.bak-v011`），将 `files/<uid>/<yy>/<mm>/*` 物理移动到 `files/<uid>/<yy>-<mm>/`（4 位年份，如 `2026-08`），事务性批量重写 `files.storage_path` 前缀，并在 folders 表登记历史目录（仅当用户存在时）；幂等（已迁移目录跳过）。
-- 修复：迁移/重命名中的 SQLite `substr` 长度统一使用 `length(?)`（字符计数），目录过滤使用 `instr` 排除子目录文件，规避中文目录名（UTF-8 多字节）导致的字节/字符计数错位。
+### 批次 6（问题 20：整体传输速率）
+
+- **问题 20**：传输侧边栏顶部「整体速率」（所有进行中上传合计）；每项维护 `loadedBytes`，1s 采样 + 3 点滑动平均；单位自适应（B/KB/MB/GB per s）；无传输隐藏；定时器随组件卸载清理；i18n 三语（`files.overallRate`）。
 
 ## 2026-08-30 - 用户实测反馈批次（并入阶段二 v0.2.0 交付）
 
