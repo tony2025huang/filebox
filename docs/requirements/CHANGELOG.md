@@ -1,5 +1,12 @@
 # Requirement Change Log
 
+## 2026-08-30 - v012 批次 D（功能 6 第一部分：系统内用户只读时段）
+
+- **功能 6 第一部分（用户只读时段）**：管理员对单个用户设置一次性只读窗口（users 表 `read_only_from`/`read_only_until` 列，migrate 自动补）；`PUT /api/admin/users/{id}/read-only` 设置/清除（起止倒置或格式非法 400 INVALID_READ_ONLY_WINDOW）；`/api/auth/me` 与管理端用户列表返回 `readOnlyFrom`/`readOnlyUntil`/`readOnly`。
+- **服务端强制**：`rejectReadOnly` 统一拦截全部写操作——uploadInit/uploadChunk/complete（含秒传与批量）、deleteFile/batch-delete、createFolder/renameFolder/deleteFolder、createShare（12 处入口），返回 403 `READ_ONLY`「当前账号处于只读时段，仅可查看和下载」，审计 reason=read_only；管理员豁免（`userReadOnlyAt` 含边界判定，非法窗口按非只读处理）。
+- **前端**：AdminView 用户编辑弹窗新增「只读时段」开始/结束时间字段（datetime-local，可清除）；FilesView `me.readOnly=true` 时禁用上传/删除/目录/分享入口并显示提示条；i18n 三语 `readOnly.*` 键。
+- 验证：go test/vet/build 全绿；DSH 实测批次 D 专属测试 8/8（设置/me 只读/全部写操作 403/查看下载正常/管理员豁免/清除恢复/起止倒置 400）+ regress 26/26、batchC 17/17 无回归。提交 `1e6a2c9`。
+
 ## 2026-08-30 - v012 批次 C（功能 6 第二部分：外部用户上传收集链接）
 
 - **功能 6（外部用户上传收集）**：需求澄清为「分享给外部用户时允许外部上传」（非系统内用户配额），设计文档 `docs/design-upload-policy.md` 拆两部分并确认。本批次实现第二部分：
