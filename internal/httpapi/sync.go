@@ -1140,6 +1140,17 @@ func (s *Server) executeSyncPush(ctx context.Context, task store.SyncTask, syste
 		result.detail = append(result.detail, "读取源文件失败: "+s.syncErrorDetail(err))
 		return result
 	}
+	sourceKind := task.SourceKind
+	if sourceKind == "" {
+		sourceKind = "directory"
+	}
+	if sourceKind == "file" && len(files) == 0 {
+		// 源为单文件且已不存在：记录失败，避免"0 files 后报成功"。
+		// A single-file source that no longer exists records a failure instead of a misleading "0 files" success.
+		result.message = "源文件不存在"
+		result.detail = append(result.detail, task.SourcePath+": 源文件已被删除或不可用")
+		return result
+	}
 	if err := client.MkdirAll(task.TargetPath); err != nil {
 		result.message = "创建远端目录失败"
 		result.detail = append(result.detail, "创建目标目录失败: "+s.syncErrorDetail(err))

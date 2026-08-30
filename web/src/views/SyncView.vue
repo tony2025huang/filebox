@@ -68,11 +68,13 @@ function syncSystemKind() { if (systemForm.kind === 'filebox') { systemForm.auth
 async function saveSystem() { saving.value = true; formError.value = ''; try { const body = { name: systemForm.name, kind: systemForm.kind || 'sftp', host: systemForm.kind === 'filebox' ? '' : systemForm.host, url: systemForm.kind === 'filebox' ? systemForm.url : '', port: Number(systemForm.port) || 22, username: systemForm.username, authType: systemForm.authType, authSecret: systemForm.authSecret, authPassphrase: systemForm.authPassphrase }; await api(systemEditing.value ? `/api/sync/systems/${systemForm.id}` : '/api/sync/systems', { method: systemEditing.value ? 'PUT' : 'POST', body: JSON.stringify(body) }); notice.value = t('sync.systemSaved'); systemModal.value = false; await loadAll() } catch (err) { formError.value = err.message } finally { saving.value = false } }
 async function deleteSystem(item) { if (!window.confirm(t('sync.confirmDeleteSystem', { name: item.name }))) return; try { await api(`/api/sync/systems/${item.id}`, { method: 'DELETE' }); notice.value = t('sync.systemDeleted'); await loadAll() } catch (err) { error.value = err.message } }
 // openPathPicker 打开路径选择器：本地 FileBox 目录用 folders/files 接口，远端按目标系统类型浏览。
+// 方向判定：push 的源与 pull 的目标是本地 FileBox；另一端是远端（SFTP 或远端 FileBox）。
 // openPathPicker opens the path picker: local FileBox dirs use folders/files APIs; remote uses the system-kind browse.
+// Side logic: push's source and pull's target are local FileBox; the other side is remote (SFTP or a remote FileBox).
 function openPathPicker(target) {
-  const localType = taskForm[`${target}Type`]
   const includeFiles = target === 'source'
-  if (localType === 'filebox') {
+  const isLocal = (target === 'source' && taskForm.direction === 'push') || (target === 'target' && taskForm.direction === 'pull')
+  if (isLocal) {
     picker.value = { target, side: 'local', path: taskForm[`${target}Path`] || '', includeFiles }
     browseLocal(picker.value.path)
     return
