@@ -102,6 +102,70 @@ Service logs are disabled by default. When enabled, they are written to the cons
 filebox --log-enabled=true --log-dir=/var/log/filebox --log-retention-days=90
 ```
 
+## Deployment guide (single-binary delivery)
+
+The deliverable is a single executable: the web frontend is embedded, SQLite is pure Go, and there are no runtime external dependencies (no Node, no separate frontend server). Copy it to the target machine and run.
+
+### Windows deployment
+
+1. Download `filebox-windows-amd64.exe` (or `bin/filebox.exe`).
+2. Run:
+
+   ```powershell
+   .\filebox.exe --addr=127.0.0.1:18080 --data=C:\filebox\data --log-enabled=true --log-dir=C:\filebox\logs
+   ```
+
+3. Open <http://127.0.0.1:18080>; change the initial `admin/admin123` password immediately after the first login.
+4. As a Windows service: `sc create filebox binPath= "\"C:\filebox\filebox.exe\" --addr=127.0.0.1:18080 --data=C:\filebox\data" start= auto`, or use NSSM (template in `deploy/README.md`).
+5. Allow the listening port through the firewall; production must set a strong random `--jwt-secret` (or `FILEBOX_JWT_SECRET`) and enable HTTPS behind an Nginx/IIS reverse proxy.
+
+### Linux deployment
+
+1. Download `filebox-linux-amd64` and make it executable:
+
+   ```bash
+   chmod +x filebox-linux-amd64
+   ```
+
+2. Run in the foreground to verify:
+
+   ```bash
+   ./filebox-linux-amd64 --addr=127.0.0.1:18080 --data=/var/lib/filebox --log-enabled=true --log-dir=/var/log/filebox
+   ```
+
+3. Configure the systemd unit `/etc/systemd/system/filebox.service`:
+
+   ```ini
+   [Unit]
+   Description=FileBox file transfer service
+   After=network.target
+
+   [Service]
+   User=filebox
+   ExecStart=/opt/filebox/filebox-linux-amd64 --addr=127.0.0.1:18080 --data=/var/lib/filebox --jwt-secret=replace-with-a-strong-random-value --log-enabled=true --log-dir=/var/log/filebox
+   Restart=on-failure
+   RestartSec=3
+
+   [Install]
+   WantedBy=multi-user.target
+   ```
+
+   ```bash
+   systemctl daemon-reload
+   systemctl enable --now filebox
+   systemctl status filebox
+   ```
+
+4. HTTPS reverse proxy (Nginx template in `deploy/README.md`); `--trusted-proxies` must match the actual proxy networks.
+
+### General production notes
+
+Use a dedicated run user, dedicated data/log directories, a strong random JWT secret, HTTPS, a `--trusted-proxies` allowlist, and regular backups of the `--data` directory.
+
+### Building the single-file deliverables
+
+`make release` (or `scripts\release.ps1` on Windows) produces `dist/filebox-windows-amd64.exe`, `dist/filebox-linux-amd64`, and `dist/SHA256SUMS.txt` (checksums) using `CGO_ENABLED=0` and `-trimpath -ldflags="-s -w"`; the binaries are statically trimmed and run without Go or Node installed.
+
 ## Configuration
 
 Each flag reads its `FILEBOX_*` environment variable as the default; an explicit command-line value takes precedence.

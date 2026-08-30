@@ -68,6 +68,11 @@ Stage 2 release notes
 - Folders are isolated per user; quotas remain user-wide (files inside folders count toward the quota).
 - Added `filebox admin migrate-v010-paths`: migrates the legacy `files/<uid>/<yy>/<mm>` layout to `files/<uid>/<yy>-<mm>` (for example `2026-08`), backs up the database before migrating, registers historical folder records, and is idempotent.
 
+### Single-binary delivery and deployment guide
+
+- The deliverable is a single executable (embedded frontend, pure-Go SQLite, zero runtime dependencies); `make release` (or `scripts\release.ps1` on Windows) produces `dist/filebox-windows-amd64.exe`, `dist/filebox-linux-amd64`, and `dist/SHA256SUMS.txt` (CGO_ENABLED=0, -trimpath, -s -w) that run without Go or Node installed.
+- README gained a "Deployment guide (single-binary delivery)" section with step-by-step Windows (download/run/firewall/sc or NSSM/HTTPS) and Linux (download/chmod/foreground/systemd unit/Nginx reverse proxy/--trusted-proxies) instructions plus general production notes.
+
 ### Stage 1 features preserved
 
 Login/logout, file CRUD, quotas, dual hashes, disk protection, conflict overwrite/rename, filename validation, audit logs, login locking, TOTP, IP allowlists, branding, multilingual UI, theme color, forced password change, maintenance CLI, service logging, and service/reverse-proxy deployment all remain available and pass regression testing.

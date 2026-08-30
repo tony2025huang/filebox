@@ -68,6 +68,11 @@
 - 用户间目录隔离；配额仍按用户维度（目录内文件计入配额）。
 - 新增 `filebox admin migrate-v010-paths` 迁移命令：将旧 `files/<uid>/<yy>/<mm>` 结构迁移为 `files/<uid>/<yy>-<mm>`（如 `2026-08`），迁移前自动备份 DB、迁移后登记历史目录记录，幂等可重复执行。
 
+### 单文件交付与部署指南
+
+- 交付物为单个可执行文件（前端已嵌入、SQLite 纯 Go、零外部运行时依赖）；`make release`（或 Windows 下 `scripts\release.ps1`）产出 `dist/filebox-windows-amd64.exe`、`dist/filebox-linux-amd64` 与 `dist/SHA256SUMS.txt`（CGO_ENABLED=0、-trimpath、-s -w 静态精简），复制即用。
+- README 新增「部署指南（单文件交付）」章节：Windows（下载/运行/防火墙/sc 或 NSSM/HTTPS）与 Linux（下载/chmod/前台运行/systemd 单元/Nginx 反代/--trusted-proxies）分步说明 + 生产通用注意事项。
+
 ### 阶段一功能保持
 
 登录/登出、文件 CRUD、配额、双哈希、磁盘保护、冲突覆盖/重命名、非法文件名校验、审计日志、登录锁定、TOTP、IP 白名单、品牌、多语言、主题色、强制改密、运维命令、服务日志、服务化部署与反代配置均保持可用，并通过回归测试。

@@ -102,6 +102,70 @@ filebox locks clear --data=./data --all
 filebox --log-enabled=true --log-dir=/var/log/filebox --log-retention-days=90
 ```
 
+## 部署指南（单文件交付）
+
+交付物为单个可执行文件：Web 前端已嵌入二进制、SQLite 为纯 Go 实现，运行时无任何外部依赖（无需 Node、无需独立前端服务器）。下载后复制到目标机器即可运行。
+
+### Windows 部署
+
+1. 下载 `filebox-windows-amd64.exe`（或 `bin/filebox.exe`）。
+2. 运行：
+
+   ```powershell
+   .\filebox.exe --addr=127.0.0.1:18080 --data=C:\filebox\data --log-enabled=true --log-dir=C:\filebox\logs
+   ```
+
+3. 浏览器打开 <http://127.0.0.1:18080>；首次登录 `admin/admin123` 后立即修改密码。
+4. 作为 Windows 服务：`sc create filebox binPath= "\"C:\filebox\filebox.exe\" --addr=127.0.0.1:18080 --data=C:\filebox\data" start= auto`，或使用 NSSM（模板见 `deploy/README.md`）。
+5. 防火墙放行监听端口；生产环境必须设置强随机 `--jwt-secret`（或 `FILEBOX_JWT_SECRET`），并经 Nginx/IIS 反向代理启用 HTTPS。
+
+### Linux 部署
+
+1. 下载 `filebox-linux-amd64`，赋予执行权限：
+
+   ```bash
+   chmod +x filebox-linux-amd64
+   ```
+
+2. 运行（前台验证）：
+
+   ```bash
+   ./filebox-linux-amd64 --addr=127.0.0.1:18080 --data=/var/lib/filebox --log-enabled=true --log-dir=/var/log/filebox
+   ```
+
+3. 配置 systemd 服务 `/etc/systemd/system/filebox.service`：
+
+   ```ini
+   [Unit]
+   Description=FileBox file transfer service
+   After=network.target
+
+   [Service]
+   User=filebox
+   ExecStart=/opt/filebox/filebox-linux-amd64 --addr=127.0.0.1:18080 --data=/var/lib/filebox --jwt-secret=请替换为强随机值 --log-enabled=true --log-dir=/var/log/filebox
+   Restart=on-failure
+   RestartSec=3
+
+   [Install]
+   WantedBy=multi-user.target
+   ```
+
+   ```bash
+   systemctl daemon-reload
+   systemctl enable --now filebox
+   systemctl status filebox
+   ```
+
+4. HTTPS 反向代理（Nginx 模板见 `deploy/README.md`）；`--trusted-proxies` 需与实际代理网段匹配。
+
+### 生产部署通用注意事项
+
+独立运行用户、专用数据/日志目录、强随机 JWT secret、HTTPS、`--trusted-proxies` 白名单、定期备份 `--data` 目录。
+
+### 单文件交付构建
+
+`make release`（或 Windows 下 `scripts\release.ps1`）产出 `dist/filebox-windows-amd64.exe`、`dist/filebox-linux-amd64` 与 `dist/SHA256SUMS.txt`（校验和）；使用 `CGO_ENABLED=0`、`-trimpath -ldflags="-s -w"` 静态精简构建，复制即用，无需安装 Go 或 Node。
+
 ## 配置项
 
 命令行 flag 从同名 `FILEBOX_*` 环境变量读取默认值；命令行显式传入的值优先。

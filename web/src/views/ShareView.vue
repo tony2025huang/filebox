@@ -1,6 +1,6 @@
 <template>
   <main class="share-shell">
-    <header class="share-topbar"><BrandLogo variant="main" compact /><LanguageSelect /></header>
+    <header class="share-topbar"><BrandLogo variant="main" compact link /><LanguageSelect /></header>
     <section class="share-content">
       <div v-if="loading" class="empty-state"><LoaderCircle :size="30" class="spin" /><span>{{ t('share.loading') }}</span></div>
       <section v-else-if="error" class="share-error"><XCircle :size="42" /><h1>{{ error }}</h1><div class="share-actions"><button class="primary-button" @click="loadMeta"><RefreshCw :size="16" /> {{ t('share.retry') }}</button><RouterLink to="/login" class="secondary-button"><ArrowLeft :size="16" /> {{ t('share.backLogin') }}</RouterLink></div></section>

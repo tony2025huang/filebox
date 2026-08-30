@@ -1,5 +1,11 @@
 # Requirement Change Log
 
+## 2026-08-30 - v011 验证反馈批次（问题 7/8/9，并入阶段二 v0.2.0 交付）
+
+- **问题 7（logo 跳转）**：`BrandLogo.vue` 增加 `link` prop（默认 false），为 true 时以 `<RouterLink to="/">` 包裹并带 cursor 样式；文件/管理/日志/分享页顶栏 logo 均加 `link`，登录页与品牌面板预览不加；点击顶栏 logo 跳转首页 `/`。
+- **问题 8（单文件交付）**：Makefile 新增 `release` 目标（`CGO_ENABLED=0` + `GOOS=windows/linux` + `GOARCH=amd64` + `-trimpath -ldflags="-s -w"`，产出 `dist/filebox-windows-amd64.exe`、`dist/filebox-linux-amd64` 与 `dist/SHA256SUMS.txt`，Windows 下用 certutil 生成校验和）；补充 Windows 等价脚本 `scripts/release.ps1`；已实际执行验证：Linux 产物为静态 ELF（`go version -m` 确认 GOOS=linux、CGO 关闭），校验和正确生成。
+- **问题 9（README 部署指南）**：README.md/README.en.md 在「配置项」前新增「部署指南（单文件交付）」章节（Windows 与 Linux 分步部署 + systemd 单元 + Nginx 反代 + 生产通用注意事项），参数与配置项表核对一致。
+
 ## 2026-08-30 - v011 验证反馈批次（问题 6：用户自定义目录，并入阶段二 v0.2.0 交付）
 
 - **移除自动年月目录层**：存储结构由 `data/files/<user_id>/<yy>/<mm>[/<dir>]` 改为 `data/files/<user_id>[/<自定义目录>/]<stored_name>`（upload-init 与 complete 兜底均去掉 `<yy>/<mm>` 拼接）；不建目录时文件直接放用户根目录。

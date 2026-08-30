@@ -1,7 +1,7 @@
 <template>
   <main class="app-shell">
     <header class="topbar">
-      <div class="topbar-brand"><BrandLogo variant="main" compact /><span class="slash">/</span><span class="section-name">{{ t('nav.files') }}</span></div>
+      <div class="topbar-brand"><BrandLogo variant="main" compact link /><span class="slash">/</span><span class="section-name">{{ t('nav.files') }}</span></div>
       <div class="topbar-actions"><span class="user-chip"><span class="avatar">{{ user.username?.slice(0, 1).toUpperCase() }}</span>{{ user.username }}</span><LanguageSelect :user="user" /><RouterLink v-if="user.role === 'admin'" to="/admin" class="icon-text-button"><Shield :size="16" /> {{ t('nav.admin') }}</RouterLink><RouterLink to="/logs" class="icon-text-button"><ScrollText :size="16" /> {{ t('nav.logs') }}</RouterLink><button class="icon-button transfer-button" :title="t('files.transfers')" @click="transfersOpen = !transfersOpen"><ArrowLeftRight :size="18" /><span v-if="activeTransferCount" class="transfer-badge">{{ activeTransferCount }}</span></button><button class="icon-button" :title="t('nav.logout')" @click="logout"><LogOut :size="18" /></button></div>
     </header>
     <section class="content-wrap">
