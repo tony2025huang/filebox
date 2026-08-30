@@ -202,6 +202,7 @@ type brandResponse struct {
 	DefaultLang     string `json:"defaultLang"`
 	ThemeColor      string `json:"themeColor"`
 	RegisterEnabled bool   `json:"registerEnabled"`
+	MaxFileSize     int64  `json:"maxFileSize"`
 }
 
 type brandAsset struct {
@@ -251,6 +252,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/files/{taskID}/complete", s.requireAuth(s.completeUpload))
 	mux.HandleFunc("GET /api/files/{id}/download", s.requireAuth(s.download))
 	mux.HandleFunc("POST /api/files/batch-download", s.requireAuth(s.batchDownload))
+	mux.HandleFunc("GET /api/files/progress/stream", s.requireAuth(s.uploadProgressStream))
 	mux.HandleFunc("GET /api/files/{id}/preview", s.requireAuth(s.preview))
 	mux.HandleFunc("POST /api/files/{id}/share", s.requireAuth(s.createShare))
 	mux.HandleFunc("DELETE /api/files/{id}/shares", s.requireAuth(s.deleteShares))
@@ -365,6 +367,7 @@ func (s *Server) publicBrand(settings store.BrandSettings) brandResponse {
 		HasLoginLogo:    s.brandAssetExists(brandAssets["login-logo"], settings.LoginLogo),
 		HasMainLogo:     s.brandAssetExists(brandAssets["main-logo"], settings.MainLogo),
 		DefaultLang:     defaultLang,
+		MaxFileSize:     s.config.MaxFileSize,
 		ThemeColor:      themeColor,
 		RegisterEnabled: registerEnabled,
 	}
@@ -1588,6 +1591,41 @@ func (s *Server) uploadStatus(w http.ResponseWriter, r *http.Request) {
 		"status":         task.Status,
 		"uploadedChunks": indices,
 	})
+}
+
+// uploadProgressStream 通过 SSE 每秒推送当前用户的进行中上传任务进度。
+// uploadProgressStream pushes live upload progress for the current user over SSE every second.
+func (s *Server) uploadProgressStream(w http.ResponseWriter, r *http.Request) {
+	user := currentUser(r.Context())
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "当前连接不支持流式推送")
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	send := func() {
+		progress, err := s.store.ListPendingTaskProgress(r.Context(), user.ID)
+		if err != nil {
+			return
+		}
+		data, _ := json.Marshal(progress)
+		fmt.Fprintf(w, "data: %s\n\n", data)
+		flusher.Flush()
+	}
+	send()
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-ticker.C:
+			send()
+		}
+	}
 }
 
 func (s *Server) checkInstantUpload(w http.ResponseWriter, r *http.Request) {

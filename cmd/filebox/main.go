@@ -166,12 +166,39 @@ func runServe(args []string) error {
 	httpServer := &http.Server{Addr: *addr, Handler: server.Handler()}
 	serverErrors := make(chan error, 1)
 	go func() { serverErrors <- httpServer.ListenAndServe() }()
+	// 后台清理：每小时清理超过 24 小时未完成的废弃上传任务及其临时分片目录。
+	// Background cleanup: hourly, remove abandoned upload tasks older than 24 hours and their temp chunk directories.
+	cleanupStop := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				expired, err := db.ListExpiredUploadTasks(context.Background(), 24*time.Hour)
+				if err != nil {
+					logger.Event("cleanup", "operator=system ip=- command=expire-uploads result=failure reason=%s", err.Error())
+					continue
+				}
+				for _, taskID := range expired {
+					_ = db.DeleteUploadTask(context.Background(), taskID)
+					_ = os.RemoveAll(filepath.Join(*dataDir, "tmp", taskID))
+				}
+				if len(expired) > 0 {
+					logger.Event("cleanup", "operator=system ip=- command=expire-uploads result=success count=%d", len(expired))
+				}
+			case <-cleanupStop:
+				return
+			}
+		}
+	}()
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(signals)
 	select {
 	case signalValue := <-signals:
 		logger.Event("shutdown", "operator=system ip=- signal=%s result=graceful", signalValue)
+		close(cleanupStop)
 		shutdownContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if err := httpServer.Shutdown(shutdownContext); err != nil {

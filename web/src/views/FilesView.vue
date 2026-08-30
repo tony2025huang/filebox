@@ -41,6 +41,7 @@ import { api, clearSession, computeFileSHA256, localizeError } from '../api'
 import BrandFooter from '../components/BrandFooter.vue'
 import BrandLogo from '../components/BrandLogo.vue'
 import LanguageSelect from '../components/LanguageSelect.vue'
+import { brand } from '../brand'
 import { currentLocale, t } from '../i18n'
 import { Archive, CheckCircle2, ChevronLeft, ChevronRight, Copy, Download, ExternalLink, Eye, File, FileArchive, FileCode, FileEdit, FileImage, FileJson, FileSpreadsheet, FileText, FileType, FileUp, FileVideo, Folder, FolderOpen, FolderPlus, FolderUp, Gauge, Image, LoaderCircle, LogOut, Music, Pause, Pencil, Play, RefreshCw, Replace, Save, ScrollText, Search, Share2, Shield, Table, Trash2, Upload, UploadCloud, Video, X, KeyRound, ArrowLeftRight } from 'lucide-vue-next'
 
@@ -147,7 +148,7 @@ function friendlyError(err) { if (err && (err.name === 'TypeError' || err.messag
 // Upload gate: at most 3 files enter checksum/init concurrently so bulk folder uploads do not
 // exhaust the browser's same-origin connection limit and fail with a misleading network error.
 let uploadInFlight = 0
-function queueFiles(list) { if (list.length) transfersOpen.value = true; list.forEach(value => { const file = value.file || value; const path = value.relPath || file.webkitRelativePath || file.name; const parts = path.split('/').filter(Boolean); const dirParts = parts.length > 1 ? parts.slice(0, -1) : []; if (dirParts.length > 1) dirParts.shift(); const base = currentDir.value ? currentDir.value + '/' : ''; const relDir = dirParts.length ? dirParts.join('/') : ''; const item = { id: `${Date.now()}-${Math.random()}-${file.name}`, file, relPath: path !== file.name ? path : '', dir: relDir ? `${base}${relDir}` : base.replace(/\/$/, ''), progress: 0, loadedBytes: 0, status: t('files.uploadPreparing'), taskId: '', uploaded: [], paused: false, chunksTotal: 0, chunkSize: 0, error: '', failed: false, canContinue: false, running: false, sha256: '', pending: new Set(), controllers: new Map(), resolve: '' }; uploads.value.push(item); runGated(item) }) }
+function queueFiles(list) { if (list.length) transfersOpen.value = true; const maxSize = brand.maxFileSize || 100 * 1024 * 1024 * 1024; const oversized = list.filter(value => (value.file || value).size > maxSize); const keep = list.filter(value => (value.file || value).size <= maxSize); if (oversized.length) { error.value = t('files.tooManyTooLarge', { count: oversized.length, max: formatBytes(maxSize) }) } if (keep.length > 50 && !window.confirm(t('files.bulkConfirm', { count: keep.length }))) return; keep.forEach(value => { const file = value.file || value; const path = value.relPath || file.webkitRelativePath || file.name; const parts = path.split('/').filter(Boolean); const dirParts = parts.length > 1 ? parts.slice(0, -1) : []; if (dirParts.length > 1) dirParts.shift(); const base = currentDir.value ? currentDir.value + '/' : ''; const relDir = dirParts.length ? dirParts.join('/') : ''; const item = { id: `${Date.now()}-${Math.random()}-${file.name}`, file, relPath: path !== file.name ? path : '', dir: relDir ? `${base}${relDir}` : base.replace(/\/$/, ''), progress: 0, loadedBytes: 0, status: t('files.uploadPreparing'), taskId: '', uploaded: [], paused: false, chunksTotal: 0, chunkSize: 0, error: '', failed: false, canContinue: false, running: false, sha256: '', pending: new Set(), controllers: new Map(), resolve: '' }; uploads.value.push(item); runGated(item) }) }
 async function runGated(item) { if (item.paused || item.failed) return; while (uploadInFlight >= 3) { if (item.paused || item.failed) return; await new Promise(resolve => setTimeout(resolve, 120)) } uploadInFlight++; try { await startUpload(item) } finally { uploadInFlight-- } }
 function wakeWorkers() { const wake = workerWake; workerWake = null; wake?.() }
 function removeQueued(item) { for (let i = chunkQueue.length - 1; i >= 0; i--) if (chunkQueue[i].item === item) chunkQueue.splice(i, 1) }
@@ -266,6 +267,27 @@ async function logout() { try { await api('/api/auth/logout', { method: 'POST' }
 function formatBytes(bytes = 0) { if (bytes < 1024) return `${bytes} B`; const units = ['KB', 'MB', 'GB', 'TB']; let value = bytes; let unit = -1; do { value /= 1024; unit++ } while (value >= 1024 && unit < units.length - 1); return `${value.toFixed(value >= 10 ? 0 : 1)} ${units[unit]}` }
 function formatDate(value) { return value ? new Date(value).toLocaleString(currentLocale.value === 'en' ? 'en-US' : currentLocale.value, { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '-' }
 function shortMime(value = '') { return value.split('/').pop()?.toUpperCase() || 'FILE' }
-onMounted(() => { loadMe(); loadFiles(); loadFolders(); rateTimer = setInterval(sampleOverallRate, 1000) })
-onBeforeUnmount(() => { if (rateTimer) clearInterval(rateTimer); uploads.value.forEach(item => item.controllers.forEach(controller => controller.abort())); if (previewUrl.value) URL.revokeObjectURL(previewUrl.value) })
+// progressSource 通过 SSE 订阅服务端推送的进行中上传进度，用于刷新后恢复/多标签同步。
+// progressSource subscribes to server-pushed upload progress for refresh recovery and multi-tab sync.
+let progressSource = null
+function connectProgressStream() {
+  try { progressSource?.close() } catch { /* ignore */ }
+  if (!localStorage.getItem('filebox_token')) return
+  progressSource = new EventSource('/api/files/progress/stream')
+  progressSource.onmessage = event => {
+    try {
+      const tasks = JSON.parse(event.data)
+      for (const task of tasks) {
+        const item = uploads.value.find(entry => entry.taskId === task.taskId)
+        if (!item) continue
+        const ratio = task.totalChunks ? task.uploaded / task.totalChunks : 0
+        if (ratio > 0) { item.progress = Math.max(item.progress, Math.round(25 + ratio * 75)); syncLoadedBytes(item) }
+      }
+    } catch { /* ignore malformed events */ }
+  }
+  progressSource.onerror = () => { try { progressSource?.close() } catch { /* ignore */ } progressSource = null }
+}
+function closeProgressStream() { try { progressSource?.close() } catch { /* ignore */ } progressSource = null }
+onMounted(() => { loadMe(); loadFiles(); loadFolders(); rateTimer = setInterval(sampleOverallRate, 1000); connectProgressStream() })
+onBeforeUnmount(() => { if (rateTimer) clearInterval(rateTimer); closeProgressStream(); uploads.value.forEach(item => item.controllers.forEach(controller => controller.abort())); if (previewUrl.value) URL.revokeObjectURL(previewUrl.value) })
 </script>

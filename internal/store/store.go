@@ -1273,11 +1273,80 @@ func (s *Store) ListChunks(ctx context.Context, taskID string) (map[int]ChunkInf
 	return chunks, rows.Err()
 }
 
+// TaskProgress 描述一个进行中上传任务的实时进度，供服务端推送（SSE）。
+// TaskProgress describes the live progress of an in-flight upload task for server push (SSE).
+type TaskProgress struct {
+	TaskID       string `json:"taskId"`
+	Name         string `json:"name"`
+	TotalChunks  int    `json:"totalChunks"`
+	Uploaded     int    `json:"uploaded"`
+	Status       string `json:"status"`
+}
+
+// ListPendingTaskProgress 返回指定用户的所有 pending 上传任务及其已上传分片数。
+// ListPendingTaskProgress returns all pending upload tasks for a user with their uploaded-chunk counts.
+func (s *Store) ListPendingTaskProgress(ctx context.Context, userID int64) ([]TaskProgress, error) {
+	rows, err := s.DB.QueryContext(ctx, `SELECT t.id, t.name, t.total_chunks, t.status,
+		(SELECT COUNT(*) FROM chunks c WHERE c.task_id = t.id) AS uploaded
+		FROM upload_tasks t WHERE t.user_id = ? AND t.status = 'pending' ORDER BY t.created_at`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	progress := make([]TaskProgress, 0, 8)
+	for rows.Next() {
+		var p TaskProgress
+		if err := rows.Scan(&p.TaskID, &p.Name, &p.TotalChunks, &p.Status, &p.Uploaded); err != nil {
+			return nil, err
+		}
+		progress = append(progress, p)
+	}
+	return progress, rows.Err()
+}
+
 // DeleteChunks 清理已完成任务的分片元数据。
 // DeleteChunks removes chunk metadata after a task has completed successfully.
 func (s *Store) DeleteChunks(ctx context.Context, taskID string) error {
 	_, err := s.DB.ExecContext(ctx, "DELETE FROM chunks WHERE task_id = ?", taskID)
 	return err
+}
+
+// ListExpiredUploadTasks 返回超过 maxAge 仍未完成的上传任务 ID，供后台清理。
+// ListExpiredUploadTasks returns upload task IDs still pending beyond maxAge for background cleanup.
+func (s *Store) ListExpiredUploadTasks(ctx context.Context, maxAge time.Duration) ([]string, error) {
+	cutoff := time.Now().UTC().Add(-maxAge).Format(time.RFC3339)
+	rows, err := s.DB.QueryContext(ctx, "SELECT id FROM upload_tasks WHERE status = 'pending' AND created_at < ?", cutoff)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ids := make([]string, 0, 8)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// DeleteUploadTask 删除上传任务及其分片记录（磁盘 tmp 目录由调用方清理）。
+// DeleteUploadTask removes an upload task and its chunk records (the caller removes the tmp directory).
+func (s *Store) DeleteUploadTask(ctx context.Context, taskID string) error {
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM chunks WHERE task_id = ?", taskID); err != nil {
+		tx.Rollback()
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM upload_tasks WHERE id = ?", taskID); err != nil {
+		tx.Rollback()
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) FindUploadConflict(ctx context.Context, userID int64, directory, storedName string) (File, error) {

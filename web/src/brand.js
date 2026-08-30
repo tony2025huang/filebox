@@ -14,7 +14,8 @@ const defaultBrand = {
   hasMainLogo: false,
   registerEnabled: false,
   defaultLang: 'zh-CN',
-  themeColor: DEFAULT_THEME_COLOR
+  themeColor: DEFAULT_THEME_COLOR,
+  maxFileSize: 100 * 1024 * 1024 * 1024
 }
 
 // brand 保存当前页面使用的公开品牌状态。
