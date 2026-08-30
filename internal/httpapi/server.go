@@ -1284,6 +1284,8 @@ func (s *Server) uploadInit(w http.ResponseWriter, r *http.Request) {
 	user := currentUser(r.Context())
 	var input uploadInitRequest
 	if !decodeJSON(w, r, &input) {
+		s.recordAudit(r, &user.ID, user.Username, "upload_init", "", "failure", "invalid_request")
+		s.serviceEvent(r, "upload_init", user.Username, "result=failure reason=invalid_request")
 		return
 	}
 	// 失败审计：upload-init 的每个拒绝分支都记录审计与服务事件，便于后台日志页与
@@ -1395,6 +1397,8 @@ func (s *Server) uploadChunk(w http.ResponseWriter, r *http.Request) {
 	taskID := r.PathValue("taskID")
 	index, err := strconv.Atoi(r.PathValue("index"))
 	if err != nil {
+		s.recordAudit(r, &user.ID, user.Username, "upload_chunk", taskID, "failure", "invalid_index")
+		s.serviceEvent(r, "upload_chunk", user.Username, "task=%s index=%s result=failure reason=invalid_index", taskID, r.PathValue("index"))
 		writeError(w, http.StatusBadRequest, "分片序号无效")
 		return
 	}
@@ -1421,6 +1425,8 @@ func (s *Server) uploadChunk(w http.ResponseWriter, r *http.Request) {
 	settings, err := s.store.GetLogSettings(r.Context())
 	if err != nil {
 		log.Printf("get upload settings: %v", err)
+		s.recordAudit(r, &user.ID, user.Username, "upload_chunk", task.Name, "failure", "settings_failed")
+		s.serviceEvent(r, "upload_chunk", user.Username, "name=%s index=%d result=failure reason=settings_failed", task.Name, index)
 		writeError(w, http.StatusInternalServerError, "读取上传设置失败")
 		return
 	}

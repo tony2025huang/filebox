@@ -34,7 +34,7 @@
 
 ### 批次 5（问题 18-19：并发冲突队列 + 上传失败日志 + 配额/超限明细）
 
-- **问题 18**：前端冲突弹窗改**冲突队列**（数组依次弹出 + 60s 超时取消），并发同名不再互相覆盖卡「准备中」；失败/取消项保留在传输抽屉（红色状态 + 原因 + 重试/移除）；后端 `uploadInit`/`uploadChunk` 失败分支补 `recordAudit` + `serviceEvent`（reason 细分 invalid_name/too_large/conflict/disk_full/quota_exceeded/task_not_found/…），`logActions` 补 `upload_init`/`upload_chunk`；重命名后用户可见 name 跟随序号。
+- **问题 18**：前端冲突弹窗改**冲突队列**（数组依次弹出 + 60s 超时取消），并发同名不再互相覆盖卡「准备中」；失败/取消项保留在传输抽屉（红色状态 + 原因 + 重试/移除）；后端 `uploadInit`/`uploadChunk` 失败分支补 `recordAudit` + `serviceEvent`（reason 细分 invalid_name/too_large/conflict/disk_full/quota_exceeded/task_not_found/invalid_index/rate_limited/size_mismatch/settings_failed/invalid_request/…，含 JSON 解码失败与分片序号解析失败等前置分支），`logActions` 补 `upload_init`/`upload_chunk`；重命名后用户可见 name 跟随序号。codex 独立复核确认全部分支覆盖。
 - **问题 19**：store `QuotaError`（usedBytes/quotaBytes/fileSize）；配额拒绝 403 + `QUOTA_EXCEEDED` 明细；`max-file-size` 超限独立 `413 FILE_TOO_LARGE` + maxFileSize；前端 `localizeError` 映射（「配额不足：当前已用 X / 总配额 Y，文件需 Z，超出 W…」「文件超过单文件大小上限 M」）+ i18n 三语。
 
 ### 批次 6（问题 20：整体传输速率）

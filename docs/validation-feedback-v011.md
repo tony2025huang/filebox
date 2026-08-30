@@ -289,7 +289,7 @@
   - 前端：上传失败/取消时页面明确显示错误状态（当前失败项 2.6s 后从 uploads 消失、卡住无提示）；配合问题 4 传输边栏展示失败原因
   - 后端：`uploadInit`（server.go L1273-1355）与 `uploadChunk` 失败分支**补审计**——`recordAudit("upload_init"|"upload_chunk", name, "failure", reason)` + `serviceEvent`，reason 细分（invalid_name/too_large/conflict/disk_full/quota_exceeded/task_not_found/…），与 `completeUpload`（L1569-1575 已有 defer 审计）格式一致 → 后台日志页（/api/logs）与 server.err.log 均可查
 - **验收**：一次拖入 3 个同名文件 → 冲突依次弹出 → 重命名后全部完成（`xx.txt`、`xx(1).txt`、`xx(2).txt`），无卡住；取消/失败时页面显示明确状态；后台日志页可见 `upload_init` 失败记录（含失败原因）
-- **已修复**：前端冲突弹窗改**冲突队列**（数组依次弹出 + 60s 超时取消，每个 askConflict 协程最终 resolve）；失败/取消项保留在传输抽屉（红色状态 + 原因 + 重试/移除）；后端 `uploadInit`/`uploadChunk` 失败分支补审计 + 服务日志（reason 细分 14 种），`logActions` 补 `upload_init`/`upload_chunk`；重命名后用户可见 name 跟随序号。验收通过（P18a-e：3 同名 rename 全完成、日志页可见 conflict 记录）。
+- **已修复**：前端冲突弹窗改**冲突队列**（数组依次弹出 + 60s 超时取消，每个 askConflict 协程最终 resolve）；失败/取消项保留在传输抽屉（红色状态 + 原因 + 重试/移除）；后端 `uploadInit`/`uploadChunk` 失败分支补审计 + 服务日志（reason 细分，含 JSON 解码失败/分片序号解析失败/读取设置失败等全部前置分支，codex 独立复核确认覆盖），`logActions` 补 `upload_init`/`upload_chunk`；重命名后用户可见 name 跟随序号。验收通过（P18a-e：3 同名 rename 全完成、日志页可见 conflict 记录）。
 
 ## 问题 19：超出配额提示优化（前后端）｜状态：已修复
 
