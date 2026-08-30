@@ -93,6 +93,10 @@ Stage 2 release notes
 - Quota rejection returns `QUOTA_EXCEEDED` with used/quota/file-size details; the UI shows "Quota exceeded: X used of Y, this file needs Z, short by W. Free up space or adjust the quota."
 - Files over `--max-file-size` return `413 FILE_TOO_LARGE` with the limit; the UI clearly says the file exceeds the single-file limit instead of the misleading generic name/size error.
 
+### Overall transfer rate (v011 feedback batch, delivered with v0.2.0)
+
+- The transfer drawer shows the combined upload rate (for example `12.5 MB/s`) across all active uploads, with adaptive units (B/KB/MB/GB per s), 1-second sampling and a 3-point moving average; the panel hides when nothing is uploading.
+
 ### Single-binary delivery and deployment guide
 
 - The deliverable is a single executable (embedded frontend, pure-Go SQLite, zero runtime dependencies); `make release` (or `scripts\release.ps1` on Windows) produces `dist/filebox-windows-amd64.exe`, `dist/filebox-linux-amd64`, and `dist/SHA256SUMS.txt` (CGO_ENABLED=0, -trimpath, -s -w) that run without Go or Node installed.

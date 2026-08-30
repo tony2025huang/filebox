@@ -22,6 +22,7 @@
     <aside class="transfers-drawer" :class="{ open: transfersOpen }" aria-label="transfers">
       <div class="transfers-header"><div><p class="eyebrow">TRANSFERS</p><h2>{{ t('files.transfers') }}</h2></div><button class="icon-button" :title="t('common.close')" @click="transfersOpen = false"><X :size="18" /></button></div>
       <div class="transfers-body">
+        <div v-if="overallRate > 0" class="overall-rate"><Gauge :size="16" /><span>{{ t('files.overallRate') }}</span><strong>{{ formatRate(overallRate) }}</strong></div>
         <h3 class="transfers-section">{{ t('files.uploads') }}<span class="transfers-count">{{ uploads.length }}</span></h3>
         <div v-if="!uploads.length" class="transfers-empty">{{ t('files.noTransfers') }}</div>
         <div v-for="item in uploads" :key="item.id" class="transfer-row" :class="{ 'transfer-failed': item.failed }"><FileUp :size="16" class="transfer-icon" /><div class="transfer-main"><div class="transfer-name"><strong :title="item.relPath || item.file.name">{{ item.relPath || item.file.name }}</strong><span :class="{ 'transfer-error-text': item.failed }">{{ item.failed ? item.error || item.status : item.status }}</span></div><div class="progress-track"><span :style="{ width: item.progress + '%' }"></span></div></div><span class="transfer-percent">{{ item.failed ? '' : item.progress + '%' }}</span><button v-if="item.paused" class="icon-button" :title="t('files.resume')" @click="resumeUpload(item)"><Play :size="15" /></button><button v-else-if="item.running" class="icon-button" :title="t('files.pause')" @click="pauseUpload(item)"><Pause :size="15" /></button><button v-if="item.canContinue || item.failed" class="icon-button" :title="t('files.retry')" @click="retryUpload(item)"><RefreshCw :size="15" /></button><button v-if="item.failed" class="icon-button" :title="t('files.dismiss')" @click="dismissUpload(item)"><X :size="15" /></button></div>
@@ -41,11 +42,42 @@ import BrandFooter from '../components/BrandFooter.vue'
 import BrandLogo from '../components/BrandLogo.vue'
 import LanguageSelect from '../components/LanguageSelect.vue'
 import { currentLocale, t } from '../i18n'
-import { CheckCircle2, ChevronLeft, ChevronRight, Copy, Download, ExternalLink, Eye, FileEdit, FileText, FileUp, Folder, FolderOpen, FolderPlus, FolderUp, LoaderCircle, LogOut, Pause, Pencil, Play, RefreshCw, Replace, Save, ScrollText, Search, Share2, Shield, Trash2, Upload, UploadCloud, X, KeyRound, ArrowLeftRight } from 'lucide-vue-next'
+import { CheckCircle2, ChevronLeft, ChevronRight, Copy, Download, ExternalLink, Eye, FileEdit, FileText, FileUp, Folder, FolderOpen, FolderPlus, FolderUp, Gauge, LoaderCircle, LogOut, Pause, Pencil, Play, RefreshCw, Replace, Save, ScrollText, Search, Share2, Shield, Trash2, Upload, UploadCloud, X, KeyRound, ArrowLeftRight } from 'lucide-vue-next'
 
 const router = useRouter(); const user = ref(JSON.parse(localStorage.getItem('filebox_user') || '{}')); const files = ref([]); const total = ref(0); const page = ref(1); const pageSize = 20; const keyword = ref(''); const searchInput = ref(''); const loading = ref(false); const error = ref(''); const notice = ref(''); const dragging = ref(false); const uploads = ref([]); const downloads = ref([]); const transfersOpen = ref(false); const showMd5 = ref(localStorage.getItem('filebox_show_md5') !== '0'); const fileInput = ref(null); const folderInput = ref(null); const conflictQueue = ref([]); const currentDir = ref(''); const folders = ref([]); const folderPrompt = ref(null); const folderSaving = ref(false); const folderError = ref('')
 const shareFile = ref(null); const shareForm = ref({ expiresInHours: 24, maxDownloads: 0 }); const shareResult = ref(null); const shareLoading = ref(false); const shareError = ref(''); const shareNotice = ref(''); const previewFile = ref(null); const previewLoading = ref(false); const previewError = ref(''); const previewUrl = ref(''); const previewText = ref(''); const previewKind = ref(''); const sharedIds = new Set(JSON.parse(localStorage.getItem('filebox_shared_ids') || '[]')); const chunkQueue = []; let activeWorkers = 0; let workerWake = null
 const quotaPercent = computed(() => Math.min(100, user.value.quotaBytes ? Math.round((user.value.usedBytes / user.value.quotaBytes) * 100) : 0))
+// 整体上传速率：1s 采样所有进行中上传的合计 loadedBytes，3 秒滑动平均平滑。
+// Overall upload rate: sample the total loadedBytes of active uploads every second and smooth with a 3-second moving average.
+const overallRate = ref(0)
+let rateWindow = []
+let lastRateSample = 0
+let rateTimer = null
+function sampleOverallRate() {
+  const now = Date.now()
+  const active = uploads.value.filter(u => u.running && !u.paused && !u.failed)
+  const total = active.reduce((sum, item) => sum + (item.loadedBytes || 0), 0)
+  if (lastRateSample && now > lastRateSample) {
+    const bytesPerSecond = (total - lastRateSample) / ((now - lastRateSample) / 1000)
+    if (bytesPerSecond >= 0) {
+      rateWindow.push(bytesPerSecond)
+      if (rateWindow.length > 3) rateWindow.shift()
+      overallRate.value = rateWindow.reduce((sum, value) => sum + value, 0) / rateWindow.length
+    }
+  }
+  lastRateSample = total
+  if (!active.length) { overallRate.value = 0; rateWindow = []; lastRateSample = 0 }
+}
+// formatRate 自适应单位显示速率（B/KB/MB/GB per s）。
+// formatRate formats a byte rate with adaptive units (B/KB/MB/GB per second).
+function formatRate(bytesPerSecond = 0) {
+  if (bytesPerSecond < 1024) return `${bytesPerSecond.toFixed(bytesPerSecond < 10 ? 1 : 0)} B/s`
+  const units = ['KB/s', 'MB/s', 'GB/s']
+  let value = bytesPerSecond
+  let unit = -1
+  do { value /= 1024; unit++ } while (value >= 1024 && unit < units.length - 1)
+  return `${value.toFixed(value >= 10 ? 0 : 1)} ${units[unit]}`
+}
 // activeTransferCount 顶栏角标：进行中或待处理的上传 + 未完成的下载数量。
 // activeTransferCount is the topbar badge: running/pending uploads plus unfinished downloads.
 const activeTransferCount = computed(() => uploads.value.filter(u => u.running || u.failed || u.paused).length + downloads.value.filter(d => d.progress < 100 && !d.failed).length)
@@ -89,13 +121,16 @@ function friendlyError(err) { if (err && (err.name === 'TypeError' || err.messag
 
 // queueFiles creates one resumable task per selected file and preserves folder-relative directories.
 // queueFiles 为每个文件创建可续传任务，并保留文件夹相对目录；上传目标为当前浏览目录。
-function queueFiles(list) { if (list.length) transfersOpen.value = true; list.forEach(value => { const file = value.file || value; const path = value.relPath || file.webkitRelativePath || file.name; const parts = path.split('/').filter(Boolean); const dirParts = parts.length > 1 ? parts.slice(0, -1) : []; if (dirParts.length > 1) dirParts.shift(); const base = currentDir.value ? currentDir.value + '/' : ''; const relDir = dirParts.length ? dirParts.join('/') : ''; const item = { id: `${Date.now()}-${Math.random()}-${file.name}`, file, relPath: path !== file.name ? path : '', dir: relDir ? `${base}${relDir}` : base.replace(/\/$/, ''), progress: 0, status: t('files.uploadPreparing'), taskId: '', uploaded: [], paused: false, chunksTotal: 0, chunkSize: 0, error: '', failed: false, canContinue: false, running: false, sha256: '', pending: new Set(), controllers: new Map(), resolve: '' }; uploads.value.push(item); startUpload(item) }) }
+function queueFiles(list) { if (list.length) transfersOpen.value = true; list.forEach(value => { const file = value.file || value; const path = value.relPath || file.webkitRelativePath || file.name; const parts = path.split('/').filter(Boolean); const dirParts = parts.length > 1 ? parts.slice(0, -1) : []; if (dirParts.length > 1) dirParts.shift(); const base = currentDir.value ? currentDir.value + '/' : ''; const relDir = dirParts.length ? dirParts.join('/') : ''; const item = { id: `${Date.now()}-${Math.random()}-${file.name}`, file, relPath: path !== file.name ? path : '', dir: relDir ? `${base}${relDir}` : base.replace(/\/$/, ''), progress: 0, loadedBytes: 0, status: t('files.uploadPreparing'), taskId: '', uploaded: [], paused: false, chunksTotal: 0, chunkSize: 0, error: '', failed: false, canContinue: false, running: false, sha256: '', pending: new Set(), controllers: new Map(), resolve: '' }; uploads.value.push(item); startUpload(item) }) }
 function wakeWorkers() { const wake = workerWake; workerWake = null; wake?.() }
 function removeQueued(item) { for (let i = chunkQueue.length - 1; i >= 0; i--) if (chunkQueue[i].item === item) chunkQueue.splice(i, 1) }
 function enqueueChunks(item, indexes) { indexes.forEach(index => { item.pending.add(index); chunkQueue.push({ item, index }) }); wakeWorkers(); ensureWorkers() }
 function ensureWorkers() { while (activeWorkers < 4 && chunkQueue.some(task => !task.item.paused && !task.item.failed)) { activeWorkers++; chunkWorker().finally(() => { activeWorkers--; ensureWorkers() }) } }
 async function chunkWorker() { while (true) { const position = chunkQueue.findIndex(task => !task.item.paused && !task.item.failed); if (position < 0) return; const task = chunkQueue.splice(position, 1)[0]; const { item, index } = task; if (!item.pending.has(index)) continue; try { await uploadChunkWithRetry(item, index); item.pending.delete(index); if (!item.uploaded.includes(index)) item.uploaded.push(index); item.uploaded.sort((a, b) => a - b); updateChunkProgress(item) } catch (err) { if (item.paused || err.name === 'AbortError') { chunkQueue.push(task); continue } const mapped = friendlyError(err); item.pending.delete(index); item.failed = true; item.error = mapped.message; item.status = mapped.message; error.value = `${item.file.name}: ${mapped.message}` } finally { item.controllers.delete(index) } } }
-function updateChunkProgress(item) { item.progress = item.chunksTotal ? Math.round(25 + item.uploaded.length / item.chunksTotal * 75) : 25; item.status = t('files.uploading') }
+function updateChunkProgress(item) { item.progress = item.chunksTotal ? Math.round(25 + item.uploaded.length / item.chunksTotal * 75) : 25; syncLoadedBytes(item); item.status = t('files.uploading') }
+// syncLoadedBytes 让 loadedBytes 与进度一致，供整体速率统计采样。
+// syncLoadedBytes keeps loadedBytes in step with progress for overall-rate sampling.
+function syncLoadedBytes(item) { item.loadedBytes = item.file?.size ? Math.round(item.file.size * (item.progress || 0) / 100) : 0 }
 
 // uploadChunkWithRetry uploads one binary chunk with an abortable fetch and exponential backoff.
 // uploadChunkWithRetry 使用可中止 fetch 上传单个二进制分片，并以指数退避重试。
@@ -104,8 +139,8 @@ function waitForChunks(item) { return new Promise(resolve => { const check = () 
 
 // startUpload computes the checksum, performs instant-upload lookup, resumes missing chunks, and completes the task.
 // startUpload 负责计算校验值、秒传检查、补传缺片并提交完成请求。
-async function startUpload(item) { if (item.running) return item.running; item.running = true; item.paused = false; item.failed = false; item.canContinue = false; item.running = (async () => { try { if (item.taskId) { await finishExistingUpload(item); return } if (!item.sha256) { item.status = t('files.checksum', { progress: 0 }); item.sha256 = await computeFileSHA256(item.file, progress => { if (!item.paused) { item.progress = Math.round(progress * 0.25); item.status = t('files.checksum', { progress }) } }) } if (item.paused) return; if (item.file.size > 0) { const check = await api('/api/files/check', { method: 'POST', body: JSON.stringify({ sha256: item.sha256, size: item.file.size }) }); if (check.data?.instant) { item.progress = 100; item.status = t('files.instantUpload'); notice.value = t('files.instantUpload'); await loadFiles(); await loadMe(); removeUploadLater(item); return } } let init; try { init = await requestUploadInit(item) } catch (err) { if (err.status !== 409 || !err.data?.conflict) throw err; const resolve = await askConflict(err.data.existing); if (resolve === 'cancel') throw new Error(t('files.uploadCancelled')); init = await requestUploadInit(item, resolve) } item.taskId = init.data.taskId; item.chunkSize = init.data.chunkSize; item.chunksTotal = init.data.totalChunks; item.uploaded = [...(init.data.uploadedChunks || [])]; item.status = t('files.uploading'); await continueChunks(item); if (item.paused || item.failed) return; await finishExistingUpload(item) } catch (err) { if (item.paused) return; const mapped = friendlyError(err); item.failed = true; item.canContinue = Boolean(item.taskId); item.error = mapped.message; item.status = mapped.message; error.value = `${item.file.name}: ${mapped.message}` } finally { item.running = false } })(); return item.running }
-async function finishExistingUpload(item) { if (item.paused) return; await continueChunks(item); if (item.paused || item.failed) return; item.status = t('files.checking'); item.progress = 99; const completeBody = { sha256: item.sha256 }; if (item.resolve) completeBody.action = item.resolve; await api(`/api/files/${item.taskId}/complete`, { method: 'POST', body: JSON.stringify(completeBody) }); item.progress = 100; item.status = t('files.completed'); notice.value = t('files.uploadComplete', { name: item.relPath || item.file.name }); await loadMe(); await loadFiles(); removeUploadLater(item) }
+async function startUpload(item) { if (item.running) return item.running; item.running = true; item.paused = false; item.failed = false; item.canContinue = false; item.running = (async () => { try { if (item.taskId) { await finishExistingUpload(item); return } if (!item.sha256) { item.status = t('files.checksum', { progress: 0 }); item.sha256 = await computeFileSHA256(item.file, progress => { if (!item.paused) { item.progress = Math.round(progress * 0.25); syncLoadedBytes(item); item.status = t('files.checksum', { progress }) } }) } if (item.paused) return; if (item.file.size > 0) { const check = await api('/api/files/check', { method: 'POST', body: JSON.stringify({ sha256: item.sha256, size: item.file.size }) }); if (check.data?.instant) { item.progress = 100; syncLoadedBytes(item); item.status = t('files.instantUpload'); notice.value = t('files.instantUpload'); await loadFiles(); await loadMe(); removeUploadLater(item); return } } let init; try { init = await requestUploadInit(item) } catch (err) { if (err.status !== 409 || !err.data?.conflict) throw err; const resolve = await askConflict(err.data.existing); if (resolve === 'cancel') throw new Error(t('files.uploadCancelled')); init = await requestUploadInit(item, resolve) } item.taskId = init.data.taskId; item.chunkSize = init.data.chunkSize; item.chunksTotal = init.data.totalChunks; item.uploaded = [...(init.data.uploadedChunks || [])]; item.status = t('files.uploading'); await continueChunks(item); if (item.paused || item.failed) return; await finishExistingUpload(item) } catch (err) { if (item.paused) return; const mapped = friendlyError(err); item.failed = true; item.canContinue = Boolean(item.taskId); item.error = mapped.message; item.status = mapped.message; error.value = `${item.file.name}: ${mapped.message}` } finally { item.running = false } })(); return item.running }
+async function finishExistingUpload(item) { if (item.paused) return; await continueChunks(item); if (item.paused || item.failed) return; item.status = t('files.checking'); item.progress = 99; syncLoadedBytes(item); const completeBody = { sha256: item.sha256 }; if (item.resolve) completeBody.action = item.resolve; await api(`/api/files/${item.taskId}/complete`, { method: 'POST', body: JSON.stringify(completeBody) }); item.progress = 100; syncLoadedBytes(item); item.status = t('files.completed'); notice.value = t('files.uploadComplete', { name: item.relPath || item.file.name }); await loadMe(); await loadFiles(); removeUploadLater(item) }
 async function continueChunks(item) { const body = await api(`/api/files/${item.taskId}/status`); item.chunkSize = body.data.chunkSize; item.chunksTotal = body.data.totalChunks; item.uploaded = [...(body.data.uploadedChunks || [])].sort((a, b) => a - b); const missing = Array.from({ length: item.chunksTotal }, (_, index) => index).filter(index => !item.uploaded.includes(index)); item.pending.clear(); removeQueued(item); updateChunkProgress(item); if (!missing.length) return; enqueueChunks(item, missing); await waitForChunks(item) }
 function requestUploadInit(item, resolve = '') { item.resolve = resolve; return api('/api/files/upload-init', { method: 'POST', body: JSON.stringify({ name: item.file.name, size: item.file.size, chunkSize: item.file.size <= 8 * 1024 * 1024 ? item.file.size : 4194304, mime: item.file.type, sha256: item.sha256, ...(item.dir ? { dir: item.dir } : {}), ...(resolve ? { resolve } : {}) }) }) }
 function pauseUpload(item) { item.paused = true; item.status = t('files.paused'); removeQueued(item); item.controllers.forEach(controller => controller.abort()); wakeWorkers() }
@@ -183,6 +218,6 @@ async function logout() { try { await api('/api/auth/logout', { method: 'POST' }
 function formatBytes(bytes = 0) { if (bytes < 1024) return `${bytes} B`; const units = ['KB', 'MB', 'GB', 'TB']; let value = bytes; let unit = -1; do { value /= 1024; unit++ } while (value >= 1024 && unit < units.length - 1); return `${value.toFixed(value >= 10 ? 0 : 1)} ${units[unit]}` }
 function formatDate(value) { return value ? new Date(value).toLocaleString(currentLocale.value === 'en' ? 'en-US' : currentLocale.value, { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '-' }
 function shortMime(value = '') { return value.split('/').pop()?.toUpperCase() || 'FILE' }
-onMounted(() => { loadMe(); loadFiles(); loadFolders() })
-onBeforeUnmount(() => { uploads.value.forEach(item => item.controllers.forEach(controller => controller.abort())); if (previewUrl.value) URL.revokeObjectURL(previewUrl.value) })
+onMounted(() => { loadMe(); loadFiles(); loadFolders(); rateTimer = setInterval(sampleOverallRate, 1000) })
+onBeforeUnmount(() => { if (rateTimer) clearInterval(rateTimer); uploads.value.forEach(item => item.controllers.forEach(controller => controller.abort())); if (previewUrl.value) URL.revokeObjectURL(previewUrl.value) })
 </script>

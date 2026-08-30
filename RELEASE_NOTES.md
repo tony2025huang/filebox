@@ -92,6 +92,10 @@
 - 整体配额不足时响应携带明细（`QUOTA_EXCEEDED` + 已用/配额/文件大小），界面展示「配额不足：当前已用 X / 总配额 Y，文件需 Z，超出 W，请清理空间或调整配额」。
 - 单文件超过 `--max-file-size` 时返回 `413 FILE_TOO_LARGE`（含上限值），界面明确提示「文件超过单文件大小上限 M」，不再出现误导性「文件名或文件大小无效」。
 
+### 整体传输速率（v011 反馈批次，随 v0.2.0 一并交付）
+
+- 传输侧边栏顶部显示「整体速率」（如 `12.5 MB/s`），为所有进行中上传的合计速率；单位自适应（B/KB/MB/GB per s），1 秒采样 + 3 点滑动平均平滑；无进行中传输时隐藏。
+
 ### 单文件交付与部署指南
 
 - 交付物为单个可执行文件（前端已嵌入、SQLite 纯 Go、零外部运行时依赖）；`make release`（或 Windows 下 `scripts\release.ps1`）产出 `dist/filebox-windows-amd64.exe`、`dist/filebox-linux-amd64` 与 `dist/SHA256SUMS.txt`（CGO_ENABLED=0、-trimpath、-s -w 静态精简），复制即用。

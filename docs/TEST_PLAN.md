@@ -8,7 +8,7 @@
 - 启动：`bin\filebox.exe --addr=:18081 --data=<tmp-data> --admin-user=admin --admin-pass=Admin123! --min-free-space=0 --log-enabled=true --log-dir=<tmp-logs>`（独立端口 18081，独立数据目录）
 - 初始账号 admin/Admin123!（mustChangePassword=true）→ 登录后改密 Filebox123!
 - 中文 JSON body 使用 UTF-8 字节数组（PS 5.1 避免乱码）；.ps1 脚本带 UTF-8 BOM
-- 测试脚本：`.test-data\stage2\test-lib2.ps1`（辅助库）、`test-setup2.ps1`（准备）、`test-transfer2.ps1`（分片/秒传/文件夹/配额）、`test-share2.ps1`（分享/预览/限速/注册/统计/日志）、`test-expire.ps1`（分享过期）、`test-resume1gb.ps1`（1GB 断点续传）、`test-regress2.ps1`（阶段一回归）、`test-batch5.ps1`（v011 批次 14-17 前端专项）、`test-batch6.ps1`（v011 批次 18-19 专项）
+- 测试脚本：`.test-data\stage2\test-lib2.ps1`（辅助库）、`test-setup2.ps1`（准备）、`test-transfer2.ps1`（分片/秒传/文件夹/配额）、`test-share2.ps1`（分享/预览/限速/注册/统计/日志）、`test-expire.ps1`（分享过期）、`test-resume1gb.ps1`（1GB 断点续传）、`test-regress2.ps1`（阶段一回归）、`test-batch5.ps1`（v011 批次 14-17 前端专项）、`test-batch6.ps1`（v011 批次 18-19 专项）、`test-batch7.ps1`（v011 批次 20 前端专项）
 
 ## 1. 功能主流程（阶段二新增）
 | 编号 | 用例 | 预期 |
@@ -67,6 +67,13 @@
 | P19c | 前端产物含 QUOTA_EXCEEDED/FILE_TOO_LARGE 映射与冲突队列（conflictQueue） | 前端映射 |
 | P18e | 3 个同名文件 rename 后全部完成（xx.txt / xx (1).txt / xx (2).txt） | 并发同名容错 |
 
-## 6. 测试报告输出
+## 6. 前端专项（v011 反馈批次 20，test-batch7.ps1）
+| 编号 | 用例 | 预期 |
+|---|---|---|
+| P20a-b | 前端产物含 overallRate 状态与 loadedBytes 进度同步 | 速率数据链路 |
+| P20c-d | 产物含 B/s/MB/s 单位自适应与 overall-rate 样式；i18n 三语言 overallRate | 速率展示 |
+| P20e | 嵌入 bundle（Go embed）含速率 UI | 部署产物一致 |
+
+## 7. 测试报告输出
 - 用例通过/失败统计、缺陷清单（编号/级别/复现/实际/预期）、服务日志片段
 - 结论：是否满足 docs/DEV_DOC.md 阶段二验收标准
