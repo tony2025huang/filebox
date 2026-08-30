@@ -1,52 +1,55 @@
-# FileBox 阶段一 DSH 二次测试报告
+# FileBox 阶段二 DSH 二次测试报告
 
-日期：2026-08-29 ｜ 测试环境：Windows / Go 1.27 / filebox 单二进制（127.0.0.1:18080）
-测试依据：docs/TEST_PLAN.md ｜ 被测版本：阶段一全量（MVP + R-DISK ~ R-PROXY 共 7 批）
+日期：2026-08-29 ｜ 测试环境：Windows / Go 1.27 / filebox v0.2.0 单二进制（127.0.0.1:18081，独立数据目录 `.test-data\stage2\test-data`）
+测试依据：docs/TEST_PLAN.md（阶段二） ｜ 被测版本：v0.2.0（阶段二全量 + 阶段一回归）
 
 ## 一、结果统计
 
-| 类别 | 用例数 | 通过 | 失败 |
-|---|---|---|---|
-| 功能主流程（F01–F08） | 27 | 26 | 1（D1 断言） |
-| 边界（B01–B05） | 5 | 4 | 1（D2 0字节文件） |
-| 安全（S01–S07） | 17 | 17 | 0 |
-| 并发（C01） | 2 | 2 | 0 |
-| 性能/磁盘（P03） | 1 | 1 | 0 |
-| 运维命令（O01–O03） | 7 | 7 | 0 |
-| 服务日志（SRVLOG） | 4 | 4 | 0 |
-| **合计** | **63** | **61** | **2（均为真实缺陷）** |
+| 类别 | 套件 | 用例数 | 通过 | 失败 |
+|---|---|---|---|---|
+| 准备 | test-setup2（改密/建用户） | 6 | 6 | 0 |
+| 分片/秒传/文件夹/配额 | test-transfer2 | 19 | 19 | 0 |
+| 分享/预览/限速/注册/统计/日志 | test-share2 | 24 | 24 | 0 |
+| 分享过期 | test-expire | 6 | 6 | 0 |
+| 1GB 断点续传 | test-resume1gb | 9 | 9 | 0 |
+| 阶段一回归 | test-regress2 | 26 | 26 | 0 |
+| **合计** | **6 套件** | **90** | **90** | **0** |
 
-## 二、缺陷清单
+## 二、阶段二验收项与结果
 
-| 编号 | 级别 | 模块 | 描述 | 复现 | 预期 |
-|---|---|---|---|---|---|
-| D1 | 轻微 | 存储命名 | 同目录重名选择「重命名」时，磁盘文件名为 `name.txt (1)`（序号在扩展名后），与开发文档约定 `name (1).txt`（扩展名前）不一致 | 上传 conflict.txt 两次，第二次 resolve=rename | 磁盘文件应为 `conflict (1).txt` |
-| D2 | 一般 | 上传 | **0 字节文件无法上传**：size=0 时 totalChunks=0，服务端校验「阶段一仅支持单分片上传」返回 400；空文件上传是常见场景 | upload-init {name:"empty.bin", size:0} | 应允许上传，md5=d41d8cd98f00b204e9800998ecf8427e |
-| D3 | 轻微 | IP 白名单 | 管理员将自身 IP 白名单配错后，Web 端被 403 自锁，**CLI 无自救命令**（admin reset-password 不处理 ip-acl） | 白名单设为 10.0.0.0/8 后本机请求全 403 | 建议新增 `filebox admin clear-ip-acl --username=<user>` |
-| D4 | 建议 | API | `PUT /api/admin/settings` 为全量语义：缺字段按零值校验失败（如缺 passwordMinLength → 400「设置无效」），错误信息笼统 | PUT {ipLockThreshold:3} | 部分更新语义或明确报错字段 |
-
-## 三、验证亮点（全部通过）
-
-- **强制改密闭环**：初始 admin 登录 → 403 PASSWORD_CHANGE_REQUIRED → 弱密码 400 → 强密码通过 → 恢复访问
-- **双哈希**：上传后服务端 md5/sha256 与本地 `Get-FileHash` 完全一致
-- **Range 206**：bytes=0-9 返回精确内容
-- **冲突事务**：rename 落盘 `(1)` 序号；overwrite 后磁盘仅剩 1 个原名文件、used_bytes=20 精确
-- **TOTP**：绑定（二维码+secret）→ 两步登录 → 错码拒绝 → **同窗口重放被防重放拒绝（ConsumeTOTP）**
-- **IP 锁定**：阈值 3 次失败即锁 127.0.0.1，正确密码也统一 401，解除后恢复
-- **可信代理**：未配置 --trusted-proxies 时伪造 X-Forwarded-For 被忽略（审计 IP=127.0.0.1）
-- **并发**：5 路并行上传全部成功、列表一致
-- **运维命令**：CLI 与服务共存（busy_timeout）、重置后强制改密、--generate 可登录、退出码规范（1/2）
-- **服务日志**：login/upload/user_create 事件均含 operator+ip，**无任何密码/token/文件内容**
-
-## 五、缺陷修复与复测（2026-08-29，codex FIX 任务）
-
-| 缺陷 | 修复 | 复测结果 |
+| 验收项（DEV_DOC 阶段二） | 用例 | 结果 |
 |---|---|---|
-| D1 重命名序号位置 | `stem + trailer + extension` → `d1 (1).txt` | ✅ 磁盘文件 `d1 (1).txt` |
-| D2 0 字节文件 | size=0 按单分片（chunkSize=1/totalChunks=1） | ✅ 上传成功，md5=d41d8cd9…，sha256=e3b0c442… |
-| D3 IP 白名单自锁 | 新增 `filebox admin clear-ip-acl --username` | ✅ 403 自锁 → CLI 解除 → 恢复 200 |
-| D4 settings 部分更新 | 字段指针化合并 + 具体字段错误提示 | ✅ 部分更新保留其他值；passwordMinLength=0 → 400「密码最小长度无效」 |
+| 1GB 文件断点中断后续传成功 | G01-G09：8MB×128 片并发 4 上传 30 片 → 中断 → **重启服务** → status 仍 30 片（chunks 表持久化）→ 续传剩余（含重传 0/1 幂等）→ complete 200 → md5 与本地 `Get-FileHash` 一致（`abbf45a9…76bf`）→ 磁盘文件 1GB | ✅ |
+| 秒传命中不重复落盘 | F301-F304：check md5/sha256 命中 instant=true 且磁盘文件数不增（before=1 after=1）；未命中 instant=false；跨用户不命中 | ✅ |
+| 文件夹上传保留结构 | F401-F403：`assets/icons` 与 `assets/images` 下同名 `logo.svg` 各保留一份、不加序号；`../` 目录 400「目录无效」 | ✅ |
+| 分享链接过期后拒绝 | E01-E06：构造过期时间后 meta 404「分享链接已过期」、download 403；超次数 403「分享次数已用完」；撤销后 404 | ✅ |
+| 预览白名单可看、非白名单强制下载 | F601-F602：text/plain → `inline`；application/zip → `attachment` | ✅ |
+| 超配额上传被拒 | F500-F502：多分片路径配额 3MB 上传 5MB → 403「超出用户配额」 | ✅ |
+| 限速生效 | F601-F603：设置 ~64KB/s 后 1MB 上传耗时 17.9s（理论 ~16s）且 complete 成功；恢复 0 后 1.8s | ✅ |
+| Linux 交叉编译可运行 | 构建验证：`GOOS=linux GOARCH=amd64` 产出 `bin/filebox-linux`（17.8MB） | ✅ |
+| 注册开关 | F701-F707：关时 403 + REGISTER_DISABLED；brand.registerEnabled 同步；开时注册成功并直接登录；重复 409；弱密码 400 | ✅ |
+| 系统统计 | F801：admin stats 含 shares/shareDownloads | ✅ |
+| 审计日志含分享/注册动作 | F901-F905：share/share_view/share_download/register 均入库，logActions 含 register | ✅ |
+| 回归（阶段一） | R01-R11：单分片上传/下载/删除闭环+双哈希、0 字节（md5=d41d8cd9…）、冲突 rename/overwrite、非法名 400、越权 404、未登录 401、普通用户 admin 403、日志隔离、登录锁定/解除、品牌/语言、CLI reset-password/locks、Range 206 | ✅ |
 
-修复验证：`go build/vet/test`、Linux 交叉编译、前端构建+embed 同步全过；新增单元测试（0 字节上传、部分更新、命名规则、ClearIPACL、CLI 命令）；前端三语言新增 settings 错误键。
+## 三、缺陷清单（测试发现，已修复并复测）
 
-**最终结论：63/63 用例通过，阶段一全部验收标准达成。**
+| 编号 | 级别 | 模块 | 描述 | 复现 | 修复 | 复测 |
+|---|---|---|---|---|---|---|
+| D-S2-1 | 一般 | 存储 | 删除后重传同名文件返回 HTTP 500：`UNIQUE constraint failed: files.storage_path`——软删除记录仍占用 storage_path，allocateStorageName 未剔除导致复用冲突 | 上传 preview.txt → 删除 → 再传同名 → complete 500 | `allocateStorageName` 在复用路径时清理该路径下的软删除记录（其内容已物理删除）；新增单测 `TestReuploadAfterDeleteReusesStoragePath` | ✅ 删除→重传 200，md5 一致，ready 文件数=1 |
+| D-S2-2 | 轻微 | CLI | `filebox admin reset-password` 再次 `flags.Parse(args[1:])` 丢掉首个 flag（`--data` 被忽略），非 admin 用户/非默认数据目录场景下操作落错库 | `admin reset-password --data=<dir> --username=user2` 在 dir 上无记录 | 改为 `flags.Parse(args)`（args 已剔除子命令名）；新增单测 `TestResetPasswordParsesDataFlag` | ✅ CLI 重置 user2 成功且新密码可登录（真实数据目录） |
+
+修复验证：`go build ./...`、`go vet ./...`、`go test ./...` 全过；Windows/Linux 交叉编译通过；前端构建 + `sync-web` embed 同步通过；上述两处缺陷场景均回归复测通过。
+
+## 四、验证亮点
+
+- **1GB 断点续传跨重启**：服务重启后 `chunks` 表保留 30/128 分片，续传 98 片（另重传 2 片验证幂等覆盖）后 complete 成功，md5 与本地一致，磁盘文件恰为 1GB。
+- **分片校验**：乱序上传、末片小于 chunkSize、缺片 complete 400「上传分片不完整」、重复 complete 404 均符合预期。
+- **限速**：1MB @ 64KB/s 实测 17.9s（令牌桶生效），恢复 0 后 1.8s。
+- **分享原子计数**：maxDownloads=1 时第 2 次匿名下载 403「分享次数已用完」；过期 meta 404 / download 403。
+- **秒传不落盘**：同文件二次 check 磁盘文件数不增；跨用户不命中（归属隔离）。
+- **回归全绿**：阶段一 26 项（含 TOTP 相关路径的登录/锁定/审计/CLI）无回归。
+
+## 五、结论
+
+阶段二全部验收标准达成：90/90 用例通过，0 遗留缺陷（测试发现的 2 个缺陷均已代码级修复并复测）。满足 docs/DEV_DOC.md 阶段二验收标准与 docs/CODEX_TASK_2.md 全部条目。

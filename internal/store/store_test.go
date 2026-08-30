@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"testing"
+	"time"
 )
 
 func TestOperationsResetPasswordAndClearLocks(t *testing.T) {
@@ -136,5 +137,76 @@ func TestClearIPACL(t *testing.T) {
 	cleared, err = db.ClearIPACL("missing")
 	if err != nil || cleared {
 		t.Fatalf("ClearIPACL(missing) = %v, %v; want false, nil", cleared, err)
+	}
+}
+
+func TestShareStorageAndSettings(t *testing.T) {
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.EnsureAdmin("admin", "admin123", 1024*1024); err != nil {
+		t.Fatal(err)
+	}
+	user, err := db.GetUserByUsername("admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	result, err := db.DB.Exec("INSERT INTO files(user_id, name, stored_name, size, mime, sha256, md5, status, storage_path, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, 'ready', ?, ?)", user.ID, "shared.txt", "shared.txt", 3, "text/plain", "sha", "md5", "files/admin/shared.txt", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fileID, err := result.LastInsertId()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := db.CreateShare(ctx, fileID, user.ID, "storage-token", time.Now().Add(time.Hour), 1); err != nil {
+		t.Fatal(err)
+	}
+	share, err := db.GetShareByToken(ctx, "storage-token")
+	if err != nil || share.FileID != fileID || share.MaxDownloads != 1 {
+		t.Fatalf("GetShareByToken() = %+v, %v", share, err)
+	}
+	shares, err := db.ListSharesByFile(ctx, fileID)
+	if err != nil || len(shares) != 1 {
+		t.Fatalf("ListSharesByFile() = %d, %v", len(shares), err)
+	}
+	allowed, err := db.IncrementShareDownloads(ctx, "storage-token", 1)
+	if err != nil || !allowed {
+		t.Fatalf("first IncrementShareDownloads() = %t, %v", allowed, err)
+	}
+	allowed, err = db.IncrementShareDownloads(ctx, "storage-token", 1)
+	if err != nil || allowed {
+		t.Fatalf("second IncrementShareDownloads() = %t, %v", allowed, err)
+	}
+	stats, err := db.Stats(ctx)
+	if err != nil || stats["shares"] != 1 || stats["shareDownloads"] != 1 {
+		t.Fatalf("Stats() = %#v, %v", stats, err)
+	}
+	if removed, err := db.DeleteSharesByFile(ctx, fileID); err != nil || removed != 1 {
+		t.Fatalf("DeleteSharesByFile() = %d, %v", removed, err)
+	}
+	settings, err := db.GetLogSettings(ctx)
+	if err != nil || settings.RegisterEnabled || settings.UploadRateLimit != 0 {
+		t.Fatalf("default settings = %+v, %v", settings, err)
+	}
+	settings.RegisterEnabled = true
+	settings.UploadRateLimit = 65536
+	if err := db.UpdateLogSettings(ctx, settings); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := db.GetLogSettings(ctx)
+	if err != nil || !updated.RegisterEnabled || updated.UploadRateLimit != 65536 {
+		t.Fatalf("updated settings = %+v, %v", updated, err)
+	}
+	if err := db.SetSettingDefault(ctx, "registerEnabled", "false"); err != nil {
+		t.Fatal(err)
+	}
+	unchanged, err := db.GetLogSettings(ctx)
+	if err != nil || !unchanged.RegisterEnabled {
+		t.Fatalf("SetSettingDefault overwrote setting = %+v, %v", unchanged, err)
 	}
 }

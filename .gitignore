@@ -1,5 +1,6 @@
 # 数据与运行产物
 data/
+.test-data/
 *.db
 *.db-journal
 *.db-wal

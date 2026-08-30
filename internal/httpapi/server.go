@@ -20,6 +20,7 @@ import (
 	"io"
 	"io/fs"
 	"log"
+	"math/big"
 	"mime"
 	"mime/multipart"
 	"net"
@@ -30,6 +31,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -37,6 +39,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/skip2/go-qrcode"
 	"golang.org/x/crypto/bcrypt"
+	"golang.org/x/time/rate"
 
 	"filebox/internal/diskusage"
 	"filebox/internal/srvlog"
@@ -61,8 +64,17 @@ type Config struct {
 // Server 组合持久化存储与 HTTP API 配置。
 // Server combines the persistent store with the HTTP API configuration.
 type Server struct {
-	store  *store.Store
-	config Config
+	store       *store.Store
+	config      Config
+	rateLimiter rateLimiter
+}
+
+// rateLimiter keeps one token bucket per authenticated user and evicts idle buckets.
+// rateLimiter 按用户维护令牌桶，并清理长期未访问的桶。
+type rateLimiter struct {
+	mu       sync.Mutex
+	buckets  map[int64]*rate.Limiter
+	lastSeen map[int64]time.Time
 }
 
 type contextKey string
@@ -103,13 +115,33 @@ type uploadInitRequest struct {
 	Name      string `json:"name"`
 	Size      int64  `json:"size"`
 	ChunkSize int64  `json:"chunkSize"`
+	SHA256    string `json:"sha256"`
+	MD5       string `json:"md5"`
 	Mime      string `json:"mime"`
 	Resolve   string `json:"resolve"`
+	Dir       string `json:"dir"`
 }
 
 type uploadCompleteRequest struct {
+	Action string `json:"action"`
 	SHA256 string `json:"sha256"`
 	MD5    string `json:"md5"`
+}
+
+type instantCheckRequest struct {
+	SHA256 string `json:"sha256"`
+	MD5    string `json:"md5"`
+	Size   int64  `json:"size"`
+}
+
+type shareRequest struct {
+	ExpiresInHours int `json:"expiresInHours"`
+	MaxDownloads   int `json:"maxDownloads"`
+}
+
+type registerRequest struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
 }
 
 type createUserRequest struct {
@@ -139,6 +171,8 @@ type logSettingsRequest struct {
 	IPLockThreshold     *int    `json:"ipLockThreshold"`
 	IPAutoUnlockEnabled *bool   `json:"ipAutoUnlockEnabled"`
 	IPUnlockMinutes     *int    `json:"ipUnlockMinutes"`
+	RegisterEnabled     *bool   `json:"registerEnabled"`
+	UploadRateLimit     *int64  `json:"uploadRateLimit"`
 }
 
 type languageRequest struct {
@@ -160,6 +194,7 @@ type brandResponse struct {
 	HasMainLogo     bool   `json:"hasMainLogo"`
 	DefaultLang     string `json:"defaultLang"`
 	ThemeColor      string `json:"themeColor"`
+	RegisterEnabled bool   `json:"registerEnabled"`
 }
 
 type brandAsset struct {
@@ -182,7 +217,7 @@ func NewServer(db *store.Store, config Config) *Server {
 	if config.JWTExpiry <= 0 {
 		config.JWTExpiry = 7 * 24 * time.Hour
 	}
-	return &Server{store: db, config: config}
+	return &Server{store: db, config: config, rateLimiter: rateLimiter{buckets: make(map[int64]*rate.Limiter), lastSeen: make(map[int64]time.Time)}}
 }
 
 func (s *Server) Handler() http.Handler {
@@ -190,6 +225,7 @@ func (s *Server) Handler() http.Handler {
 	// Handler registers public, authenticated, and admin-only routes, then wraps them with SPA and security handling.
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/auth/login", s.login)
+	mux.HandleFunc("POST /api/auth/register", s.register)
 	mux.HandleFunc("POST /api/auth/logout", s.requireAuth(s.logout))
 	mux.HandleFunc("POST /api/auth/change-password", s.requireAuth(s.changePassword))
 	mux.HandleFunc("GET /api/auth/password-policy", s.requireAuth(s.passwordPolicy))
@@ -202,9 +238,16 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("GET /api/files", s.requireAuth(s.listFiles))
 	mux.HandleFunc("POST /api/files/upload-init", s.requireAuth(s.uploadInit))
+	mux.HandleFunc("POST /api/files/check", s.requireAuth(s.checkInstantUpload))
 	mux.HandleFunc("PUT /api/files/{taskID}/chunks/{index}", s.requireAuth(s.uploadChunk))
+	mux.HandleFunc("GET /api/files/{taskID}/status", s.requireAuth(s.uploadStatus))
 	mux.HandleFunc("POST /api/files/{taskID}/complete", s.requireAuth(s.completeUpload))
 	mux.HandleFunc("GET /api/files/{id}/download", s.requireAuth(s.download))
+	mux.HandleFunc("GET /api/files/{id}/preview", s.requireAuth(s.preview))
+	mux.HandleFunc("POST /api/files/{id}/share", s.requireAuth(s.createShare))
+	mux.HandleFunc("DELETE /api/files/{id}/shares", s.requireAuth(s.deleteShares))
+	mux.HandleFunc("GET /api/files/shared/{token}/meta", s.shareMeta)
+	mux.HandleFunc("GET /api/files/shared/{token}/download", s.shareDownload)
 	mux.HandleFunc("DELETE /api/files/{id}", s.requireAuth(s.deleteFile))
 	mux.HandleFunc("GET /api/logs", s.requireAuth(s.listLogs))
 	mux.HandleFunc("GET /api/logs/actions", s.requireAuth(s.logActions))
@@ -292,9 +335,13 @@ func (s *Server) publicBrand(settings store.BrandSettings) brandResponse {
 	}
 	defaultLang := "zh-CN"
 	themeColor := store.DefaultThemeColor
-	if languageSettings, err := s.store.GetLogSettings(context.Background()); err == nil && isValidLang(languageSettings.DefaultLang) {
-		defaultLang = languageSettings.DefaultLang
-		themeColor = languageSettings.ThemeColor
+	registerEnabled := false
+	if languageSettings, err := s.store.GetLogSettings(context.Background()); err == nil {
+		if isValidLang(languageSettings.DefaultLang) {
+			defaultLang = languageSettings.DefaultLang
+			themeColor = languageSettings.ThemeColor
+		}
+		registerEnabled = languageSettings.RegisterEnabled
 	}
 	return brandResponse{
 		SiteTitle:       title,
@@ -306,6 +353,7 @@ func (s *Server) publicBrand(settings store.BrandSettings) brandResponse {
 		HasMainLogo:     s.brandAssetExists(brandAssets["main-logo"], settings.MainLogo),
 		DefaultLang:     defaultLang,
 		ThemeColor:      themeColor,
+		RegisterEnabled: registerEnabled,
 	}
 }
 
@@ -772,6 +820,87 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	writeData(w, http.StatusOK, "登录成功", map[string]any{"token": token, "user": publicUser(user)})
 }
 
+// register creates a normal user only when the administrator-enabled setting is true.
+// register 在管理员开启注册设置后创建普通用户，并直接签发登录令牌。
+func (s *Server) register(w http.ResponseWriter, r *http.Request) {
+	var input registerRequest
+	operator := "anonymous"
+	result, reason := "failure", "invalid_request"
+	defer func() { s.serviceEvent(r, "register", operator, "result=%s reason=%s", result, reason) }()
+	defer func() { s.recordAudit(r, nil, operator, "register", strings.TrimSpace(input.Username), result, reason) }()
+	settings, err := s.store.GetLogSettings(r.Context())
+	if err != nil {
+		reason = "settings_unavailable"
+		writeError(w, http.StatusInternalServerError, "读取注册设置失败")
+		return
+	}
+	if !settings.RegisterEnabled {
+		reason = "register_disabled"
+		writeErrorData(w, http.StatusForbidden, "注册功能未开放", map[string]string{"code": "REGISTER_DISABLED"})
+		return
+	}
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	input.Username = strings.TrimSpace(input.Username)
+	operator = input.Username
+	if !validUsername(input.Username) {
+		reason = "invalid_username"
+		writeError(w, http.StatusBadRequest, "用户信息无效")
+		return
+	}
+	if err := s.validatePassword(input.Password); err != nil {
+		reason = "invalid_password"
+		writeError(w, http.StatusBadRequest, "密码不符合强度要求")
+		return
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(input.Password), bcrypt.DefaultCost)
+	if err != nil {
+		reason = "hash_failed"
+		writeError(w, http.StatusInternalServerError, "密码处理失败")
+		return
+	}
+	if err := s.store.CreateUser(r.Context(), input.Username, string(hash), "user", 100*1024*1024*1024); errors.Is(err, store.ErrConflict) {
+		reason = "username_exists"
+		writeError(w, http.StatusConflict, "用户名已存在")
+		return
+	} else if err != nil {
+		reason = "create_failed"
+		writeError(w, http.StatusInternalServerError, "创建用户失败")
+		return
+	}
+	user, err := s.store.GetUserByUsername(input.Username)
+	if err != nil {
+		reason = "load_failed"
+		writeError(w, http.StatusInternalServerError, "创建用户失败")
+		return
+	}
+	token, err := s.issueToken(user)
+	if err != nil {
+		reason = "token_issue"
+		writeError(w, http.StatusInternalServerError, "注册失败")
+		return
+	}
+	result, reason = "success", ""
+	writeData(w, http.StatusCreated, "注册成功", map[string]any{"token": token, "user": publicUser(user)})
+}
+
+func validUsername(username string) bool {
+	if username == "" || !utf8.ValidString(username) || utf8.RuneCountInString(username) > 64 {
+		return false
+	}
+	for _, char := range username {
+		if unicode.IsControl(char) || unicode.IsSpace(char) {
+			return false
+		}
+		switch char {
+		case '/', '\\', '<', '>', ':', '"', '|', '?', '*':
+			return false
+		}
+	}
+	return true
+}
+
 func (s *Server) recordIPFailure(r *http.Request, settings store.LogSettings) {
 	if err := s.store.RecordIPFailure(r.Context(), s.requestIP(r), settings.IPLockWindowMinutes, settings.IPLockThreshold, settings.IPAutoUnlockEnabled, settings.IPUnlockMinutes); err != nil {
 		log.Printf("record ip failure: %v", err)
@@ -1088,6 +1217,57 @@ func (s *Server) updateLanguage(w http.ResponseWriter, r *http.Request) {
 	writeData(w, http.StatusOK, "语言设置已更新", publicUser(user))
 }
 
+// uploadChunkLayout 按阶段一兼容规则计算实际分片大小和分片总数。
+// uploadChunkLayout maps the requested chunk size to the backward-compatible upload layout.
+func uploadChunkLayout(size, requested int64) (int64, int, error) {
+	if size == 0 {
+		return 1, 1, nil
+	}
+	if requested == 0 || requested >= size {
+		return size, 1, nil
+	}
+	if requested < 2*1024*1024 || requested > 8*1024*1024 {
+		return 0, 0, errors.New("分片大小必须在 2MB-8MB 之间")
+	}
+	return requested, int((size-1)/requested + 1), nil
+}
+
+// expectedUploadChunkSize 返回指定分片必须接收的精确字节数。
+// expectedUploadChunkSize returns the exact byte count required for one chunk.
+func expectedUploadChunkSize(task store.UploadTask, index int) int64 {
+	if index < task.TotalChunks-1 {
+		return task.ChunkSize
+	}
+	return task.Size - task.ChunkSize*int64(task.TotalChunks-1)
+}
+
+// validateUploadDir 校验相对目录并返回去掉首尾斜杠后的规范化路径。
+// validateUploadDir validates a relative folder path and returns its slash-normalized form.
+func validateUploadDir(dir string) (string, error) {
+	if dir == "" {
+		return "", nil
+	}
+	if strings.HasPrefix(dir, "/") || strings.HasPrefix(dir, "\\") || filepath.IsAbs(dir) || filepath.VolumeName(dir) != "" {
+		return "", errors.New("invalid directory")
+	}
+	dir = strings.Trim(dir, "/")
+	if dir == "" {
+		return "", errors.New("invalid directory")
+	}
+	parts := strings.Split(dir, "/")
+	for _, part := range parts {
+		if part == "" || part == "." || part == ".." || strings.Contains(part, "\\") {
+			return "", errors.New("invalid directory")
+		}
+		for _, char := range part {
+			if unicode.IsControl(char) || strings.ContainsRune(`<>:"|?*`, char) {
+				return "", errors.New("invalid directory")
+			}
+		}
+	}
+	return strings.Join(parts, "/"), nil
+}
+
 func (s *Server) uploadInit(w http.ResponseWriter, r *http.Request) {
 	// uploadInit 先校验文件名、大小、同名处理和磁盘空间，再以事务预留用户配额。
 	// uploadInit validates the name, size, conflict mode, and disk space before transactionally reserving user quota.
@@ -1111,7 +1291,12 @@ func (s *Server) uploadInit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := time.Now().UTC()
-	relativeDir := filepath.Join("files", strconv.FormatInt(user.ID, 10), now.Format("06"), now.Format("01"))
+	dir, err := validateUploadDir(input.Dir)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "目录无效")
+		return
+	}
+	relativeDir := filepath.Join("files", strconv.FormatInt(user.ID, 10), now.Format("06"), now.Format("01"), dir)
 	conflict, conflictErr := s.store.FindUploadConflict(r.Context(), user.ID, relativeDir, name)
 	if conflictErr != nil && !errors.Is(conflictErr, store.ErrNotFound) {
 		log.Printf("find upload conflict: %v", conflictErr)
@@ -1139,12 +1324,9 @@ func (s *Server) uploadInit(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	chunkSize := input.Size
-	if chunkSize == 0 {
-		chunkSize = 1
-	}
-	if input.ChunkSize > 0 && input.ChunkSize != input.Size {
-		writeError(w, http.StatusBadRequest, "阶段一仅支持单分片上传")
+	chunkSize, totalChunks, err := uploadChunkLayout(input.Size, input.ChunkSize)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	taskID, err := randomID()
@@ -1159,7 +1341,7 @@ func (s *Server) uploadInit(w http.ResponseWriter, r *http.Request) {
 	if mimeType == "" {
 		mimeType = "application/octet-stream"
 	}
-	task := store.UploadTask{ID: taskID, UserID: user.ID, Name: name, Size: input.Size, ChunkSize: chunkSize, TotalChunks: 1, Status: "pending", Mime: mimeType, StorageDir: relativeDir, Resolve: input.Resolve}
+	task := store.UploadTask{ID: taskID, UserID: user.ID, Name: name, Size: input.Size, ChunkSize: chunkSize, TotalChunks: totalChunks, Status: "pending", Mime: mimeType, StorageDir: relativeDir, Resolve: input.Resolve}
 	if err := s.store.CreateUploadTask(r.Context(), task); err != nil {
 		if errors.Is(err, store.ErrQuota) {
 			writeError(w, http.StatusForbidden, "超出用户配额")
@@ -1169,15 +1351,17 @@ func (s *Server) uploadInit(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "创建上传任务失败")
 		return
 	}
-	writeData(w, http.StatusOK, "上传任务已创建", map[string]any{"taskId": task.ID, "chunkSize": task.ChunkSize, "totalChunks": task.TotalChunks})
+	writeData(w, http.StatusOK, "上传任务已创建", map[string]any{"taskId": task.ID, "chunkSize": task.ChunkSize, "totalChunks": task.TotalChunks, "uploadedChunks": []int{}})
 }
 
 func (s *Server) uploadChunk(w http.ResponseWriter, r *http.Request) {
+	// uploadChunk 按任务声明的精确大小流式写入单个分片并记录哈希。
+	// uploadChunk streams one exact-sized chunk to disk and records its hash.
 	user := currentUser(r.Context())
 	taskID := r.PathValue("taskID")
 	index, err := strconv.Atoi(r.PathValue("index"))
-	if err != nil || index != 0 {
-		writeError(w, http.StatusBadRequest, "阶段一仅支持分片 0")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "分片序号无效")
 		return
 	}
 	task, err := s.store.GetUploadTask(r.Context(), taskID)
@@ -1185,33 +1369,191 @@ func (s *Server) uploadChunk(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "上传任务不存在")
 		return
 	}
-	if r.ContentLength > task.Size && r.ContentLength >= 0 {
+	if index < 0 || index >= task.TotalChunks {
+		writeError(w, http.StatusBadRequest, "分片序号无效")
+		return
+	}
+	expectedSize := expectedUploadChunkSize(task, index)
+	if r.ContentLength >= 0 && r.ContentLength > expectedSize {
 		writeError(w, http.StatusRequestEntityTooLarge, "上传内容超过声明大小")
 		return
+	}
+	settings, err := s.store.GetLogSettings(r.Context())
+	if err != nil {
+		log.Printf("get upload settings: %v", err)
+		writeError(w, http.StatusInternalServerError, "读取上传设置失败")
+		return
+	}
+	if limiter := s.rateLimiter.limiterFor(user.ID, settings.UploadRateLimit); limiter != nil {
+		waitContext, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
+		waitErr := waitForUploadRate(waitContext, limiter, expectedSize)
+		cancel()
+		if waitErr != nil {
+			writeError(w, http.StatusTooManyRequests, "上传过慢，请稍后重试")
+			return
+		}
 	}
 	tmpDir := filepath.Join(s.config.DataDir, "tmp", task.ID)
 	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
 		writeError(w, http.StatusInternalServerError, "无法准备上传空间")
 		return
 	}
-	path := filepath.Join(tmpDir, "0")
+	path := filepath.Join(tmpDir, strconv.Itoa(index))
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "无法写入上传内容")
 		return
 	}
-	limited := io.LimitReader(r.Body, task.Size+1)
-	written, copyErr := io.Copy(file, limited)
+	hash := sha256.New()
+	limited := io.LimitReader(r.Body, expectedSize+1)
+	written, copyErr := io.Copy(io.MultiWriter(file, hash), limited)
 	closeErr := file.Close()
 	if copyErr != nil || closeErr != nil {
+		_ = os.Remove(path)
 		writeError(w, http.StatusBadRequest, "写入上传内容失败")
 		return
 	}
-	if written != task.Size {
+	if written > expectedSize {
+		_ = os.Remove(path)
+		writeError(w, http.StatusRequestEntityTooLarge, "上传内容超过声明大小")
+		return
+	}
+	if written != expectedSize {
+		_ = os.Remove(path)
 		writeError(w, http.StatusBadRequest, "上传内容大小与声明不一致")
 		return
 	}
-	writeData(w, http.StatusOK, "分片上传成功", map[string]any{"index": 0, "size": written})
+	if err := s.store.SetChunk(r.Context(), task.ID, index, written, hex.EncodeToString(hash.Sum(nil))); err != nil {
+		_ = os.Remove(path)
+		log.Printf("set uploaded chunk: %v", err)
+		writeError(w, http.StatusInternalServerError, "保存上传分片失败")
+		return
+	}
+	writeData(w, http.StatusOK, "分片上传成功", map[string]any{"index": index, "size": written})
+}
+
+// limiterFor returns or rebuilds a user's bucket and evicts entries idle for ten minutes.
+// limiterFor 返回或重建用户令牌桶，并清理超过十分钟未访问的条目。
+func (l *rateLimiter) limiterFor(userID, bytesPerSec int64) *rate.Limiter {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.buckets == nil {
+		l.buckets = make(map[int64]*rate.Limiter)
+	}
+	if l.lastSeen == nil {
+		l.lastSeen = make(map[int64]time.Time)
+	}
+	now := time.Now()
+	for id, seen := range l.lastSeen {
+		if now.Sub(seen) > 10*time.Minute {
+			delete(l.lastSeen, id)
+			delete(l.buckets, id)
+		}
+	}
+	if bytesPerSec <= 0 {
+		return nil
+	}
+	limiter, ok := l.buckets[userID]
+	if !ok || limiter == nil || int64(limiter.Limit()) != bytesPerSec {
+		burst := bytesPerSec
+		if burst < 1024*1024 {
+			burst = 1024 * 1024
+		}
+		limiter = rate.NewLimiter(rate.Limit(bytesPerSec), int(burst))
+		// Start new buckets empty so the configured bytes-per-second rate applies to the first chunk too.
+		// 新建令牌桶从空开始，确保首个分片也遵守配置的每秒字节数。
+		limiter.ReserveN(now, limiter.Burst())
+		l.buckets[userID] = limiter
+	}
+	l.lastSeen[userID] = now
+	return limiter
+}
+
+func waitForUploadRate(ctx context.Context, limiter *rate.Limiter, bytes int64) error {
+	// waitForUploadRate waits in burst-sized pieces so large chunks remain compatible with small bursts.
+	// waitForUploadRate 按 burst 大小分段等待，确保大分片兼容较小的 burst。
+	remaining := bytes
+	for remaining > 0 {
+		batch := remaining
+		if limit := int64(limiter.Burst()); batch > limit {
+			batch = limit
+		}
+		if err := limiter.WaitN(ctx, int(batch)); err != nil {
+			return err
+		}
+		remaining -= batch
+	}
+	return nil
+}
+
+func (s *Server) uploadStatus(w http.ResponseWriter, r *http.Request) {
+	// uploadStatus 返回当前用户任务的持久化分片状态。
+	// uploadStatus returns the authenticated user's persisted chunk state.
+	user := currentUser(r.Context())
+	task, err := s.store.GetUploadTask(r.Context(), r.PathValue("taskID"))
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "上传任务不存在")
+		return
+	}
+	if err != nil {
+		log.Printf("get upload status: %v", err)
+		writeError(w, http.StatusInternalServerError, "读取上传任务失败")
+		return
+	}
+	if task.UserID != user.ID {
+		writeError(w, http.StatusNotFound, "上传任务不存在")
+		return
+	}
+	chunks, err := s.store.ListChunks(r.Context(), task.ID)
+	if err != nil {
+		log.Printf("list upload status chunks: %v", err)
+		writeError(w, http.StatusInternalServerError, "读取上传分片失败")
+		return
+	}
+	indices := make([]int, 0, len(chunks))
+	for index := range chunks {
+		indices = append(indices, index)
+	}
+	sort.Ints(indices)
+	writeData(w, http.StatusOK, "获取成功", map[string]any{
+		"taskId":         task.ID,
+		"name":           task.Name,
+		"size":           task.Size,
+		"chunkSize":      task.ChunkSize,
+		"totalChunks":    task.TotalChunks,
+		"status":         task.Status,
+		"uploadedChunks": indices,
+	})
+}
+
+func (s *Server) checkInstantUpload(w http.ResponseWriter, r *http.Request) {
+	// checkInstantUpload 在当前用户范围内查询 ready 文件，不创建新的上传内容。
+	// checkInstantUpload searches the current user's ready files without creating upload content.
+	var input instantCheckRequest
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	if input.Size <= 0 {
+		writeError(w, http.StatusBadRequest, "文件大小无效")
+		return
+	}
+	input.MD5 = strings.ToLower(strings.TrimSpace(input.MD5))
+	input.SHA256 = strings.ToLower(strings.TrimSpace(input.SHA256))
+	if input.MD5 == "" && input.SHA256 == "" {
+		writeError(w, http.StatusBadRequest, "文件校验值缺失")
+		return
+	}
+	file, err := s.store.FindInstantMatch(r.Context(), currentUser(r.Context()).ID, input.MD5, input.SHA256, input.Size)
+	if errors.Is(err, store.ErrNotFound) {
+		writeData(w, http.StatusOK, "检查完成", map[string]any{"instant": false})
+		return
+	}
+	if err != nil {
+		log.Printf("find instant upload match: %v", err)
+		writeError(w, http.StatusInternalServerError, "检查文件失败")
+		return
+	}
+	writeData(w, http.StatusOK, "检查完成", map[string]any{"instant": true, "file": publicFile(file)})
 }
 
 func (s *Server) completeUpload(w http.ResponseWriter, r *http.Request) {
@@ -1237,27 +1579,63 @@ func (s *Server) completeUpload(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	tmpPath := filepath.Join(s.config.DataDir, "tmp", task.ID, "0")
-	info, err := os.Stat(tmpPath)
-	if err != nil || info.Size() != task.Size {
+	chunks, err := s.store.ListChunks(r.Context(), task.ID)
+	if err != nil {
+		log.Printf("list uploaded chunks: %v", err)
+		writeError(w, http.StatusInternalServerError, "读取上传分片失败")
+		return
+	}
+	if len(chunks) != task.TotalChunks {
 		writeError(w, http.StatusBadRequest, "上传分片不完整")
 		return
 	}
-	file, err := os.Open(tmpPath)
+	tmpDir := filepath.Join(s.config.DataDir, "tmp", task.ID)
+	for index, chunk := range chunks {
+		if index < 0 || index >= task.TotalChunks || chunk.Size != expectedUploadChunkSize(task, index) {
+			writeError(w, http.StatusBadRequest, "上传分片不完整")
+			return
+		}
+		info, statErr := os.Stat(filepath.Join(tmpDir, strconv.Itoa(index)))
+		if statErr != nil || info.Size() != chunk.Size {
+			writeError(w, http.StatusBadRequest, "上传分片不完整")
+			return
+		}
+	}
+	mergedPath := filepath.Join(tmpDir, ".merged")
+	merged, err := os.OpenFile(mergedPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "无法读取上传内容")
+		writeError(w, http.StatusInternalServerError, "无法创建合并文件")
 		return
 	}
+	defer os.Remove(mergedPath)
 	sha := sha256.New()
 	md5Hash := md5.New()
-	// 双哈希均基于实际落盘前读取的上传内容，客户端校验值仅用于可选比对。
-	// Both hashes are computed from the uploaded bytes; client-provided values are optional checks only.
-	if _, err := io.Copy(io.MultiWriter(sha, md5Hash), file); err != nil {
-		file.Close()
-		writeError(w, http.StatusInternalServerError, "计算文件校验值失败")
+	var mergedSize int64
+	for index := 0; index < task.TotalChunks; index++ {
+		chunkFile, openErr := os.Open(filepath.Join(tmpDir, strconv.Itoa(index)))
+		if openErr != nil {
+			merged.Close()
+			writeError(w, http.StatusBadRequest, "上传分片不完整")
+			return
+		}
+		written, copyErr := io.Copy(io.MultiWriter(merged, sha, md5Hash), chunkFile)
+		closeErr := chunkFile.Close()
+		if copyErr != nil || closeErr != nil {
+			merged.Close()
+			writeError(w, http.StatusInternalServerError, "合并上传内容失败")
+			return
+		}
+		mergedSize += written
+	}
+	if err := merged.Sync(); err != nil {
+		merged.Close()
+		writeError(w, http.StatusInternalServerError, "保存合并文件失败")
 		return
 	}
-	file.Close()
+	if err := merged.Close(); err != nil || mergedSize != task.Size {
+		writeError(w, http.StatusBadRequest, "上传分片不完整")
+		return
+	}
 	shaHex := hex.EncodeToString(sha.Sum(nil))
 	md5Hex := hex.EncodeToString(md5Hash.Sum(nil))
 	hashSummary = shaHex[:12]
@@ -1278,12 +1656,12 @@ func (s *Server) completeUpload(w http.ResponseWriter, r *http.Request) {
 		relativeDir = filepath.Join("files", strconv.FormatInt(user.ID, 10), now.Format("06"), now.Format("01"))
 	}
 	finalPath := ""
-	cleanup := true
+	cleanupFinal := true
 	defer func() {
-		if cleanup && finalPath != "" {
+		if cleanupFinal && finalPath != "" {
 			_ = os.Remove(finalPath)
 		}
-		_ = os.RemoveAll(filepath.Join(s.config.DataDir, "tmp", task.ID))
+		_ = os.RemoveAll(tmpDir)
 	}()
 	fileRecord := store.File{UserID: user.ID, Name: task.Name, StoredName: storedName, Size: task.Size, Mime: task.Mime, SHA256: shaHex, MD5: md5Hex, StoragePath: relativeDir}
 	completed, err := s.store.CompleteUploadWithPlacement(r.Context(), task, fileRecord, func(storagePath string) error {
@@ -1296,7 +1674,7 @@ func (s *Server) completeUpload(w http.ResponseWriter, r *http.Request) {
 		} else if !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
-		return os.Rename(tmpPath, finalPath)
+		return os.Rename(mergedPath, finalPath)
 	})
 	if err != nil {
 		log.Printf("complete upload: %v", err)
@@ -1305,7 +1683,10 @@ func (s *Server) completeUpload(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "保存文件记录失败")
 		return
 	}
-	cleanup = false
+	if err := s.store.DeleteChunks(r.Context(), task.ID); err != nil {
+		log.Printf("delete uploaded chunks: %v", err)
+	}
+	cleanupFinal = false
 	auditResult, auditReason = "success", ""
 	serviceResult, serviceReason = "success", ""
 	writeData(w, http.StatusOK, "上传完成", publicFile(completed))
@@ -1366,6 +1747,289 @@ func (s *Server) download(w http.ResponseWriter, r *http.Request) {
 	auditResult, auditReason = "success", ""
 	serviceResult, serviceReason = "success", ""
 	http.ServeContent(w, r, file.Name, parseTime(file.CreatedAt), handle)
+}
+
+// createShare validates ownership and creates a random, time-limited sharing link.
+// createShare 校验文件归属并创建随机、限时的分享链接。
+func (s *Server) createShare(w http.ResponseWriter, r *http.Request) {
+	user := currentUser(r.Context())
+	target := r.PathValue("id")
+	result, reason := "failure", "not_found"
+	defer func() {
+		s.serviceEvent(r, "share_create", user.Username, "name=%s result=%s reason=%s", target, result, reason)
+		s.recordAudit(r, &user.ID, user.Username, "share", target, result, reason)
+	}()
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "文件不存在")
+		return
+	}
+	file, err := s.store.FindFile(r.Context(), id)
+	if err != nil || file.Status != "ready" || (file.UserID != user.ID && user.Role != "admin") {
+		writeError(w, http.StatusNotFound, "文件不存在")
+		return
+	}
+	target = file.Name
+	var input shareRequest
+	if !decodeJSON(w, r, &input) {
+		reason = "invalid_request"
+		return
+	}
+	if input.ExpiresInHours < 1 {
+		reason = "invalid_expiry"
+		writeError(w, http.StatusBadRequest, "分享有效期无效")
+		return
+	}
+	if input.MaxDownloads < 0 || input.MaxDownloads > 100000 {
+		reason = "invalid_limit"
+		writeError(w, http.StatusBadRequest, "分享次数限制无效")
+		return
+	}
+	expiresAt := time.Now().UTC().Add(time.Duration(input.ExpiresInHours) * time.Hour)
+	var share store.Share
+	for attempt := 0; attempt < 5; attempt++ {
+		token, tokenErr := randomShareToken()
+		if tokenErr != nil {
+			reason = "token_failed"
+			writeError(w, http.StatusInternalServerError, "创建分享链接失败")
+			return
+		}
+		if err := s.store.CreateShare(r.Context(), file.ID, user.ID, token, expiresAt, input.MaxDownloads); errors.Is(err, store.ErrConflict) {
+			continue
+		} else if err != nil {
+			reason = "create_failed"
+			writeError(w, http.StatusInternalServerError, "创建分享链接失败")
+			return
+		}
+		share, err = s.store.GetShareByToken(r.Context(), token)
+		if err != nil {
+			reason = "load_failed"
+			writeError(w, http.StatusInternalServerError, "创建分享链接失败")
+			return
+		}
+		result, reason = "success", ""
+		writeData(w, http.StatusCreated, "分享链接已创建", map[string]any{
+			"id": share.ID, "token": share.Token, "url": "/" + share.Token,
+			"expiresAt": share.ExpiresAt, "maxDownloads": share.MaxDownloads, "downloadCount": share.DownloadCount,
+			"fileName": file.Name, "fileSize": file.Size,
+		})
+		return
+	}
+	reason = "token_conflict"
+	writeError(w, http.StatusInternalServerError, "创建分享链接失败")
+}
+
+// shareMeta exposes only public file and sharing metadata for anonymous viewers.
+// shareMeta 向匿名访问者仅公开文件和分享元数据。
+func (s *Server) shareMeta(w http.ResponseWriter, r *http.Request) {
+	token := r.PathValue("token")
+	target := token
+	result, reason := "failure", "share_not_found"
+	defer func() {
+		s.serviceEvent(r, "share_view", "anonymous", "target=%s result=%s reason=%s", target, result, reason)
+		s.recordAudit(r, nil, "anonymous", "share_view", target, result, reason)
+	}()
+	share, err := s.store.GetShareByToken(r.Context(), token)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "分享不存在")
+		return
+	}
+	file, err := s.store.FindFile(r.Context(), share.FileID)
+	if err != nil || file.Status != "ready" {
+		writeError(w, http.StatusNotFound, "分享不存在")
+		return
+	}
+	target = file.Name
+	if !shareActive(share.ExpiresAt) {
+		reason = "share_expired"
+		writeError(w, http.StatusNotFound, "分享链接已过期")
+		return
+	}
+	owner, err := s.store.GetUser(share.CreatedBy)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "分享不存在")
+		return
+	}
+	result, reason = "success", ""
+	writeData(w, http.StatusOK, "获取成功", map[string]any{
+		"fileName": file.Name, "fileSize": file.Size, "mime": effectiveFileMIME(file),
+		"expiresAt": share.ExpiresAt, "maxDownloads": share.MaxDownloads, "downloadCount": share.DownloadCount,
+		"createdBy": owner.Username,
+	})
+}
+
+// shareDownload consumes a share slot before streaming the ready file with Range support.
+// shareDownload 原子消耗分享次数后，以支持 Range 的方式流式输出 ready 文件。
+func (s *Server) shareDownload(w http.ResponseWriter, r *http.Request) {
+	token := r.PathValue("token")
+	target := token
+	result, reason := "failure", "share_not_found"
+	defer func() {
+		s.serviceEvent(r, "share_download", "anonymous", "target=%s result=%s reason=%s", target, result, reason)
+		s.recordAudit(r, nil, "anonymous", "share_download", target, result, reason)
+	}()
+	share, err := s.store.GetShareByToken(r.Context(), token)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "分享不存在")
+		return
+	}
+	file, err := s.store.FindFile(r.Context(), share.FileID)
+	if err != nil || file.Status != "ready" {
+		writeError(w, http.StatusNotFound, "分享不存在")
+		return
+	}
+	target = file.Name
+	if !shareActive(share.ExpiresAt) {
+		reason = "share_expired"
+		writeError(w, http.StatusForbidden, "分享链接已过期")
+		return
+	}
+	allowed, err := s.store.IncrementShareDownloads(r.Context(), token, share.MaxDownloads)
+	if err != nil {
+		reason = "download_count_failed"
+		writeError(w, http.StatusInternalServerError, "分享下载失败")
+		return
+	}
+	if !allowed {
+		reason = "share_limit"
+		writeError(w, http.StatusForbidden, "分享次数已用完")
+		return
+	}
+	handle, err := os.Open(filepath.Join(s.config.DataDir, file.StoragePath))
+	if err != nil {
+		reason = "content_not_found"
+		writeError(w, http.StatusNotFound, "文件内容不存在")
+		return
+	}
+	defer handle.Close()
+	w.Header().Set("Content-Type", effectiveFileMIME(file))
+	w.Header().Set("Content-Disposition", contentDisposition(file.Name))
+	result, reason = "success", ""
+	http.ServeContent(w, r, file.Name, parseTime(file.CreatedAt), handle)
+}
+
+// deleteShares revokes all links for an owned file without exposing other users' files.
+// deleteShares 撤销当前用户文件的全部分享，并对他人文件保持 404。
+func (s *Server) deleteShares(w http.ResponseWriter, r *http.Request) {
+	user := currentUser(r.Context())
+	target := r.PathValue("id")
+	result, reason := "failure", "not_found"
+	defer func() {
+		s.serviceEvent(r, "share_revoke", user.Username, "name=%s result=%s reason=%s", target, result, reason)
+		s.recordAudit(r, &user.ID, user.Username, "share", target, result, reason)
+	}()
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "文件不存在")
+		return
+	}
+	file, err := s.store.FindFile(r.Context(), id)
+	if err != nil || file.Status != "ready" || (file.UserID != user.ID && user.Role != "admin") {
+		writeError(w, http.StatusNotFound, "文件不存在")
+		return
+	}
+	target = file.Name
+	removed, err := s.store.DeleteSharesByFile(r.Context(), id)
+	if err != nil {
+		reason = "delete_failed"
+		writeError(w, http.StatusInternalServerError, "撤销分享失败")
+		return
+	}
+	result, reason = "success", ""
+	writeData(w, http.StatusOK, "分享已撤销", map[string]any{"removed": removed})
+}
+
+func shareActive(expiresAt string) bool {
+	// shareActive accepts a link only while its RFC3339 deadline is still in the future.
+	// shareActive 仅在 RFC3339 有效期截止时间尚未到达时接受链接。
+	deadline, err := time.Parse(time.RFC3339, expiresAt)
+	return err == nil && time.Now().UTC().Before(deadline)
+}
+
+func randomShareToken() (string, error) {
+	// randomShareToken uses crypto/rand to create a 64-character alphanumeric token.
+	// randomShareToken 使用 crypto/rand 生成 64 位字母数字 token。
+	const alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	result := make([]byte, 64)
+	for index := range result {
+		value, err := rand.Int(rand.Reader, big.NewInt(int64(len(alphabet))))
+		if err != nil {
+			return "", err
+		}
+		result[index] = alphabet[value.Int64()]
+	}
+	return string(result), nil
+}
+
+// preview serves approved media inline and treats every other MIME type as a download.
+// preview 对白名单 MIME inline 输出，其他类型按附件下载处理。
+func (s *Server) preview(w http.ResponseWriter, r *http.Request) {
+	user := currentUser(r.Context())
+	target := r.PathValue("id")
+	result, reason := "failure", "not_found"
+	defer func() {
+		s.serviceEvent(r, "download", user.Username, "name=%s result=%s reason=%s", target, result, reason)
+		s.recordAudit(r, &user.ID, user.Username, "download", target, result, reason)
+	}()
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "文件编号无效")
+		return
+	}
+	file, err := s.store.FindFile(r.Context(), id)
+	if err == nil {
+		target = file.Name
+	}
+	if errors.Is(err, store.ErrNotFound) || err != nil || file.Status != "ready" || (file.UserID != user.ID && user.Role != "admin") {
+		writeError(w, http.StatusNotFound, "文件不存在")
+		return
+	}
+	handle, err := os.Open(filepath.Join(s.config.DataDir, file.StoragePath))
+	if err != nil {
+		reason = "content_not_found"
+		writeError(w, http.StatusNotFound, "文件内容不存在")
+		return
+	}
+	defer handle.Close()
+	contentType := effectiveFileMIME(file)
+	w.Header().Set("Content-Type", contentType)
+	if previewMIMEAllowed(contentType) {
+		w.Header().Set("Content-Disposition", "inline")
+	} else {
+		w.Header().Set("Content-Disposition", contentDisposition(file.Name))
+	}
+	result, reason = "success", ""
+	http.ServeContent(w, r, file.Name, parseTime(file.CreatedAt), handle)
+}
+
+var previewMIMETypes = map[string]bool{
+	"image/png": true, "image/jpeg": true, "image/gif": true, "image/webp": true, "image/svg+xml": true,
+	"text/plain": true, "text/markdown": true, "text/csv": true, "text/x-log": true, "text/html": true,
+	"application/json": true, "application/pdf": true,
+	"video/mp4": true, "video/webm": true,
+}
+
+func effectiveFileMIME(file store.File) string {
+	// effectiveFileMIME falls back to the filename extension when metadata has no MIME.
+	// effectiveFileMIME 在元数据 MIME 为空时按文件扩展名推断类型。
+	contentType := strings.TrimSpace(file.Mime)
+	if contentType == "" {
+		contentType = mime.TypeByExtension(strings.ToLower(filepath.Ext(file.Name)))
+	}
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	return contentType
+}
+
+func previewMIMEAllowed(contentType string) bool {
+	// previewMIMEAllowed compares the media type while preserving any original parameters in the header.
+	// previewMIMEAllowed 比较媒体类型，同时保留响应头中的原始参数。
+	base, _, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		base = strings.TrimSpace(strings.SplitN(contentType, ";", 2)[0])
+	}
+	return previewMIMETypes[strings.ToLower(base)]
 }
 
 func (s *Server) deleteFile(w http.ResponseWriter, r *http.Request) {
@@ -1689,9 +2353,11 @@ func (s *Server) stats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	data := map[string]any{
-		"users": stats["users"],
-		"files": stats["files"],
-		"bytes": stats["bytes"],
+		"users":          stats["users"],
+		"files":          stats["files"],
+		"bytes":          stats["bytes"],
+		"shares":         stats["shares"],
+		"shareDownloads": stats["shareDownloads"],
 		"disk": map[string]int64{
 			"total":        total,
 			"used":         used,
@@ -1732,7 +2398,7 @@ func (s *Server) listLogs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) logActions(w http.ResponseWriter, _ *http.Request) {
-	writeData(w, http.StatusOK, "获取成功", []string{"login", "upload", "download", "share", "share_view", "share_download"})
+	writeData(w, http.StatusOK, "获取成功", []string{"login", "upload", "download", "share", "share_view", "share_download", "register"})
 }
 
 func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
@@ -1790,6 +2456,12 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 	if input.IPUnlockMinutes != nil {
 		settings.IPUnlockMinutes = *input.IPUnlockMinutes
 	}
+	if input.RegisterEnabled != nil {
+		settings.RegisterEnabled = *input.RegisterEnabled
+	}
+	if input.UploadRateLimit != nil {
+		settings.UploadRateLimit = *input.UploadRateLimit
+	}
 	if validationError := validateLogSettings(settings); validationError != nil {
 		writeError(w, http.StatusBadRequest, validationError.Error())
 		return
@@ -1832,6 +2504,8 @@ func validateLogSettings(settings store.LogSettings) error {
 		return errors.New("IP 锁定阈值无效")
 	case settings.IPUnlockMinutes < 1:
 		return errors.New("IP 解锁时长无效")
+	case settings.UploadRateLimit < 0:
+		return errors.New("上传限速无效")
 	default:
 		return nil
 	}

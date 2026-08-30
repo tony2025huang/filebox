@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"errors"
 	"flag"
 	"fmt"
@@ -123,6 +124,21 @@ func runServe(args []string) error {
 		return fmt.Errorf("open storage: %w", err)
 	}
 	defer db.Close()
+	if *registerEnabled {
+		// --register-enabled is a first-deployment seed; the persisted admin setting controls later restarts.
+		// --register-enabled 仅用于首次部署种子，后续重启以持久化的管理设置为准。
+		_, adminErr := db.GetUserByUsername(*adminUser)
+		if adminErr != nil && !errors.Is(adminErr, store.ErrNotFound) {
+			return fmt.Errorf("check admin account: %w", adminErr)
+		}
+		var storedRegisterSetting string
+		settingErr := db.DB.QueryRowContext(context.Background(), "SELECT value FROM settings WHERE key = 'registerEnabled'").Scan(&storedRegisterSetting)
+		if errors.Is(settingErr, sql.ErrNoRows) || storedRegisterSetting == "" || errors.Is(adminErr, store.ErrNotFound) {
+			if _, err := db.DB.ExecContext(context.Background(), "INSERT INTO settings(key, value) VALUES('registerEnabled', 'true') ON CONFLICT(key) DO UPDATE SET value = excluded.value"); err != nil {
+				return fmt.Errorf("seed register setting: %w", err)
+			}
+		}
+	}
 
 	if err := db.EnsureAdmin(*adminUser, *adminPass, 100*1024*1024*1024); err != nil {
 		return fmt.Errorf("ensure admin: %w", err)
@@ -207,7 +223,9 @@ func runAdminResetPassword(args []string) int {
 	newPassword := flags.String("new-password", "", "new password")
 	generate := flags.Bool("generate", false, "generate a one-time password")
 	logging := addLoggingFlags(flags)
-	if err := flags.Parse(args[1:]); err != nil {
+	// runAdminResetPassword 解析剩余 flags（args 已剔除子命令名，不能再次去掉首项）。
+	// runAdminResetPassword parses the remaining flags; args already excludes the subcommand name.
+	if err := flags.Parse(args); err != nil {
 		return 2
 	}
 	if flags.NArg() != 0 || (*generate && *newPassword != "") || (!*generate && *newPassword == "") {

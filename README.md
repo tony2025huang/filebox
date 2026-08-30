@@ -2,13 +2,20 @@
 
 [English](README.en.md)
 
-FileBox 是一个可自托管的文件传输与管理系统，使用单个 Go 二进制文件跨 Windows/Linux 部署。阶段一提供多用户隔离、JWT 登录、单文件上传、Range 下载、双哈希校验、配额、磁盘保护、审计日志、品牌定制和多语言界面。
+FileBox 是一个可自托管的文件传输与管理系统，使用单个 Go 二进制文件跨 Windows/Linux 部署。阶段一提供多用户隔离、JWT 登录、单文件上传、Range 下载、双哈希校验、配额、磁盘保护、审计日志、品牌定制和多语言界面；阶段二（v0.2.0）在此基础上加入分片断点续传、秒传、文件夹上传、分享链接、在线预览、上传限速、开放注册开关和系统统计补全。
 
 ## 功能清单
 
 - 多用户与角色：`admin` 管理员和 `user` 普通用户；管理员可管理账户、角色、配额、密码和禁用状态，普通用户只能访问自己的文件。
 - JWT 登录与安全：密码使用 bcrypt；JWT 默认有效期 7 天；连续失败可按后台策略临时或永久锁定，锁定可自动解除；登录失败统一返回“用户名或密码错误”，减少账号枚举风险。
 - 文件传输：上传初始化、单分片 `0` 上传、完成提交、列表搜索/分页、删除和下载；`http.ServeContent` 支持 `Range`，范围请求返回 `206 Partial Content`。
+- 分片断点续传：支持 2–8 MiB 分片，分片可乱序/重复上传（幂等覆盖），服务端以 `chunks` 表持久化已上传分片，`GET /api/files/{taskID}/status` 供断点续传，`complete` 校验缺片后流式合并并计算双哈希；前端 4 路并发分片、暂停/继续、失败重试。
+- 秒传：`POST /api/files/check` 按 md5 优先、sha256 兜底在本人文件内匹配，命中直接返回已有记录，不重复落盘；前端用 WebCrypto 计算 sha256 实现秒传检查。
+- 文件夹上传：`upload-init` 支持 `dir` 相对目录字段，保留 `data/files/<user>/<yy>/<mm>/<相对目录>/<name>` 结构；不同相对目录同名文件不加序号。
+- 分享链接：创建（有效期/最大下载次数）、匿名元数据与匿名下载（过期/超次数拒绝）、撤销分享；分享创建/查看/下载计入审计日志；前端提供 `/:token` 匿名分享页。
+- 在线预览：`GET /api/files/{id}/preview` 对图片/文本/视频/PDF/JSON 白名单 inline 输出，其余类型强制附件下载。
+- 上传限速：按用户令牌桶（`golang.org/x/time/rate`），速率由管理员设置（字节/秒，`0`=不限，默认不限），作用于分片写入。
+- 开放注册：`POST /api/auth/register` 由 `registerEnabled` 设置控制（默认关闭），开启后按密码策略创建普通用户并直接登录；登录页按公开开关显示注册入口。
 - 同名冲突：同一用户当月目录存在同名文件时，初始化返回 `409`，前端可选择覆盖或重命名；覆盖事务性替换，重命名分配最小可用数字后缀。
 - 文件名安全：上传前拒绝路径分隔符、控制字符、Windows 非法字符、点号遍历标记、空名/`.`/`..` 和超过 255 字节的名称；落盘名保留原名语义并替换部分非法字符。
 - 配额：初始化时预留待上传字节，默认配额为 100 GiB；覆盖时先扣除旧文件占用。
@@ -49,6 +56,8 @@ FileBox 是一个可自托管的文件传输与管理系统，使用单个 Go �
 `R-SRVLOG`：可选服务文件日志，按本地日期滚动、gzip 归档并按保留天数清理；未启用时仅输出控制台。
 
 `R-SERVICE/R-PROXY`：Linux systemd、Windows NSSM/sc 和 Nginx HTTPS 反向代理模板见 [`deploy/`](deploy/)。
+
+`STAGE2`：分片断点续传、秒传、文件夹上传、分享链接、在线预览、上传限速、开放注册开关和系统统计补全（见上方功能清单）。
 
 ## 技术栈
 
@@ -102,7 +111,7 @@ filebox --log-enabled=true --log-dir=/var/log/filebox --log-retention-days=90
 | `--max-file-size` | `FILEBOX_MAX_FILE_SIZE` | `107374182400`（100 GiB） | 后端单文件大小上限 |
 | `--min-free-space` | `FILEBOX_MIN_FREE_SPACE` | `2147483648`（2 GiB） | 上传初始化要求的最小可用空间；`0` 关闭保护 |
 | `--jwt-secret` | `FILEBOX_JWT_SECRET` | `filebox-development-secret-change-me` | JWT HS256 签名密钥；生产必须替换 |
-| `--register-enabled` | `FILEBOX_REGISTER_ENABLED` | `false` | 注册配置开关；阶段一没有公开注册接口 |
+| `--register-enabled` | `FILEBOX_REGISTER_ENABLED` | `false` | 注册开关首次部署种子；此后以管理后台 `registerEnabled` 设置为准 |
 | `--admin-user` | `FILEBOX_ADMIN_USER` | `admin` | 首次创建的管理员用户名 |
 | `--admin-pass` | `FILEBOX_ADMIN_PASS` | `admin123` | 首次创建的管理员密码；首次登录必须修改 |
 | `--trusted-proxies` | `FILEBOX_TRUSTED_PROXIES` | 空 | 可信代理 IP/CIDR 列表；为空时忽略 X-Forwarded-For |
@@ -110,7 +119,7 @@ filebox --log-enabled=true --log-dir=/var/log/filebox --log-retention-days=90
 | `--log-dir` | `FILEBOX_LOG_DIR` | `<程序执行目录>/logs` | 服务日志目录 |
 | `--log-retention-days` | `FILEBOX_LOG_RETENTION_DAYS` | `90` | 服务日志和 gzip 归档保留天数 |
 
-后端上限为 100 GiB，但阶段一浏览器界面将直接上传限制为 100 MiB。管理员策略默认值为：日志留存 30 天、连续失败 5 次锁定、自动解锁开启、5 分钟后解锁。
+后端上限为 100 GiB；阶段二前端对大文件采用 4 MiB 分片上传，单文件仍受后端上限约束。管理员策略默认值为：日志留存 30 天、连续失败 5 次锁定、自动解锁开启、5 分钟后解锁、上传限速 `0`（不限）、注册开关关闭。
 
 ## 服务化部署
 
@@ -118,7 +127,7 @@ systemd、Windows NSSM/sc 和 Nginx 反向代理的完整示例与安全说明�
 
 ## API 摘要
 
-JSON 响应格式为 `{ "code": number, "message": string, "data": any }`；受保护接口需要 `Authorization: Bearer <token>`。主要路径包括：认证 `/api/auth/login`、`/api/auth/totp`、`/api/auth/totp-qrcode`、`/api/auth/change-password`、`/api/auth/logout`、`/api/auth/me`、`/api/auth/language`；公开品牌 `/api/brand` 和 `/brand/{asset}`；文件 `/api/files`、`/api/files/upload-init`、`/api/files/{taskID}/chunks/0`、`/api/files/{taskID}/complete`、`/api/files/{id}/download`、`/api/files/{id}`；日志 `/api/logs`、`/api/logs/actions`；管理员 `/api/admin/users[/{id}]`、`/api/admin/users/{id}/totp`、`/api/admin/users/{id}/ip-acl`、`/api/admin/stats`、`/api/admin/settings`、`/api/admin/brand`、`/api/admin/locks`。
+JSON 响应格式为 `{ "code": number, "message": string, "data": any }`；受保护接口需要 `Authorization: Bearer <token>`。主要路径包括：认证 `/api/auth/login`、`/api/auth/register`、`/api/auth/totp`、`/api/auth/totp-qrcode`、`/api/auth/change-password`、`/api/auth/logout`、`/api/auth/me`、`/api/auth/language`；公开品牌 `/api/brand` 和 `/brand/{asset}`；文件 `/api/files`、`/api/files/upload-init`、`/api/files/check`、`/api/files/{taskID}/chunks/{index}`、`/api/files/{taskID}/status`、`/api/files/{taskID}/complete`、`/api/files/{id}/download`、`/api/files/{id}/preview`、`/api/files/{id}/share`、`/api/files/{id}/shares`、`/api/files/shared/{token}/meta`、`/api/files/shared/{token}/download`、`/api/files/{id}`；日志 `/api/logs`、`/api/logs/actions`；管理员 `/api/admin/users[/{id}]`、`/api/admin/users/{id}/totp`、`/api/admin/users/{id}/ip-acl`、`/api/admin/stats`、`/api/admin/settings`、`/api/admin/brand`、`/api/admin/locks`。
 
 文件列表、用户列表和日志列表默认 `pageSize=20`，服务端最大 100。管理员可查看全部文件和日志，普通用户按账户隔离。下载支持 Range；登出不建立 JWT 服务端黑名单。
 
@@ -128,11 +137,14 @@ JSON 响应格式为 `{ "code": number, "message": string, "data": any }`；受�
 
 ## 数据存储说明
 
-`--data` 下包含 `filebox.db`；默认配置对应 `data/files/<userID>/<yy>/<mm>/<stored-name>`、`data/tmp/<taskID>/0` 和 `data/brand/<favicon|login-logo|main-logo>.<ext>`。SQLite 保存元数据、所有权、配额和审计日志。上传完成前写入临时文件，完成后移动到用户/年份/月份目录。用户看到的原始名保存为 `name`，落盘名保存为 `stored_name`；冲突时使用 `name (1).ext`、`name (2).ext` 等最小可用后缀。删除先标记 `deleted`、扣减配额，再清理物理内容。
+`--data` 下包含 `filebox.db`；默认配置对应 `data/files/<userID>/<yy>/<mm>[/<相对目录>]/<stored-name>`、`data/tmp/<taskID>/<分片索引>` 和 `data/brand/<favicon|login-logo|main-logo>.<ext>`。SQLite 保存元数据、所有权、配额、审计日志、分片记录（`chunks`）和分享记录（`shares`）。上传分片先写入临时目录，`complete` 校验齐备后流式合并到用户/年份/月份目录（相对目录可保留文件夹结构）。用户看到的原始名保存为 `name`，落盘名保存为 `stored_name`；冲突时使用 `name (1).ext`、`name (2).ext` 等最小可用后缀。删除先标记 `deleted`、扣减配额，再清理物理内容；被删除记录占用的存储路径可在重传时自动复用。
 
-## 已知限制与阶段二
+## 已知限制
 
-尚未实现：分片断点续传、真正的多分片并发、秒传、文件夹上传、分享链接、在线预览、限速、开放注册，以及废弃上传任务的定时清理。`--register-enabled` 仅保留配置位，当前没有公开注册路由。
+- 秒传仅在同一用户范围内匹配（跨用户不做内容去重）。
+- 分享 token 随机生成；`meta` 接口公开文件名/大小/次数等元数据，请勿分享含敏感信息的文件。
+- 限速按用户令牌桶生效于分片写入；速率变更在下一请求生效。
+- 未实现的优化项：废弃上传任务的定时清理、服务端主动推送上传进度。
 
 ## 许可与致谢
 

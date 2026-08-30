@@ -3,12 +3,18 @@ package httpapi
 import (
 	"bytes"
 	"context"
+	"crypto/md5"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
+	"time"
 
 	"filebox/internal/store"
 )
@@ -19,7 +25,7 @@ func newTestServer(t *testing.T) (*store.Store, http.Handler) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.EnsureAdmin("admin", "admin123", 1024*1024); err != nil {
+	if err := db.EnsureAdmin("admin", "admin123", 32*1024*1024); err != nil {
 		db.Close()
 		t.Fatal(err)
 	}
@@ -27,9 +33,34 @@ func newTestServer(t *testing.T) (*store.Store, http.Handler) {
 		db.Close()
 		t.Fatal(err)
 	}
-	server := NewServer(db, Config{DataDir: db.DataDir, MaxFileSize: 1024 * 1024, MinFreeSpace: 0, JWTSecret: []byte("test-secret")})
+	server := NewServer(db, Config{DataDir: db.DataDir, MaxFileSize: 32 * 1024 * 1024, MinFreeSpace: 0, JWTSecret: []byte("test-secret")})
 	t.Cleanup(func() { db.Close() })
 	return db, server.Handler()
+}
+
+func testBinaryRequest(t *testing.T, handler http.Handler, method, path, token string, body []byte) *httptest.ResponseRecorder {
+	t.Helper()
+	request := httptest.NewRequest(method, path, bytes.NewReader(body))
+	request.ContentLength = int64(len(body))
+	if token != "" {
+		request.Header.Set("Authorization", "Bearer "+token)
+	}
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	return recorder
+}
+
+func initUpload(t *testing.T, handler http.Handler, token, name string, size, chunkSize int64, dir string) map[string]any {
+	t.Helper()
+	body, err := json.Marshal(map[string]any{"name": name, "size": size, "chunkSize": chunkSize, "dir": dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := testJSONRequest(t, handler, http.MethodPost, "/api/files/upload-init", token, string(body))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("upload init status = %d, want 200: %s", recorder.Code, recorder.Body.String())
+	}
+	return responseData(t, recorder)
 }
 
 func testJSONRequest(t *testing.T, handler http.Handler, method, path, token, body string) *httptest.ResponseRecorder {
@@ -118,6 +149,138 @@ func TestZeroByteUploadCompletesAndIsListed(t *testing.T) {
 	}
 }
 
+func TestMultipartUploadStatusExpectedSizesAndComplete(t *testing.T) {
+	db, handler := newTestServer(t)
+	token := testAdminToken(t, handler)
+	chunkSize := int64(2 * 1024 * 1024)
+	data := make([]byte, 5*1024*1024)
+	for index := range data {
+		data[index] = byte(index % 251)
+	}
+	initData := initUpload(t, handler, token, "multipart.bin", int64(len(data)), chunkSize, "")
+	if initData["chunkSize"] != float64(chunkSize) || initData["totalChunks"] != float64(3) {
+		t.Fatalf("multipart init = %#v", initData)
+	}
+	taskID := initData["taskId"].(string)
+	if got := testBinaryRequest(t, handler, http.MethodPut, "/api/files/"+taskID+"/chunks/0", token, data[:2*1024*1024]); got.Code != http.StatusOK {
+		t.Fatalf("chunk 0 status = %d: %s", got.Code, got.Body.String())
+	}
+	if got := testBinaryRequest(t, handler, http.MethodPut, "/api/files/"+taskID+"/chunks/2", token, data[4*1024*1024:]); got.Code != http.StatusOK {
+		t.Fatalf("last chunk status = %d: %s", got.Code, got.Body.String())
+	}
+	status := testJSONRequest(t, handler, http.MethodGet, "/api/files/"+taskID+"/status", token, "")
+	if status.Code != http.StatusOK {
+		t.Fatalf("upload status = %d: %s", status.Code, status.Body.String())
+	}
+	statusData := responseData(t, status)
+	if got := statusData["uploadedChunks"].([]any); len(got) != 2 || got[0] != float64(0) || got[1] != float64(2) {
+		t.Fatalf("uploaded chunks = %#v, want [0 2]", got)
+	}
+	incomplete := testJSONRequest(t, handler, http.MethodPost, "/api/files/"+taskID+"/complete", token, "{}")
+	if incomplete.Code != http.StatusBadRequest || !strings.Contains(incomplete.Body.String(), "上传分片不完整") {
+		t.Fatalf("incomplete complete = %d: %s", incomplete.Code, incomplete.Body.String())
+	}
+	if got := testBinaryRequest(t, handler, http.MethodPut, "/api/files/"+taskID+"/chunks/1", token, data[2*1024*1024:4*1024*1024]); got.Code != http.StatusOK {
+		t.Fatalf("chunk 1 status = %d: %s", got.Code, got.Body.String())
+	}
+	complete := testJSONRequest(t, handler, http.MethodPost, "/api/files/"+taskID+"/complete", token, "{}")
+	if complete.Code != http.StatusOK {
+		t.Fatalf("complete status = %d: %s", complete.Code, complete.Body.String())
+	}
+	fileData := responseData(t, complete)
+	md5Sum := md5.Sum(data)
+	shaSum := sha256.Sum256(data)
+	if fileData["md5"] != hex.EncodeToString(md5Sum[:]) || fileData["sha256"] != hex.EncodeToString(shaSum[:]) {
+		t.Fatalf("complete hashes = %#v", fileData)
+	}
+	file, err := db.FindFile(context.Background(), int64(fileData["id"].(float64)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, err := os.ReadFile(filepath.Join(db.DataDir, file.StoragePath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(stored, data) {
+		t.Fatal("merged file content differs from uploaded content")
+	}
+	chunks, err := db.ListChunks(context.Background(), taskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chunks) != 0 {
+		t.Fatalf("chunks after complete = %d, want 0", len(chunks))
+	}
+}
+
+func TestMultipartChunkSizeAndDirectoryValidation(t *testing.T) {
+	db, handler := newTestServer(t)
+	token := testAdminToken(t, handler)
+	tooSmall := testJSONRequest(t, handler, http.MethodPost, "/api/files/upload-init", token, `{"name":"large.bin","size":5242880,"chunkSize":1048576}`)
+	if tooSmall.Code != http.StatusBadRequest || !strings.Contains(tooSmall.Body.String(), "分片大小必须在 2MB-8MB 之间") {
+		t.Fatalf("small chunk init = %d: %s", tooSmall.Code, tooSmall.Body.String())
+	}
+	invalidDir := testJSONRequest(t, handler, http.MethodPost, "/api/files/upload-init", token, `{"name":"file.txt","size":1,"chunkSize":0,"dir":"../"}`)
+	if invalidDir.Code != http.StatusBadRequest || !strings.Contains(invalidDir.Body.String(), "目录无效") {
+		t.Fatalf("invalid dir init = %d: %s", invalidDir.Code, invalidDir.Body.String())
+	}
+	for _, dir := range []string{"assets/icons", "assets/images"} {
+		initData := initUpload(t, handler, token, "icon.svg", 1, 0, dir)
+		taskID := initData["taskId"].(string)
+		if got := testBinaryRequest(t, handler, http.MethodPut, "/api/files/"+taskID+"/chunks/0", token, []byte("x")); got.Code != http.StatusOK {
+			t.Fatalf("directory chunk status = %d: %s", got.Code, got.Body.String())
+		}
+		complete := testJSONRequest(t, handler, http.MethodPost, "/api/files/"+taskID+"/complete", token, "{}")
+		if complete.Code != http.StatusOK {
+			t.Fatalf("directory complete status = %d: %s", complete.Code, complete.Body.String())
+		}
+		fileData := responseData(t, complete)
+		file, err := db.FindFile(context.Background(), int64(fileData["id"].(float64)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if file.StoredName != "icon.svg" || !strings.Contains(filepath.ToSlash(file.StoragePath), filepath.ToSlash(dir)+"/icon.svg") {
+			t.Fatalf("directory storage path = %q, name = %q", file.StoragePath, file.StoredName)
+		}
+	}
+}
+
+func TestInstantUploadCheckHitAndMiss(t *testing.T) {
+	db, handler := newTestServer(t)
+	token := testAdminToken(t, handler)
+	content := []byte("instant upload content")
+	initData := initUpload(t, handler, token, "instant.txt", int64(len(content)), 0, "")
+	taskID := initData["taskId"].(string)
+	if got := testBinaryRequest(t, handler, http.MethodPut, "/api/files/"+taskID+"/chunks/0", token, content); got.Code != http.StatusOK {
+		t.Fatalf("instant upload chunk status = %d: %s", got.Code, got.Body.String())
+	}
+	complete := testJSONRequest(t, handler, http.MethodPost, "/api/files/"+taskID+"/complete", token, "{}")
+	if complete.Code != http.StatusOK {
+		t.Fatalf("instant upload complete status = %d: %s", complete.Code, complete.Body.String())
+	}
+	fileData := responseData(t, complete)
+	var before int
+	if err := db.DB.QueryRow("SELECT COUNT(id) FROM files WHERE status = 'ready'").Scan(&before); err != nil {
+		t.Fatal(err)
+	}
+	checkBody := `{"md5":"00000000000000000000000000000000","sha256":"` + fileData["sha256"].(string) + `","size":` + strconv.FormatInt(int64(len(content)), 10) + `}`
+	hit := testJSONRequest(t, handler, http.MethodPost, "/api/files/check", token, checkBody)
+	if hit.Code != http.StatusOK || responseData(t, hit)["instant"] != true {
+		t.Fatalf("instant hit = %d: %s", hit.Code, hit.Body.String())
+	}
+	miss := testJSONRequest(t, handler, http.MethodPost, "/api/files/check", token, `{"sha256":"no-match","size":22}`)
+	if miss.Code != http.StatusOK || responseData(t, miss)["instant"] != false {
+		t.Fatalf("instant miss = %d: %s", miss.Code, miss.Body.String())
+	}
+	var after int
+	if err := db.DB.QueryRow("SELECT COUNT(id) FROM files WHERE status = 'ready'").Scan(&after); err != nil {
+		t.Fatal(err)
+	}
+	if before != after {
+		t.Fatalf("file count changed after instant check: %d -> %d", before, after)
+	}
+}
+
 func TestPartialSettingsUpdatePreservesOtherValues(t *testing.T) {
 	_, handler := newTestServer(t)
 	token := testAdminToken(t, handler)
@@ -139,5 +302,183 @@ func TestPartialSettingsUpdatePreservesOtherValues(t *testing.T) {
 	}
 	if body.Message != "密码最小长度无效" {
 		t.Fatalf("invalid settings message = %q, want field-specific message", body.Message)
+	}
+}
+
+func uploadTestFile(t *testing.T, handler http.Handler, token, name, mimeType string, content []byte) map[string]any {
+	t.Helper()
+	input := map[string]any{"name": name, "size": len(content), "chunkSize": 0}
+	if mimeType != "" {
+		input["mime"] = mimeType
+	}
+	body, err := json.Marshal(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	init := testJSONRequest(t, handler, http.MethodPost, "/api/files/upload-init", token, string(body))
+	if init.Code != http.StatusOK {
+		t.Fatalf("upload init status = %d: %s", init.Code, init.Body.String())
+	}
+	taskID := responseData(t, init)["taskId"].(string)
+	chunk := testBinaryRequest(t, handler, http.MethodPut, "/api/files/"+taskID+"/chunks/0", token, content)
+	if chunk.Code != http.StatusOK {
+		t.Fatalf("upload chunk status = %d: %s", chunk.Code, chunk.Body.String())
+	}
+	complete := testJSONRequest(t, handler, http.MethodPost, "/api/files/"+taskID+"/complete", token, "{}")
+	if complete.Code != http.StatusOK {
+		t.Fatalf("upload complete status = %d: %s", complete.Code, complete.Body.String())
+	}
+	return responseData(t, complete)
+}
+
+func TestSharingLifecycleAndAtomicDownloadLimit(t *testing.T) {
+	db, handler := newTestServer(t)
+	token := testAdminToken(t, handler)
+	file := uploadTestFile(t, handler, token, "shared.txt", "text/plain", []byte("shared content"))
+	id := int64(file["id"].(float64))
+	invalid := testJSONRequest(t, handler, http.MethodPost, "/api/files/"+strconv.FormatInt(id, 10)+"/share", token, `{"expiresInHours":0}`)
+	if invalid.Code != http.StatusBadRequest {
+		t.Fatalf("invalid share expiry status = %d", invalid.Code)
+	}
+	created := testJSONRequest(t, handler, http.MethodPost, "/api/files/"+strconv.FormatInt(id, 10)+"/share", token, `{"expiresInHours":1,"maxDownloads":1}`)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create share status = %d: %s", created.Code, created.Body.String())
+	}
+	share := responseData(t, created)
+	shareToken := share["token"].(string)
+	if len(shareToken) != 64 || share["url"] != "/"+shareToken {
+		t.Fatalf("share token response = %#v", share)
+	}
+	meta := testJSONRequest(t, handler, http.MethodGet, "/api/files/shared/"+shareToken+"/meta", "", "")
+	if meta.Code != http.StatusOK {
+		t.Fatalf("share meta status = %d: %s", meta.Code, meta.Body.String())
+	}
+	down := testBinaryRequest(t, handler, http.MethodGet, "/api/files/shared/"+shareToken+"/download", "", nil)
+	if down.Code != http.StatusOK || !bytes.Equal(down.Body.Bytes(), []byte("shared content")) {
+		t.Fatalf("share download = %d, %q", down.Code, down.Body.String())
+	}
+	limited := testBinaryRequest(t, handler, http.MethodGet, "/api/files/shared/"+shareToken+"/download", "", nil)
+	if limited.Code != http.StatusForbidden {
+		t.Fatalf("limited share download status = %d", limited.Code)
+	}
+	stats := testJSONRequest(t, handler, http.MethodGet, "/api/admin/stats", token, "")
+	if stats.Code != http.StatusOK {
+		t.Fatalf("stats status = %d", stats.Code)
+	}
+	statsData := responseData(t, stats)
+	if statsData["shares"] != float64(1) || statsData["shareDownloads"] != float64(1) {
+		t.Fatalf("share stats = %#v", statsData)
+	}
+	if _, err := db.DB.Exec("UPDATE shares SET expires_at = ? WHERE token = ?", time.Now().UTC().Add(-time.Hour).Format(time.RFC3339), shareToken); err != nil {
+		t.Fatal(err)
+	}
+	expiredMeta := testJSONRequest(t, handler, http.MethodGet, "/api/files/shared/"+shareToken+"/meta", "", "")
+	if expiredMeta.Code != http.StatusNotFound {
+		t.Fatalf("expired share meta status = %d", expiredMeta.Code)
+	}
+	expiredDownload := testBinaryRequest(t, handler, http.MethodGet, "/api/files/shared/"+shareToken+"/download", "", nil)
+	if expiredDownload.Code != http.StatusForbidden {
+		t.Fatalf("expired share download status = %d", expiredDownload.Code)
+	}
+	revoked := testJSONRequest(t, handler, http.MethodDelete, "/api/files/"+strconv.FormatInt(id, 10)+"/shares", token, "")
+	if revoked.Code != http.StatusOK || responseData(t, revoked)["removed"] != float64(1) {
+		t.Fatalf("revoke share = %d: %s", revoked.Code, revoked.Body.String())
+	}
+	missing := testJSONRequest(t, handler, http.MethodGet, "/api/files/shared/"+shareToken+"/meta", "", "")
+	if missing.Code != http.StatusNotFound {
+		t.Fatalf("revoked share meta status = %d", missing.Code)
+	}
+}
+
+func TestPreviewContentDisposition(t *testing.T) {
+	_, handler := newTestServer(t)
+	token := testAdminToken(t, handler)
+	textFile := uploadTestFile(t, handler, token, "preview.txt", "text/plain", []byte("preview"))
+	zipFile := uploadTestFile(t, handler, token, "archive.zip", "application/zip", []byte("PK"))
+	inline := testBinaryRequest(t, handler, http.MethodGet, "/api/files/"+strconv.FormatInt(int64(textFile["id"].(float64)), 10)+"/preview", token, nil)
+	if inline.Code != http.StatusOK || inline.Header().Get("Content-Disposition") != "inline" {
+		t.Fatalf("inline preview = %d, %q", inline.Code, inline.Header().Get("Content-Disposition"))
+	}
+	attachment := testBinaryRequest(t, handler, http.MethodGet, "/api/files/"+strconv.FormatInt(int64(zipFile["id"].(float64)), 10)+"/preview", token, nil)
+	if attachment.Code != http.StatusOK || !strings.HasPrefix(attachment.Header().Get("Content-Disposition"), "attachment;") {
+		t.Fatalf("attachment preview = %d, %q", attachment.Code, attachment.Header().Get("Content-Disposition"))
+	}
+}
+
+func TestRegistrationSettingAndBrand(t *testing.T) {
+	_, handler := newTestServer(t)
+	adminToken := testAdminToken(t, handler)
+	closed := testJSONRequest(t, handler, http.MethodPost, "/api/auth/register", "", `{"username":"new-user","password":"Register1!"}`)
+	if closed.Code != http.StatusForbidden {
+		t.Fatalf("closed registration status = %d", closed.Code)
+	}
+	open := testJSONRequest(t, handler, http.MethodPut, "/api/admin/settings", adminToken, `{"registerEnabled":true,"uploadRateLimit":65536}`)
+	if open.Code != http.StatusOK {
+		t.Fatalf("open registration settings status = %d: %s", open.Code, open.Body.String())
+	}
+	brand := testJSONRequest(t, handler, http.MethodGet, "/api/brand", "", "")
+	if brand.Code != http.StatusOK || responseData(t, brand)["registerEnabled"] != true {
+		t.Fatalf("brand registration setting = %d: %s", brand.Code, brand.Body.String())
+	}
+	registered := testJSONRequest(t, handler, http.MethodPost, "/api/auth/register", "", `{"username":"new-user","password":"Register1!"}`)
+	if registered.Code != http.StatusCreated || responseData(t, registered)["token"] == "" {
+		t.Fatalf("register status = %d: %s", registered.Code, registered.Body.String())
+	}
+	duplicate := testJSONRequest(t, handler, http.MethodPost, "/api/auth/register", "", `{"username":"new-user","password":"Register1!"}`)
+	if duplicate.Code != http.StatusConflict {
+		t.Fatalf("duplicate registration status = %d", duplicate.Code)
+	}
+}
+
+func TestRateLimiterRebuildsWhenRateChanges(t *testing.T) {
+	var limiter rateLimiter
+	first := limiter.limiterFor(7, 1024)
+	if first == nil || first.Limit() != 1024 {
+		t.Fatalf("first limiter = %#v", first)
+	}
+	if got := limiter.limiterFor(7, 1024); got != first {
+		t.Fatal("same rate did not reuse limiter")
+	}
+	if got := limiter.limiterFor(7, 2048); got == first || got.Limit() != 2048 {
+		t.Fatal("changed rate did not rebuild limiter")
+	}
+	if limiter.limiterFor(7, 0) != nil {
+		t.Fatal("zero rate should disable limiter")
+	}
+}
+
+// TestReuploadAfterDeleteReusesStoragePath 覆盖删除后重传同名文件不再触发 storage_path 唯一约束（回归 D-FIX）。
+// TestReuploadAfterDeleteReusesStoragePath covers re-uploading a deleted name without hitting the storage_path UNIQUE constraint.
+func TestReuploadAfterDeleteReusesStoragePath(t *testing.T) {
+	db, handler := newTestServer(t)
+	token := testAdminToken(t, handler)
+	content := []byte("reupload after delete")
+	first := uploadTestFile(t, handler, token, "cycle.txt", "text/plain", content)
+	id := int64(first["id"].(float64))
+	deleted := testJSONRequest(t, handler, http.MethodDelete, "/api/files/"+strconv.FormatInt(id, 10), token, "")
+	if deleted.Code != http.StatusOK {
+		t.Fatalf("delete status = %d: %s", deleted.Code, deleted.Body.String())
+	}
+	second := uploadTestFile(t, handler, token, "cycle.txt", "text/plain", content)
+	if second["md5"] != first["md5"] {
+		t.Fatalf("reupload hashes differ: %#v vs %#v", second, first)
+	}
+	file, err := db.FindFile(context.Background(), int64(second["id"].(float64)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, err := os.ReadFile(filepath.Join(db.DataDir, file.StoragePath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(stored, content) {
+		t.Fatal("reuploaded content differs")
+	}
+	var readyCount int
+	if err := db.DB.QueryRow("SELECT COUNT(id) FROM files WHERE status = 'ready'").Scan(&readyCount); err != nil {
+		t.Fatal(err)
+	}
+	if readyCount != 1 {
+		t.Fatalf("ready files after reupload = %d, want 1", readyCount)
 	}
 }

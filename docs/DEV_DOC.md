@@ -39,7 +39,7 @@
 | 数据库 | SQLite（`modernc.org/sqlite` 纯 Go 驱动） | 单文件存储、免部署；纯 Go 无 CGO，交叉编译无障碍 |
 | 前端 | Vue3 + Vite + vue-router | 中文生态好、构建体积小，产物经 `embed` 打包进 Go 二进制 |
 | 鉴权 | JWT（`golang-jwt/jwt/v5`）+ `x/crypto/bcrypt` | 标准方案 |
-| 限速 | `golang.org/x/time/rate` 令牌桶 | 按用户限速（阶段二） |
+| 限速 | `golang.org/x/time/rate` 令牌桶 | 按用户限速（已实现） |
 
 依赖保持最小集合（不引入重型框架），存储目录可配置（默认 `./data`）。
 
@@ -72,18 +72,20 @@ users      id, username(unique), password_hash, role('admin'|'user'),
 ip_failures  ip, failed_count, window_started_at, locked_until   -- IP 级登录失败与锁定（R-IPBAN）
 files      id, user_id, name, stored_name(消毒后原文件名), size, mime, sha256, md5,
            status('uploading'|'ready'|'deleted'), created_at, deleted_at
-chunks     task_id, index, size, sha256   -- 分片记录（阶段二）
+chunks     task_id, index, size, sha256   -- 分片记录（已实现）
 upload_tasks  id, user_id, file_id, total_chunks, chunk_size, status,
-              created_at, updated_at      -- 断点续传任务（阶段二）
+              created_at, updated_at      -- 断点续传任务（已实现）
 shares     id, file_id, token(随机64位), created_by, expires_at,
-           download_count, max_downloads  -- 分享（阶段二）
+           download_count, max_downloads  -- 分享（已实现）
 audit_logs id, user_id, username(快照), action('login'|'upload'|'download'|'share'|'share_view'|'share_download'|...),
            target(文件名/资源), ip, result('success'|'failure'), reason(具体失败原因),
            created_at                     -- 操作审计日志（R-LOG）
 settings   key, value                     -- 注册开关/默认配额/上传上限/日志留存周期/锁定阈值/自动解禁等
 ```
 
-磁盘存储（R-NAME）：`data/files/<user_id>/<yy>/<mm>/<stored_name>`（**按用户 + 日期分目录**，不同用户/不同日期的同名文件互不干扰）。`stored_name` = **消毒后的原文件名**（去除路径分隔符、控制字符与 Windows 非法字符 `<>:"|?*` 并替换为 `_`，限制 ≤255 字节）；**重名规则：仅当目标目录内已存在同名文件时，追加 ` (1)`、` (2)`… 序号后缀（不覆盖既有文件）；不同目录下的同名文件不加序号**。UUID 仅作 DB 主键与 API 资源 id，不落盘文件名。阶段二文件夹上传时保留相对路径：`data/files/<user_id>/<yy>/<mm>/<相对目录>/<name>`，同名文件在不同相对目录下同样不加序号。分片临时目录 `data/tmp/<task_id>/<index>`。
+磁盘存储（R-NAME）：`data/files/<user_id>/<yy>/<mm>/<stored_name>`（**按用户 + 上传时间（UTC 年/月）自动分目录**，不同用户/不同日期的同名文件互不干扰）。`stored_name` = **消毒后的原文件名**（去除路径分隔符、控制字符与 Windows 非法字符 `<>:"|?*` 并替换为 `_`，限制 ≤255 字节）；**重名规则：仅当目标目录内已存在同名文件时，追加 ` (1)`、` (2)`… 序号后缀（不覆盖既有文件）；不同目录下的同名文件不加序号**。UUID 仅作 DB 主键与 API 资源 id，不落盘文件名。阶段二文件夹上传时保留相对路径：`data/files/<user_id>/<yy>/<mm>/<相对目录>/<name>`，同名文件在不同相对目录下同样不加序号。分片临时目录 `data/tmp/<task_id>/<index>`。
+
+示例：admin（`user_id=1`）于 2026 年 8 月（UTC）上传的文件落盘为 `data/files/1/26/08/test.txt`；同目录再次上传同名 `test.txt` 时自动分配序号后缀，落盘为 `data/files/1/26/08/test (1).txt`。
 
 ## 5. API 设计（RESTful，统一 `{code, message, data}`）
 
@@ -99,7 +101,7 @@ settings   key, value                     -- 注册开关/默认配额/上传上
 - `POST /api/auth/logout`（客户端清除 token）
 - `GET  /api/auth/me` → 当前用户信息（含角色、配额用量、**language**、**mustChangePassword**、**totpEnabled**、**ipAclEnabled**）
 - `PUT  /api/auth/language` → `{language: 'zh-CN'|'zh-TW'|'en'|''}`（空=跟随系统默认）；保存后前端立即切换，无需重新登录
-- `POST /api/auth/register`（阶段二，受 settings 注册开关控制）
+- `POST /api/auth/register`（已实现：受 settings 注册开关控制，默认关；开启后按密码策略创建普通用户并直接登录）
 
 ### 5.2 文件管理
 - `GET    /api/files?page=&pageSize=&keyword=` → 分页列表（本人文件，含大小/时间/状态/md5）
@@ -112,7 +114,7 @@ settings   key, value                     -- 注册开关/默认配额/上传上
 - `GET    /api/files/:id/preview` → 在线预览（按 MIME 白名单输出 inline）
 - `DELETE /api/files/:id` → 删除（软删除 + 物理清理）
 
-### 5.3 分享链接（阶段二）
+### 5.3 分享链接（已实现）
 - `POST /api/files/:id/share` → `{expiresInHours, maxDownloads?}` 生成分享
 - `GET  /api/files/shared/:token/meta` → 分享元数据（匿名）
 - `GET  /api/files/shared/:token/download` → 匿名下载（校验有效期/次数）
@@ -175,7 +177,7 @@ settings   key, value                     -- 注册开关/默认配额/上传上
 |---|---|---|
 | `/login` | 独立登录界面 | 用户名/密码；含"记住我"；无其他入口；**登录失败统一提示「用户名或密码错误」（不区分用户是否存在）**；**TOTP 用户第二步输入 6 位动态码；首次启用显示二维码与密钥字符串完成绑定** |
 | `/change-password` | 强制改密页 | 仅 must_change_password 用户可进入（其余接口 403 时前端强制跳转）：旧密码 + 新密码 + 确认新密码（按 R-PWD 策略校验并显示要求） |
-| `/` | 文件管理 | 文件列表（分页/关键字搜索）、上传按钮+拖拽上传（支持多文件、阶段二支持文件夹）、整体进度条、暂停/继续、秒传提示、下载、删除、分享（阶段二）、预览弹窗（阶段二）、**同名冲突弹窗（覆盖/重命名，覆盖时提示将替换旧文件并同步更新记录）** |
+| `/` | 文件管理 | 文件列表（分页/关键字搜索）、上传按钮+拖拽上传（支持多文件与文件夹）、整体进度条、暂停/继续、秒传提示、下载、删除、分享、预览弹窗、**同名冲突弹窗（覆盖/重命名，覆盖时提示将替换旧文件并同步更新记录）** |
 | `/logs` | 操作日志 | 时间/用户/操作/目标/来源 IP/结果/失败原因；普通用户仅见自己，admin 可按用户筛选；admin 另含日志留存周期设置面板 |
 | `/admin` | 独立管理员后台 | 用户列表（搜索/分页）、创建用户、编辑（角色/配额/禁用/重置密码）、删除、系统统计卡片（用户数/文件数/已用空间 + **磁盘占用大小与比例**，磁盘使用率过高时显示警告色）、**品牌设置面板（R-BRAND）**、**界面主色（R-THEME）**、**用户安全编辑（R-TOTP 开关 + IP 白名单设置）**、**锁定管理面板（R-LOCKADMIN：IP 锁定与用户锁定列表 + 解除按钮）**、**安全设置（R-PWD/R-IPBAN：密码强度、IP 锁定窗口/阈值/自动解禁/解禁周期）** |
 | `/:token` | 匿名分享页 | 下载 + 预览 |
@@ -196,7 +198,7 @@ settings   key, value                     -- 注册开关/默认配额/上传上
 - **审计日志（R-LOG）**：登录/上传/下载/分享操作全量记录（时间/用户/来源 IP/操作/结果/原因）；日志不记录密码、token、文件内容；留存周期可配，超期自动清理
 - **品牌资源（R-BRAND）**：logo/favicon 上传限制类型与大小（png/jpg/svg/ico ≤512KB）；固定文件名落盘防路径穿越；`/api/brand` 与品牌资源路由为公开只读接口（不泄露敏感信息）
 
-## 8. 限速与配额（阶段二）
+## 8. 限速与配额（已实现）
 
 - 配额：上传前检查 `used_bytes + size <= quota_bytes`，超额返回 403 + 结构化错误；用量实时累计
 - 限速：每用户令牌桶（`x/time/rate`），速率可在 settings 配置（默认不限）
@@ -235,7 +237,7 @@ make build-linux  # GOOS=linux 交叉编译，输出 bin/filebox-linux
 - **启用**：同时输出控制台与文件；文件**按天滚动**：`logs/filebox-YYYY-MM-DD.log`，跨天自动切换；**前一天文件自动 gzip 压缩归档**为 `filebox-YYYY-MM-DD.log.gz`；启动时与写入时惰性清理超过保留天数的日志与归档。
 - 详细事件日志（服务日志，独立于 DB 审计日志，至少覆盖）：
   - 启动/退出：版本、监听地址、数据目录、配置摘要、优雅退出；
-  - 用户：登录成功/失败（用户名+来源 IP）、登出、查看（文件列表/详情/预览）、上传完成（文件名+大小）、下载（文件名+结果）、分享相关（阶段二预留）；
+  - 用户：登录成功/失败（用户名+来源 IP）、登出、查看（文件列表/详情/预览）、上传完成（文件名+大小）、下载（文件名+结果）、分享相关（share_create/share_view/share_download，已实现）；
   - 管理：管理员配置变更（settings/brand/语言/主题色）、用户创建/修改/**禁用/解禁**、重置密码、锁定与解锁（用户/IP）、运维命令执行记录（R-OPS）。
 - **操作用户字段（所有事件必带）**：服务日志每条事件记录**是谁发起的操作**，统一字段 `operator`：
   - 登录事件：operator = 尝试登录的用户名（失败时也记录尝试者）；
@@ -308,7 +310,7 @@ make build-linux  # GOOS=linux 交叉编译，输出 bin/filebox-linux
 
 验收：单用户完整走通 上传→列表→下载→删除；第二个用户无法看到/删除他人文件；admin 界面完成用户 CRUD；100MB 文件上传/下载正常；**上传完成后文件记录的 md5 与 sha256 均与本地计算一致（`Get-FileHash -Algorithm MD5 / SHA256`）**；**磁盘 data/files 下可见文件名为原始文件名（同目录重名时由用户选择覆盖/重命名，不同目录/不同用户同名文件不加序号），且下载/删除仍按 DB 记录精确工作**；**覆盖上传后：磁盘仅剩新文件、DB 旧记录消失、used_bytes 正确**；**非法文件名在 upload-init 即被 400 拒绝**；**admin 统计卡片显示磁盘占用大小与比例**；**可用空间低于阈值（测试时用 --min-free-space 调大验证）时上传被 503 拒绝、下载删除不受影响**；**连续 5 次密码错误后账号锁定、5 分钟后自动解禁；登录失败前后端提示统一为「用户名或密码错误」**；**登录/上传/下载操作均产生日志，admin 可查全部用户并可设置留存周期，普通用户仅见自己日志**；**admin 设置品牌后：网页标题/favicon/登录页与主页 logo/页脚备案立即生效，「恢复默认」后回退内置品牌；ICP 与公安备案号留空时页面页脚不出现备案区（无空白残留）**；**系统默认语言可配（zh-CN 默认），用户可设个人语言（默认跟随系统）；切换语言立即生效无需重新登录；简体/繁体/英文三套界面文案完整无遗漏（含错误提示本地化）**；**管理员设置界面主色（输入色号或色盘）后全站主色元素立即变更，重置回默认 #1b998b，无需刷新或重新登录**；**首次部署用 --admin-user/--admin-pass 创建的初始管理员登录后强制改密，改密前无法使用其他功能；管理员可在后台重置管理员密码**；**密码策略（8 位 + 四类中至少 3 类）在创建/重置/改密时生效**；**为用户开启 TOTP 后，用户首次登录显示二维码与密钥字符串，绑定后登录需输入动态码**；**启用 IP 白名单的用户，白名单外 IP 请求被 403 拒绝（未启用不限制）**；**10 分钟内 50 次登录失败（可配）锁定来源 IP，自动解禁可配；管理后台可查看并手动解除 IP/用户锁定**；**命令行运维：`filebox admin reset-password` 重置密码（重置后强制改密）、`filebox locks list/clear` 查看/删除锁定信息，Linux 与 Windows 后台均可用**；**服务日志：`--log-enabled`（默认否）开启后按天滚动 + gzip 归档到 `--log-dir`（默认程序目录 logs/），保留 `--log-retention-days`（默认 90）天，详细记录登录/查看/上传/下载/分享/管理配置/禁用解禁等事件（含 operator 操作用户与 ip 来源字段）；不启用仅控制台**；**服务化部署：Linux systemd 与 Windows NSSM/sc 示例与中英文部署文档可用**；**反代部署：`--trusted-proxies` 生效——配置后 XFF 解析出真实客户端 IP（审计/白名单/IP 锁定/服务日志一致），未配置时忽略 XFF 防伪造；`deploy/nginx.conf.example` 可直接套用**；重启后数据不丢。
 
-### 阶段二（增强）
+### 阶段二（增强）（已实现，v0.2.0）
 范围：分片断点续传（2–8MB 分片、并发 4、暂停/继续、断点续传）、秒传、文件夹/多文件上传（保留相对路径）、分享链接（有效期/次数限制/匿名页）、在线预览（图片/文本/视频）、上传限速、注册开关、系统统计。
 
 验收：1GB 文件断点中断后续传成功；秒传命中不重复落盘；文件夹上传保留结构；分享链接过期后拒绝；预览白名单格式可看、非白名单强制下载；超配额上传被拒；限速生效；Linux 交叉编译二进制可在 Linux 上运行。

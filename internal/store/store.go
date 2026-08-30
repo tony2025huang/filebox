@@ -120,6 +120,26 @@ type UploadTask struct {
 	Resolve     string
 }
 
+// ChunkInfo 表示一个已写入临时目录的上传分片。
+// ChunkInfo describes an uploaded chunk recorded for resumable uploads.
+type ChunkInfo struct {
+	Size   int64
+	SHA256 string
+}
+
+// Share 表示一个文件分享链接及其访问限制。
+// Share represents a file sharing link and its access limits.
+type Share struct {
+	ID            int64  `json:"id"`
+	FileID        int64  `json:"fileId"`
+	Token         string `json:"token"`
+	CreatedBy     int64  `json:"createdBy"`
+	ExpiresAt     string `json:"expiresAt"`
+	DownloadCount int64  `json:"downloadCount"`
+	MaxDownloads  int    `json:"maxDownloads"`
+	CreatedAt     string `json:"createdAt"`
+}
+
 // AuditLog 表示一次登录、上传或下载等操作的审计记录。
 // AuditLog represents an audit record for a login, upload, download, or related operation.
 type AuditLog struct {
@@ -149,6 +169,8 @@ type LogSettings struct {
 	IPLockThreshold     int    `json:"ipLockThreshold"`
 	IPAutoUnlockEnabled bool   `json:"ipAutoUnlockEnabled"`
 	IPUnlockMinutes     int    `json:"ipUnlockMinutes"`
+	RegisterEnabled     bool   `json:"registerEnabled"`
+	UploadRateLimit     int64  `json:"uploadRateLimit"`
 }
 
 // IPLock represents a source-IP failure window and its optional lock deadline.
@@ -265,6 +287,13 @@ CREATE TABLE IF NOT EXISTS upload_tasks (
   updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_upload_tasks_user_status ON upload_tasks(user_id, status);
+CREATE TABLE IF NOT EXISTS chunks (
+  task_id TEXT NOT NULL REFERENCES upload_tasks(id) ON DELETE CASCADE,
+  idx INTEGER NOT NULL,
+  size INTEGER NOT NULL,
+  sha256 TEXT NOT NULL,
+  PRIMARY KEY(task_id, idx)
+);
 CREATE TABLE IF NOT EXISTS audit_logs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
@@ -301,7 +330,27 @@ CREATE TABLE IF NOT EXISTS ip_failures (
 	if err := s.migrateSettings(); err != nil {
 		return err
 	}
-	return s.migrateFilesSchema()
+	if err := s.migrateFilesSchema(); err != nil {
+		return err
+	}
+	return s.migrateSharesSchema()
+}
+
+// migrateSharesSchema creates sharing records after any legacy files-table rebuild has finished.
+// migrateSharesSchema 在旧 files 表迁移完成后创建分享表，避免外键阻断升级。
+func (s *Store) migrateSharesSchema() error {
+	_, err := s.DB.Exec(`CREATE TABLE IF NOT EXISTS shares (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+  token TEXT NOT NULL UNIQUE,
+  created_by INTEGER NOT NULL,
+  expires_at TEXT NOT NULL,
+  download_count INTEGER NOT NULL DEFAULT 0,
+  max_downloads INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_shares_file ON shares(file_id);`)
+	return err
 }
 
 func (s *Store) migrateUsersSchema() error {
@@ -367,6 +416,7 @@ func (s *Store) migrateSettings() error {
 		"defaultLang": "zh-CN",
 		"theme_color": "",
 		BrandTitleKey: "", BrandDescriptionKey: "", BrandICPKey: "", BrandPoliceKey: "", BrandFaviconKey: "", BrandLoginLogoKey: "", BrandMainLogoKey: "",
+		"registerEnabled": "false", "uploadRateLimit": "0",
 	}
 	for key, value := range defaults {
 		if _, err := s.DB.Exec("INSERT OR IGNORE INTO settings(key, value) VALUES(?, ?)", key, value); err != nil {
@@ -374,6 +424,13 @@ func (s *Store) migrateSettings() error {
 		}
 	}
 	return nil
+}
+
+// SetSettingDefault 仅在设置不存在时写入默认值，供首次部署种子使用。
+// SetSettingDefault inserts a setting only when no value has been stored yet.
+func (s *Store) SetSettingDefault(ctx context.Context, key, value string) error {
+	_, err := s.DB.ExecContext(ctx, "INSERT OR IGNORE INTO settings(key, value) VALUES(?, ?)", key, value)
+	return err
 }
 
 func (s *Store) GetBrandSettings(ctx context.Context) (BrandSettings, error) {
@@ -1147,10 +1204,56 @@ func (s *Store) GetUploadTask(ctx context.Context, id string) (UploadTask, error
 	return task, err
 }
 
+// SetChunk 以幂等方式记录已写入的分片元数据。
+// SetChunk upserts the metadata for a successfully written chunk.
+func (s *Store) SetChunk(ctx context.Context, taskID string, idx int, size int64, sha256 string) error {
+	_, err := s.DB.ExecContext(ctx, "INSERT INTO chunks(task_id, idx, size, sha256) VALUES(?, ?, ?, ?) ON CONFLICT(task_id, idx) DO UPDATE SET size = excluded.size, sha256 = excluded.sha256", taskID, idx, size, sha256)
+	return err
+}
+
+// ListChunks 读取任务已上传的分片，数据库记录是断点续传的唯一事实来源。
+// ListChunks reads uploaded chunks from the database, the source of truth for resuming uploads.
+func (s *Store) ListChunks(ctx context.Context, taskID string) (map[int]ChunkInfo, error) {
+	rows, err := s.DB.QueryContext(ctx, "SELECT idx, size, sha256 FROM chunks WHERE task_id = ?", taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	chunks := make(map[int]ChunkInfo)
+	for rows.Next() {
+		var idx int
+		var chunk ChunkInfo
+		if err := rows.Scan(&idx, &chunk.Size, &chunk.SHA256); err != nil {
+			return nil, err
+		}
+		chunks[idx] = chunk
+	}
+	return chunks, rows.Err()
+}
+
+// DeleteChunks 清理已完成任务的分片元数据。
+// DeleteChunks removes chunk metadata after a task has completed successfully.
+func (s *Store) DeleteChunks(ctx context.Context, taskID string) error {
+	_, err := s.DB.ExecContext(ctx, "DELETE FROM chunks WHERE task_id = ?", taskID)
+	return err
+}
+
 func (s *Store) FindUploadConflict(ctx context.Context, userID int64, directory, storedName string) (File, error) {
 	// FindUploadConflict 检查用户目录中的 ready 文件是否占用目标存储路径。
 	// FindUploadConflict checks whether a ready file already occupies the target path for the user.
 	return scanFile(s.DB.QueryRowContext(ctx, "SELECT id, user_id, name, stored_name, size, mime, sha256, md5, status, storage_path, created_at, COALESCE(deleted_at, '') FROM files WHERE user_id = ? AND status = 'ready' AND storage_path = ?", userID, filepath.Join(directory, storedName)))
+}
+
+// FindInstantMatch 按 md5 优先、sha256 兜底查找当前用户的同大小文件。
+// FindInstantMatch finds a same-sized ready file for the user, preferring MD5 and falling back to SHA-256.
+func (s *Store) FindInstantMatch(ctx context.Context, userID int64, md5, sha256 string, size int64) (File, error) {
+	if md5 != "" {
+		file, err := scanFile(s.DB.QueryRowContext(ctx, "SELECT id, user_id, name, stored_name, size, mime, sha256, md5, status, storage_path, created_at, COALESCE(deleted_at, '') FROM files WHERE user_id = ? AND status = 'ready' AND md5 = ? AND size = ? ORDER BY id LIMIT 1", userID, md5, size))
+		if err == nil || !errors.Is(err, ErrNotFound) {
+			return file, err
+		}
+	}
+	return scanFile(s.DB.QueryRowContext(ctx, "SELECT id, user_id, name, stored_name, size, mime, sha256, md5, status, storage_path, created_at, COALESCE(deleted_at, '') FROM files WHERE user_id = ? AND status = 'ready' AND sha256 = ? AND size = ? ORDER BY id LIMIT 1", userID, sha256, size))
 }
 
 func (s *Store) CompleteUpload(ctx context.Context, task UploadTask, file File) (File, error) {
@@ -1248,7 +1351,13 @@ func allocateStorageName(ctx context.Context, tx *sql.Tx, userID int64, director
 	for suffix := 0; ; suffix++ {
 		candidate := storageNameCandidate(base, suffix)
 		if !used[candidate] {
-			return candidate, filepath.Join(directory, candidate), nil
+			storagePath := filepath.Join(directory, candidate)
+			// 目标路径若仍被软删除记录占用，清理该过期记录以复用路径（其磁盘内容早已物理删除）。
+			// Reuse a storage path still held by a soft-deleted record by removing that stale row.
+			if _, err := tx.ExecContext(ctx, "DELETE FROM files WHERE storage_path = ? AND status = 'deleted'", storagePath); err != nil {
+				return "", "", err
+			}
+			return candidate, storagePath, nil
 		}
 	}
 }
@@ -1291,6 +1400,72 @@ func (s *Store) FindFile(ctx context.Context, id int64) (File, error) {
 	// FindFile 按文件 ID 读取文件元数据。
 	// FindFile loads file metadata by file ID.
 	return scanFile(s.DB.QueryRowContext(ctx, "SELECT id, user_id, name, stored_name, size, mime, sha256, md5, status, storage_path, created_at, COALESCE(deleted_at, '') FROM files WHERE id = ?", id))
+}
+
+// CreateShare persists a new sharing link with its expiration and download limit.
+// CreateShare 保存带有效期和下载次数限制的新分享链接。
+func (s *Store) CreateShare(ctx context.Context, fileID, createdBy int64, token string, expiresAt time.Time, maxDownloads int) error {
+	_, err := s.DB.ExecContext(ctx, `INSERT INTO shares(file_id, token, created_by, expires_at, download_count, max_downloads, created_at)
+VALUES(?, ?, ?, ?, 0, ?, ?)`, fileID, token, createdBy, expiresAt.UTC().Format(time.RFC3339), maxDownloads, time.Now().UTC().Format(time.RFC3339))
+	if err != nil && isUniqueError(err) {
+		return ErrConflict
+	}
+	return err
+}
+
+// GetShareByToken returns one sharing link and maps an unknown token to ErrNotFound.
+// GetShareByToken 按 token 读取分享记录，未知 token 映射为 ErrNotFound。
+func (s *Store) GetShareByToken(ctx context.Context, token string) (Share, error) {
+	var share Share
+	err := s.DB.QueryRowContext(ctx, `SELECT id, file_id, token, created_by, expires_at, download_count, max_downloads, created_at
+FROM shares WHERE token = ?`, token).Scan(&share.ID, &share.FileID, &share.Token, &share.CreatedBy, &share.ExpiresAt, &share.DownloadCount, &share.MaxDownloads, &share.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Share{}, ErrNotFound
+	}
+	return share, err
+}
+
+// ListSharesByFile lists all sharing links for a file for owner-facing management views.
+// ListSharesByFile 列出文件的全部分享链接，供文件所有者管理和展示。
+func (s *Store) ListSharesByFile(ctx context.Context, fileID int64) ([]Share, error) {
+	rows, err := s.DB.QueryContext(ctx, `SELECT id, file_id, token, created_by, expires_at, download_count, max_downloads, created_at
+FROM shares WHERE file_id = ? ORDER BY created_at DESC, id DESC`, fileID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	shares := make([]Share, 0)
+	for rows.Next() {
+		var share Share
+		if err := rows.Scan(&share.ID, &share.FileID, &share.Token, &share.CreatedBy, &share.ExpiresAt, &share.DownloadCount, &share.MaxDownloads, &share.CreatedAt); err != nil {
+			return nil, err
+		}
+		shares = append(shares, share)
+	}
+	return shares, rows.Err()
+}
+
+// DeleteSharesByFile revokes every sharing link for a file and returns the number removed.
+// DeleteSharesByFile 撤销文件的全部分享链接并返回删除条数。
+func (s *Store) DeleteSharesByFile(ctx context.Context, fileID int64) (int64, error) {
+	result, err := s.DB.ExecContext(ctx, "DELETE FROM shares WHERE file_id = ?", fileID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+// IncrementShareDownloads atomically consumes one available download slot.
+// IncrementShareDownloads 原子消耗一次可用下载次数，过期或超限时返回 false。
+func (s *Store) IncrementShareDownloads(ctx context.Context, token string, maxDownloads int) (bool, error) {
+	_ = maxDownloads
+	result, err := s.DB.ExecContext(ctx, `UPDATE shares SET download_count = download_count + 1
+WHERE token = ? AND expires_at > ? AND (max_downloads = 0 OR download_count < max_downloads)`, token, time.Now().UTC().Format(time.RFC3339))
+	if err != nil {
+		return false, err
+	}
+	count, err := result.RowsAffected()
+	return count == 1, err
 }
 
 func scanFile(row *sql.Row) (File, error) {
@@ -1374,13 +1549,26 @@ func (s *Store) DeleteFile(ctx context.Context, fileID, userID int64, admin bool
 }
 
 func (s *Store) Stats(ctx context.Context) (map[string]int64, error) {
-	// Stats 汇总用户数、ready 文件数和已使用文件字节数。
-	// Stats aggregates user count, ready-file count, and stored-file bytes.
+	// Stats 汇总用户数、ready 文件数、已使用文件字节数和分享访问统计。
+	// Stats aggregates user count, ready-file bytes, and sharing access counters.
 	stats := map[string]int64{}
-	queries := map[string]string{"users": "SELECT COUNT(id) FROM users", "files": "SELECT COUNT(id) FROM files WHERE status = 'ready'", "bytes": "SELECT COALESCE(SUM(size), 0) FROM files WHERE status = 'ready'"}
+	now := time.Now().UTC().Format(time.RFC3339)
+	queries := map[string]string{
+		"users":          "SELECT COUNT(id) FROM users",
+		"files":          "SELECT COUNT(id) FROM files WHERE status = 'ready'",
+		"bytes":          "SELECT COALESCE(SUM(size), 0) FROM files WHERE status = 'ready'",
+		"shares":         "SELECT COUNT(id) FROM shares WHERE expires_at > ?",
+		"shareDownloads": "SELECT COALESCE(SUM(download_count), 0) FROM shares",
+	}
 	for key, query := range queries {
 		var value int64
-		if err := s.DB.QueryRowContext(ctx, query).Scan(&value); err != nil {
+		var err error
+		if key == "shares" {
+			err = s.DB.QueryRowContext(ctx, query, now).Scan(&value)
+		} else {
+			err = s.DB.QueryRowContext(ctx, query).Scan(&value)
+		}
+		if err != nil {
 			return nil, err
 		}
 		stats[key] = value
@@ -1391,8 +1579,8 @@ func (s *Store) Stats(ctx context.Context) (map[string]int64, error) {
 func (s *Store) GetLogSettings(ctx context.Context) (LogSettings, error) {
 	// GetLogSettings 读取日志留存和登录锁定设置，并为缺失或非法值使用默认值。
 	// GetLogSettings reads retention and lockout settings, applying defaults for missing or invalid values.
-	settings := LogSettings{LogRetentionDays: 30, LockThreshold: 5, AutoUnlockEnabled: true, AutoUnlockMinutes: 5, DefaultLang: "zh-CN", ThemeColor: DefaultThemeColor, PasswordMinLength: 8, PasswordComplexity: 3, IPLockWindowMinutes: 10, IPLockThreshold: 50, IPAutoUnlockEnabled: true, IPUnlockMinutes: 30}
-	rows, err := s.DB.QueryContext(ctx, "SELECT key, value FROM settings WHERE key IN ('logRetentionDays', 'lockThreshold', 'autoUnlockEnabled', 'autoUnlockMinutes', 'defaultLang', 'theme_color', 'passwordMinLength', 'passwordComplexity', 'ipLockWindowMinutes', 'ipLockThreshold', 'ipAutoUnlockEnabled', 'ipUnlockMinutes')")
+	settings := LogSettings{LogRetentionDays: 30, LockThreshold: 5, AutoUnlockEnabled: true, AutoUnlockMinutes: 5, DefaultLang: "zh-CN", ThemeColor: DefaultThemeColor, PasswordMinLength: 8, PasswordComplexity: 3, IPLockWindowMinutes: 10, IPLockThreshold: 50, IPAutoUnlockEnabled: true, IPUnlockMinutes: 30, RegisterEnabled: false, UploadRateLimit: 0}
+	rows, err := s.DB.QueryContext(ctx, "SELECT key, value FROM settings WHERE key IN ('logRetentionDays', 'lockThreshold', 'autoUnlockEnabled', 'autoUnlockMinutes', 'defaultLang', 'theme_color', 'passwordMinLength', 'passwordComplexity', 'ipLockWindowMinutes', 'ipLockThreshold', 'ipAutoUnlockEnabled', 'ipUnlockMinutes', 'registerEnabled', 'uploadRateLimit')")
 	if err != nil {
 		return settings, err
 	}
@@ -1447,6 +1635,14 @@ func (s *Store) GetLogSettings(ctx context.Context) (LogSettings, error) {
 			if parsed, err := strconv.Atoi(value); err == nil && parsed >= 1 {
 				settings.IPUnlockMinutes = parsed
 			}
+		case "registerEnabled":
+			if parsed, err := strconv.ParseBool(value); err == nil {
+				settings.RegisterEnabled = parsed
+			}
+		case "uploadRateLimit":
+			if parsed, err := strconv.ParseInt(value, 10, 64); err == nil && parsed >= 0 {
+				settings.UploadRateLimit = parsed
+			}
 		}
 	}
 	return settings, rows.Err()
@@ -1456,7 +1652,7 @@ func (s *Store) UpdateLogSettings(ctx context.Context, settings LogSettings) err
 	// UpdateLogSettings 校验非负留存/阈值和正数解锁时长后事务更新设置。
 	// UpdateLogSettings validates non-negative retention/thresholds and positive unlock duration before a transactional update.
 	settings.ThemeColor = normalizeThemeColor(settings.ThemeColor)
-	if settings.LogRetentionDays < 0 || settings.LockThreshold < 0 || settings.AutoUnlockMinutes < 1 || settings.PasswordMinLength < 1 || settings.PasswordMinLength > 200 || settings.PasswordComplexity < 0 || settings.PasswordComplexity > 4 || settings.IPLockWindowMinutes < 1 || settings.IPLockThreshold < 0 || settings.IPUnlockMinutes < 1 || (settings.DefaultLang != "zh-CN" && settings.DefaultLang != "zh-TW" && settings.DefaultLang != "en") || (settings.ThemeColor != "" && !themeColorPattern.MatchString(settings.ThemeColor)) {
+	if settings.LogRetentionDays < 0 || settings.LockThreshold < 0 || settings.AutoUnlockMinutes < 1 || settings.PasswordMinLength < 1 || settings.PasswordMinLength > 200 || settings.PasswordComplexity < 0 || settings.PasswordComplexity > 4 || settings.IPLockWindowMinutes < 1 || settings.IPLockThreshold < 0 || settings.IPUnlockMinutes < 1 || settings.UploadRateLimit < 0 || (settings.DefaultLang != "zh-CN" && settings.DefaultLang != "zh-TW" && settings.DefaultLang != "en") || (settings.ThemeColor != "" && !themeColorPattern.MatchString(settings.ThemeColor)) {
 		return errors.New("invalid settings")
 	}
 	values := map[string]string{
@@ -1472,6 +1668,8 @@ func (s *Store) UpdateLogSettings(ctx context.Context, settings LogSettings) err
 		"ipLockThreshold":     strconv.Itoa(settings.IPLockThreshold),
 		"ipAutoUnlockEnabled": strconv.FormatBool(settings.IPAutoUnlockEnabled),
 		"ipUnlockMinutes":     strconv.Itoa(settings.IPUnlockMinutes),
+		"registerEnabled":     strconv.FormatBool(settings.RegisterEnabled),
+		"uploadRateLimit":     strconv.FormatInt(settings.UploadRateLimit, 10),
 	}
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {

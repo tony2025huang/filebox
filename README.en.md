@@ -2,13 +2,20 @@
 
 [中文](README.md)
 
-FileBox is a self-hosted file transfer and management service that runs as a single Go binary on Windows or Linux. Stage 1 provides multi-user isolation, JWT login, single-file uploads, Range downloads, dual-hash verification, quotas, disk protection, audit logs, configurable branding, and a multilingual interface.
+FileBox is a self-hosted file transfer and management service that runs as a single Go binary on Windows or Linux. Stage 1 provides multi-user isolation, JWT login, single-file uploads, Range downloads, dual-hash verification, quotas, disk protection, audit logs, configurable branding, and a multilingual interface; Stage 2 (v0.2.0) adds resumable chunked uploads, instant upload, folder upload, share links, online preview, upload rate limiting, an optional public registration switch, and extended system statistics.
 
 ## Features
 
 - Multi-user roles: `admin` and `user`; administrators manage accounts, roles, quotas, passwords, and disabled state, while regular users can access only their own files.
 - JWT login and security: passwords use bcrypt; JWTs expire after 7 days by default; repeated failures can trigger temporary or permanent locks under the admin policy, with optional automatic unlock; login failures use one uniform response to reduce account enumeration.
 - File transfer: upload initialization, single chunk `0` upload, completion, paginated/searchable listing, deletion, and download; `http.ServeContent` supports `Range` and returns `206 Partial Content` for range requests.
+- Resumable chunked uploads: chunks of 2–8 MiB with out-of-order/idempotent re-uploads; the server persists uploaded chunks in the `chunks` table, `GET /api/files/{taskID}/status` reports progress for resume, and `complete` verifies all chunks then merges them as a stream while computing MD5 and SHA-256; the frontend uploads with 4 concurrent workers, pause/resume, and retry.
+- Instant upload: `POST /api/files/check` matches MD5 first then SHA-256 within the same user; a hit returns the existing record without writing new content; the frontend computes SHA-256 with WebCrypto for instant checks.
+- Folder upload: `upload-init` accepts a relative `dir` field and preserves `data/files/<user>/<yy>/<mm>/<relative-dir>/<name>`; identical names in different directories stay unsuffixed.
+- Share links: create with an expiry and download limit, anonymous metadata and downloads (expired/over-limit requests are rejected), and revocation; share create/view/download are recorded in the audit log, and an anonymous `/:token` share page is included.
+- Online preview: `GET /api/files/{id}/preview` serves images/text/video/PDF/JSON inline from a MIME whitelist and forces attachment downloads for everything else.
+- Upload rate limiting: a per-user token bucket (`golang.org/x/time/rate`) configured by administrators in bytes/sec (`0` = unlimited, the default), applied before chunk writes.
+- Public registration: `POST /api/auth/register` is gated by the `registerEnabled` setting (default off), creates a regular user under the password policy, and logs the user in; the login page shows the entry only when the public switch is on.
 - Name conflicts: a same-name file in the user's current monthly directory causes `409`; the frontend offers overwrite or rename; overwrite is transactional and rename allocates the smallest available numeric suffix.
 - Filename security: pre-upload validation rejects separators, control characters, Windows-illegal characters, traversal markers, empty/`.`/`..` names, and names over 255 bytes; the on-disk name preserves the original semantics while replacing selected illegal characters.
 - Quotas: initialization reserves pending bytes and the default quota is 100 GiB; overwrite subtracts the old file usage first.
@@ -49,6 +56,8 @@ FileBox is a self-hosted file transfer and management service that runs as a sin
 `R-SRVLOG`: optional service file logging with local-date rotation, gzip archives, and retention cleanup; disabled mode writes only to the console.
 
 `R-SERVICE/R-PROXY`: Linux systemd, Windows NSSM/sc, and Nginx HTTPS reverse-proxy templates are in [`deploy/`](deploy/).
+
+`STAGE2`: resumable chunked uploads, instant upload, folder upload, share links, online preview, upload rate limiting, the optional registration switch, and extended system statistics (see the feature list above).
 
 ## Technology stack
 
@@ -102,7 +111,7 @@ Each flag reads its `FILEBOX_*` environment variable as the default; an explicit
 | `--max-file-size` | `FILEBOX_MAX_FILE_SIZE` | `107374182400` (100 GiB) | Backend per-file size limit |
 | `--min-free-space` | `FILEBOX_MIN_FREE_SPACE` | `2147483648` (2 GiB) | Minimum free space at upload initialization; `0` disables protection |
 | `--jwt-secret` | `FILEBOX_JWT_SECRET` | `filebox-development-secret-change-me` | HS256 signing key; replace in production |
-| `--register-enabled` | `FILEBOX_REGISTER_ENABLED` | `false` | Registration switch; Stage 1 has no public registration endpoint |
+| `--register-enabled` | `FILEBOX_REGISTER_ENABLED` | `false` | First-deployment seed for the registration switch; the persisted `registerEnabled` admin setting controls later restarts |
 | `--admin-user` | `FILEBOX_ADMIN_USER` | `admin` | Initial administrator username |
 | `--admin-pass` | `FILEBOX_ADMIN_PASS` | `admin123` | Initial administrator password; forced change on first login |
 | `--trusted-proxies` | `FILEBOX_TRUSTED_PROXIES` | empty | Trusted proxy IP/CIDR list; empty means X-Forwarded-For is ignored |
@@ -110,7 +119,7 @@ Each flag reads its `FILEBOX_*` environment variable as the default; an explicit
 | `--log-dir` | `FILEBOX_LOG_DIR` | `<executable directory>/logs` | Service log directory |
 | `--log-retention-days` | `FILEBOX_LOG_RETENTION_DAYS` | `90` | Retention for service logs and gzip archives |
 
-The backend limit is 100 GiB, while the Stage 1 browser UI limits direct uploads to 100 MiB. Admin policy defaults are 30-day log retention, lock after 5 failures, automatic unlock enabled, and a 5-minute unlock period.
+The backend limit is 100 GiB; the Stage 2 frontend splits large files into 4 MiB chunks, still bounded by the backend limit. Admin policy defaults are 30-day log retention, lock after 5 failures, automatic unlock enabled, a 5-minute unlock period, unlimited upload rate (`0`), and the registration switch off.
 
 ## Service deployment
 
@@ -118,7 +127,7 @@ Complete systemd, Windows NSSM/sc, and Nginx reverse-proxy examples and security
 
 ## API summary
 
-JSON responses use `{ "code": number, "message": string, "data": any }`; protected endpoints require `Authorization: Bearer <token>`. Main paths are auth `/api/auth/login`, `/api/auth/totp`, `/api/auth/totp-qrcode`, `/api/auth/change-password`, `/api/auth/logout`, `/api/auth/me`, `/api/auth/language`; public branding `/api/brand` and `/brand/{asset}`; files `/api/files`, `/api/files/upload-init`, `/api/files/{taskID}/chunks/0`, `/api/files/{taskID}/complete`, `/api/files/{id}/download`, `/api/files/{id}`; logs `/api/logs`, `/api/logs/actions`; and admin `/api/admin/users[/{id}]`, `/api/admin/users/{id}/totp`, `/api/admin/users/{id}/ip-acl`, `/api/admin/stats`, `/api/admin/settings`, `/api/admin/brand`, `/api/admin/locks`.
+JSON responses use `{ "code": number, "message": string, "data": any }`; protected endpoints require `Authorization: Bearer <token>`. Main paths are auth `/api/auth/login`, `/api/auth/register`, `/api/auth/totp`, `/api/auth/totp-qrcode`, `/api/auth/change-password`, `/api/auth/logout`, `/api/auth/me`, `/api/auth/language`; public branding `/api/brand` and `/brand/{asset}`; files `/api/files`, `/api/files/upload-init`, `/api/files/check`, `/api/files/{taskID}/chunks/{index}`, `/api/files/{taskID}/status`, `/api/files/{taskID}/complete`, `/api/files/{id}/download`, `/api/files/{id}/preview`, `/api/files/{id}/share`, `/api/files/{id}/shares`, `/api/files/shared/{token}/meta`, `/api/files/shared/{token}/download`, `/api/files/{id}`; logs `/api/logs`, `/api/logs/actions`; and admin `/api/admin/users[/{id}]`, `/api/admin/users/{id}/totp`, `/api/admin/users/{id}/ip-acl`, `/api/admin/stats`, `/api/admin/settings`, `/api/admin/brand`, `/api/admin/locks`.
 
 File, user, and log lists default to `pageSize=20` and cap it at 100. Administrators can view all files and logs; regular users are isolated by account. Downloads support Range, and logout does not maintain a server-side JWT blacklist.
 
@@ -128,11 +137,14 @@ File, user, and log lists default to `pageSize=20` and cap it at 100. Administra
 
 ## Data storage
 
-Under `--data`: `filebox.db`; with the default path, `data/files/<userID>/<yy>/<mm>/<stored-name>`, `data/tmp/<taskID>/0`, and `data/brand/<favicon|login-logo|main-logo>.<ext>`. SQLite stores metadata, ownership, quotas, and audit logs. Content is staged in the temporary file before completion and then moved into the user/year/month directory. The visible name is `name`, while the on-disk name is `stored_name`; conflicts use the smallest suffix such as `name (1).ext` and `name (2).ext`. Deletion marks `deleted`, subtracts quota, and removes physical content.
+Under `--data`: `filebox.db`; with the default path, `data/files/<userID>/<yy>/<mm>[/<relative-dir>]/<stored-name>`, `data/tmp/<taskID>/<chunk-index>`, and `data/brand/<favicon|login-logo|main-logo>.<ext>`. SQLite stores metadata, ownership, quotas, audit logs, chunk records (`chunks`), and share records (`shares`). Chunks are staged in the temporary directory and `complete` verifies them, then merges them as a stream into the user/year/month directory (optionally preserving a folder structure). The visible name is `name`, while the on-disk name is `stored_name`; conflicts use the smallest suffix such as `name (1).ext` and `name (2).ext`. Deletion marks `deleted`, subtracts quota, and removes physical content; storage paths held by soft-deleted records are automatically reused on re-upload.
 
-## Known limitations and Stage 2
+## Known limitations
 
-Not implemented: resumable chunks, true multi-chunk concurrency, instant upload, folder uploads, share links, online previews, rate limiting, open registration, or scheduled cleanup of abandoned upload tasks. `--register-enabled` is retained as a configuration slot, but there is currently no public registration route.
+- Instant upload matches only within the same user (no cross-user content deduplication).
+- Share links are random-token based; the `meta` endpoint exposes the file name, size, and usage counters, so do not share files that are sensitive in name or size.
+- Rate limiting is a per-user token bucket applied to chunk writes; setting changes take effect on the next request.
+- Not yet implemented: scheduled cleanup of abandoned upload tasks and server-pushed upload progress.
 
 ## License and acknowledgements
 

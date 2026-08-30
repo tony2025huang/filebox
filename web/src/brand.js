@@ -11,6 +11,7 @@ const defaultBrand = {
   hasFavicon: false,
   hasLoginLogo: false,
   hasMainLogo: false,
+  registerEnabled: false,
   defaultLang: 'zh-CN',
   themeColor: DEFAULT_THEME_COLOR
 }
