@@ -60,6 +60,14 @@ Stage 2 release notes
 - The file-list integrity column shows `md5` directly by default, with a persistent "Show MD5" toolbar switch.
 - Both the folder-picker button and directory drag-and-drop upload folders; invalid drops (such as empty folders) show a clear message instead of a misleading network error.
 
+### User-defined folders (v011 feedback batch, delivered with v0.2.0)
+
+- Removed the automatic year/month storage layer: storage is now `data/files/<user_id>/[<custom-dir>/]<filename>`, with files at the user root when no folder is used.
+- Added the `folders` table and folder CRUD API (create/list/rename/delete; renames cascade to children and file paths with a physical directory move; non-empty folders cannot be deleted).
+- The file page gained breadcrumbs, a "New folder" button (Chinese names supported), uploads into the current folder, and directory-filtered listings.
+- Folders are isolated per user; quotas remain user-wide (files inside folders count toward the quota).
+- Added `filebox admin migrate-v010-paths`: migrates the legacy `files/<uid>/<yy>/<mm>` layout to `files/<uid>/<yy>-<mm>` (for example `2026-08`), backs up the database before migrating, registers historical folder records, and is idempotent.
+
 ### Stage 1 features preserved
 
 Login/logout, file CRUD, quotas, dual hashes, disk protection, conflict overwrite/rename, filename validation, audit logs, login locking, TOTP, IP allowlists, branding, multilingual UI, theme color, forced password change, maintenance CLI, service logging, and service/reverse-proxy deployment all remain available and pass regression testing.

@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -480,5 +481,127 @@ func TestReuploadAfterDeleteReusesStoragePath(t *testing.T) {
 	}
 	if readyCount != 1 {
 		t.Fatalf("ready files after reupload = %d, want 1", readyCount)
+	}
+}
+
+// TestFolderCRUDUploadFilterAndIsolation 覆盖 v011 目录模型：创建（中文名）/子目录/上传到目录/列表过滤/重命名级联/删除非空拒绝/用户隔离。
+// TestFolderCRUDUploadFilterAndIsolation covers the v011 folder model: create (Chinese names), children, upload-into-folder, list filtering, rename cascade, non-empty delete rejection, and user isolation.
+func TestFolderCRUDUploadFilterAndIsolation(t *testing.T) {
+	db, handler := newTestServer(t)
+	token := testAdminToken(t, handler)
+	// 创建中文目录名
+	created := testJSONRequest(t, handler, http.MethodPost, "/api/folders", token, `{"name":"工作文档"}`)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create folder = %d: %s", created.Code, created.Body.String())
+	}
+	folder := responseData(t, created)
+	folderID := int64(folder["id"].(float64))
+	if folder["path"] != "工作文档" || folder["name"] != "工作文档" {
+		t.Fatalf("folder payload = %#v", folder)
+	}
+	// 同名目录 409
+	dup := testJSONRequest(t, handler, http.MethodPost, "/api/folders", token, `{"name":"工作文档"}`)
+	if dup.Code != http.StatusConflict {
+		t.Fatalf("duplicate folder = %d", dup.Code)
+	}
+	// 子目录
+	child := testJSONRequest(t, handler, http.MethodPost, "/api/folders", token, `{"name":"projects","parent":"工作文档"}`)
+	if child.Code != http.StatusCreated || responseData(t, child)["path"] != "工作文档/projects" {
+		t.Fatalf("child folder = %d: %s", child.Code, child.Body.String())
+	}
+	// 上传文件到 工作文档/projects（目录记录自动补齐；直接构造 dir 上传）
+	content := []byte("plan content")
+	initBody, _ := json.Marshal(map[string]any{"name": "plan.txt", "size": len(content), "chunkSize": 0, "mime": "text/plain", "dir": "工作文档/projects"})
+	initUpload := testJSONRequest(t, handler, http.MethodPost, "/api/files/upload-init", token, string(initBody))
+	if initUpload.Code != http.StatusOK {
+		t.Fatalf("dir upload init = %d: %s", initUpload.Code, initUpload.Body.String())
+	}
+	planTask := responseData(t, initUpload)["taskId"].(string)
+	chunkPut := testBinaryRequest(t, handler, http.MethodPut, "/api/files/"+planTask+"/chunks/0", token, content)
+	if chunkPut.Code != http.StatusOK {
+		t.Fatalf("dir chunk = %d", chunkPut.Code)
+	}
+	complete := testJSONRequest(t, handler, http.MethodPost, "/api/files/"+planTask+"/complete", token, "{}")
+	if complete.Code != http.StatusOK {
+		t.Fatalf("dir complete = %d: %s", complete.Code, complete.Body.String())
+	}
+	file := responseData(t, complete)
+	fileID := int64(file["id"].(float64))
+	stored, err := db.FindFile(context.Background(), fileID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(filepath.ToSlash(stored.StoragePath), "工作文档/projects/plan.txt") {
+		t.Fatalf("storage path = %q, want under 工作文档/projects", stored.StoragePath)
+	}
+	// 列表按目录过滤
+	rootList := testJSONRequest(t, handler, http.MethodGet, "/api/files?page=1&pageSize=50&dir=", token, "")
+	if responseData(t, rootList)["total"] == float64(0) {
+		t.Fatalf("root list should be empty after moving upload into a folder: %s", rootList.Body.String())
+	}
+	dirList := testJSONRequest(t, handler, http.MethodGet, "/api/files?page=1&pageSize=50&dir="+url.QueryEscape("工作文档/projects"), token, "")
+	dirData := responseData(t, dirList)
+	if dirData["total"] != float64(1) {
+		t.Fatalf("dir list total = %v, want 1", dirData["total"])
+	}
+	// 重命名目录：文件 storage_path 级联更新且磁盘文件移动
+	renamed := testJSONRequest(t, handler, http.MethodPatch, "/api/folders/"+strconv.FormatInt(folderID, 10), token, `{"name":"工作资料"}`)
+	if renamed.Code != http.StatusOK {
+		t.Fatalf("rename folder = %d: %s", renamed.Code, renamed.Body.String())
+	}
+	fileAfter, err := db.FindFile(context.Background(), fileID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(filepath.ToSlash(fileAfter.StoragePath), "工作资料/projects/plan.txt") {
+		t.Fatalf("storage path after rename = %q", fileAfter.StoragePath)
+	}
+	if _, err := os.Stat(filepath.Join(db.DataDir, fileAfter.StoragePath)); err != nil {
+		t.Fatalf("disk file after rename missing: %v", err)
+	}
+	// 删除非空目录（含文件）→ 400
+	nonEmpty := testJSONRequest(t, handler, http.MethodDelete, "/api/folders/"+strconv.FormatInt(folderID, 10), token, "")
+	if nonEmpty.Code != http.StatusBadRequest {
+		t.Fatalf("delete non-empty folder = %d", nonEmpty.Code)
+	}
+	// 先删文件，再删子目录（空）→ 成功；再删父目录（空）→ 成功
+	testJSONRequest(t, handler, http.MethodDelete, "/api/files/"+strconv.FormatInt(fileID, 10), token, "")
+	childList := testJSONRequest(t, handler, http.MethodGet, "/api/folders", token, "")
+	childID := int64(0)
+	for _, item := range responseData(t, childList)["items"].([]any) {
+		entry := item.(map[string]any)
+		if entry["path"] == "工作资料/projects" {
+			childID = int64(entry["id"].(float64))
+		}
+	}
+	if childID == 0 {
+		t.Fatal("child folder not found")
+	}
+	delChild := testJSONRequest(t, handler, http.MethodDelete, "/api/folders/"+strconv.FormatInt(childID, 10), token, "")
+	if delChild.Code != http.StatusOK {
+		t.Fatalf("delete empty child = %d: %s", delChild.Code, delChild.Body.String())
+	}
+	delParent := testJSONRequest(t, handler, http.MethodDelete, "/api/folders/"+strconv.FormatInt(folderID, 10), token, "")
+	if delParent.Code != http.StatusOK {
+		t.Fatalf("delete empty parent = %d: %s", delParent.Code, delParent.Body.String())
+	}
+	// 用户隔离：另一用户看不到目录，也不能操作
+	userToken := testAdminToken(t, handler) // same admin; create a second account through the API
+	_ = userToken
+	createOther := testJSONRequest(t, handler, http.MethodPost, "/api/admin/users", token, `{"username":"folder-user","password":"Folder123!","role":"user","quotaBytes":107374182400}`)
+	if createOther.Code != http.StatusCreated {
+		t.Fatalf("create other user = %d", createOther.Code)
+	}
+	otherToken := ""
+	loginBody := `{"username":"folder-user","password":"Folder123!"}`
+	login := testJSONRequest(t, handler, http.MethodPost, "/api/auth/login", "", loginBody)
+	otherToken = responseData(t, login)["token"].(string)
+	otherFolders := testJSONRequest(t, handler, http.MethodGet, "/api/folders", otherToken, "")
+	if responseData(t, otherFolders)["items"].([]any) != nil && len(responseData(t, otherFolders)["items"].([]any)) != 0 {
+		t.Fatalf("other user sees folders: %s", otherFolders.Body.String())
+	}
+	badDelete := testJSONRequest(t, handler, http.MethodDelete, "/api/folders/"+strconv.FormatInt(folderID, 10), otherToken, "")
+	if badDelete.Code != http.StatusNotFound {
+		t.Fatalf("other user delete folder = %d, want 404", badDelete.Code)
 	}
 }

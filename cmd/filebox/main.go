@@ -209,10 +209,138 @@ func runAdmin(args []string) int {
 		return runAdminResetPassword(args[1:])
 	case "clear-ip-acl":
 		return runAdminClearIPACL(args[1:])
+	case "migrate-v010-paths":
+		return runAdminMigrateV010Paths(args[1:])
 	default:
 		printAdminUsage(os.Stderr)
 		return 2
 	}
+}
+
+// runAdminMigrateV010Paths 将 v010 的 files/<uid>/<yy>/<mm> 结构迁移为 v011 的 files/<uid>/<yy>-<mm>（方案 B）。
+// runAdminMigrateV010Paths migrates the v010 files/<uid>/<yy>/<mm> layout to v011 files/<uid>/<yy>-<mm> (plan B).
+func runAdminMigrateV010Paths(args []string) int {
+	flags := flag.NewFlagSet("filebox admin migrate-v010-paths", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	dataDir := flags.String("data", "./data", "data directory")
+	logging := addLoggingFlags(flags)
+	if err := flags.Parse(args); err != nil || flags.NArg() != 0 {
+		printAdminUsage(os.Stderr)
+		return 2
+	}
+	logger, err := logging.newLogger()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 2
+	}
+	defer logger.Close()
+	result, reason := "failure", "command_failed"
+	defer func() {
+		logger.Event("ops", "operator=cli ip=- command=admin migrate-v010-paths target=all result=%s reason=%s", result, reason)
+	}()
+	// 迁移前备份 DB（物理文件目录建议运维自行备份或复制整个 --data）
+	backupPath := filepath.Join(*dataDir, "filebox.db.bak-v011")
+	if err := copyFile(filepath.Join(*dataDir, "filebox.db"), backupPath); err != nil {
+		fmt.Fprintf(os.Stderr, "backup database: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(os.Stdout, "database backed up to %s\n", backupPath)
+
+	db, err := store.Open(*dataDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "open storage: %v\n", err)
+		return 1
+	}
+	defer db.Close()
+	ctx := context.Background()
+	filesRoot := filepath.Join(*dataDir, "files")
+	entries, err := os.ReadDir(filesRoot)
+	if err != nil {
+		if os.IsNotExist(err) {
+			result, reason = "success", ""
+			fmt.Fprintln(os.Stdout, "no files directory; nothing to migrate")
+			return 0
+		}
+		fmt.Fprintf(os.Stderr, "read files root: %v\n", err)
+		return 1
+	}
+	migrated := 0
+	for _, userEntry := range entries {
+		if !userEntry.IsDir() {
+			continue
+		}
+		userID, parseErr := strconv.ParseInt(userEntry.Name(), 10, 64)
+		if parseErr != nil {
+			continue
+		}
+		userRoot := filepath.Join(filesRoot, userEntry.Name())
+		yearEntries, err := os.ReadDir(userRoot)
+		if err != nil {
+			continue
+		}
+		for _, yearEntry := range yearEntries {
+			if !yearEntry.IsDir() {
+				continue
+			}
+			yearRoot := filepath.Join(userRoot, yearEntry.Name())
+			monthEntries, err := os.ReadDir(yearRoot)
+			if err != nil {
+				continue
+			}
+			for _, monthEntry := range monthEntries {
+				if !monthEntry.IsDir() {
+					continue
+				}
+				oldRel := filepath.Join("files", userEntry.Name(), yearEntry.Name(), monthEntry.Name())
+				newName := "20" + yearEntry.Name() + "-" + monthEntry.Name() // 方案 B：4 位年份 2026-08
+				newRel := filepath.Join("files", userEntry.Name(), newName)
+				oldDisk := filepath.Join(*dataDir, oldRel)
+				newDisk := filepath.Join(*dataDir, newRel)
+				if _, err := os.Stat(newDisk); err == nil {
+					continue // 已迁移或目标已存在，跳过
+				}
+				if err := os.Rename(oldDisk, newDisk); err != nil {
+					fmt.Fprintf(os.Stderr, "move %s -> %s: %v\n", oldDisk, newDisk, err)
+					continue
+				}
+				prefix := oldRel + string(filepath.Separator)
+				newPrefix := newRel + string(filepath.Separator)
+				escaped := strings.ReplaceAll(prefix, `\`, `\\`)
+				escaped = strings.ReplaceAll(escaped, "%", `\%`)
+				escaped = strings.ReplaceAll(escaped, "_", `\_`)
+				if _, err := db.DB.ExecContext(ctx, "UPDATE files SET storage_path = ? || substr(storage_path, length(?) + 1) WHERE user_id = ? AND storage_path LIKE ? ESCAPE '\\'", newPrefix, prefix, userID, escaped+"%"); err != nil {
+					fmt.Fprintf(os.Stderr, "rewrite storage paths for %s: %v\n", oldRel, err)
+					continue
+				}
+				if _, err := db.DB.ExecContext(ctx, "INSERT OR IGNORE INTO folders(user_id, parent_id, name, path, created_at) SELECT ?, NULL, ?, ?, ? WHERE EXISTS (SELECT 1 FROM users WHERE id = ?)", userID, newName, newName, time.Now().UTC().Format(time.RFC3339), userID); err != nil {
+					fmt.Fprintf(os.Stderr, "register folder %s: %v\n", newName, err)
+				}
+				_ = os.Remove(yearRoot) // 清理空年份目录（仅当已空）
+				migrated++
+				fmt.Fprintf(os.Stdout, "migrated %s -> %s (%d files)\n", oldRel, newRel, countPrefixFiles(ctx, db, userID, newPrefix))
+			}
+		}
+	}
+	result, reason = "success", ""
+	fmt.Fprintf(os.Stdout, "migration complete: %d year/month directories migrated\n", migrated)
+	return 0
+}
+
+func countPrefixFiles(ctx context.Context, db *store.Store, userID int64, prefix string) int {
+	var count int
+	escaped := strings.ReplaceAll(prefix, `\`, `\\`)
+	escaped = strings.ReplaceAll(escaped, "%", `\%`)
+	escaped = strings.ReplaceAll(escaped, "_", `\_`)
+	_ = db.DB.QueryRowContext(ctx, "SELECT COUNT(id) FROM files WHERE user_id = ? AND storage_path LIKE ? ESCAPE '\\'", userID, escaped+"%").Scan(&count)
+	return count
+}
+
+func copyFile(source, target string) error {
+	data, err := os.ReadFile(source)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(target, data, 0o600)
 }
 
 func runAdminResetPassword(args []string) int {
@@ -553,6 +681,7 @@ func printAdminUsage(writer io.Writer) {
 	fmt.Fprintln(writer, "usage: filebox admin reset-password --data=./data --username=admin --new-password=PASSWORD")
 	fmt.Fprintln(writer, "       filebox admin reset-password --data=./data --username=admin --generate")
 	fmt.Fprintln(writer, "       filebox admin clear-ip-acl --data=./data --username=admin")
+	fmt.Fprintln(writer, "       filebox admin migrate-v010-paths --data=./data   # v010 yy/mm → v011 yy-mm")
 }
 
 func printLocksUsage(writer io.Writer) {

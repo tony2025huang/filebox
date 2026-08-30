@@ -248,6 +248,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/files/{id}/shares", s.requireAuth(s.deleteShares))
 	mux.HandleFunc("GET /api/files/shared/{token}/meta", s.shareMeta)
 	mux.HandleFunc("GET /api/files/shared/{token}/download", s.shareDownload)
+	mux.HandleFunc("POST /api/folders", s.requireAuth(s.createFolder))
+	mux.HandleFunc("GET /api/folders", s.requireAuth(s.listFolders))
+	mux.HandleFunc("PATCH /api/folders/{id}", s.requireAuth(s.renameFolder))
+	mux.HandleFunc("DELETE /api/folders/{id}", s.requireAuth(s.deleteFolder))
 	mux.HandleFunc("DELETE /api/files/{id}", s.requireAuth(s.deleteFile))
 	mux.HandleFunc("GET /api/logs", s.requireAuth(s.listLogs))
 	mux.HandleFunc("GET /api/logs/actions", s.requireAuth(s.logActions))
@@ -1290,13 +1294,17 @@ func (s *Server) uploadInit(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "冲突处理方式无效")
 		return
 	}
-	now := time.Now().UTC()
 	dir, err := validateUploadDir(input.Dir)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "目录无效")
 		return
 	}
-	relativeDir := filepath.Join("files", strconv.FormatInt(user.ID, 10), now.Format("06"), now.Format("01"), dir)
+	// v011：上传目标目录自动补齐目录记录，保证导航与上传一致。
+	// v011: upload target directories get folder records created so navigation stays consistent with uploads.
+	if err := s.store.EnsureFolderPath(r.Context(), user.ID, dir); err != nil {
+		log.Printf("ensure folder path: %v", err)
+	}
+	relativeDir := filepath.Join("files", strconv.FormatInt(user.ID, 10), dir)
 	conflict, conflictErr := s.store.FindUploadConflict(r.Context(), user.ID, relativeDir, name)
 	if conflictErr != nil && !errors.Is(conflictErr, store.ErrNotFound) {
 		log.Printf("find upload conflict: %v", conflictErr)
@@ -1652,8 +1660,7 @@ func (s *Server) completeUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	relativeDir := task.StorageDir
 	if relativeDir == "" {
-		now := time.Now().UTC()
-		relativeDir = filepath.Join("files", strconv.FormatInt(user.ID, 10), now.Format("06"), now.Format("01"))
+		relativeDir = filepath.Join("files", strconv.FormatInt(user.ID, 10))
 	}
 	finalPath := ""
 	cleanupFinal := true
@@ -1695,7 +1702,16 @@ func (s *Server) completeUpload(w http.ResponseWriter, r *http.Request) {
 func (s *Server) listFiles(w http.ResponseWriter, r *http.Request) {
 	user := currentUser(r.Context())
 	page, pageSize := pagination(r)
-	files, total, err := s.store.ListFiles(r.Context(), user.ID, user.Role == "admin", strings.TrimSpace(r.URL.Query().Get("keyword")), page, pageSize)
+	dir := ""
+	if raw := strings.TrimSpace(r.URL.Query().Get("dir")); raw != "" {
+		validated, err := validateUploadDir(raw)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "目录无效")
+			return
+		}
+		dir = validated
+	}
+	files, total, err := s.store.ListFiles(r.Context(), user.ID, user.Role == "admin", strings.TrimSpace(r.URL.Query().Get("keyword")), dir, page, pageSize)
 	if err != nil {
 		log.Printf("list files: %v", err)
 		writeError(w, http.StatusInternalServerError, "获取文件列表失败")
@@ -1705,8 +1721,8 @@ func (s *Server) listFiles(w http.ResponseWriter, r *http.Request) {
 	for _, file := range files {
 		items = append(items, publicFile(file))
 	}
-	s.serviceEvent(r, "file_list", user.Username, "result=success page=%d page_size=%d total=%d", page, pageSize, total)
-	writeData(w, http.StatusOK, "获取成功", map[string]any{"items": items, "page": page, "pageSize": pageSize, "total": total})
+	s.serviceEvent(r, "file_list", user.Username, "result=success page=%d page_size=%d total=%d dir=%s", page, pageSize, total, dir)
+	writeData(w, http.StatusOK, "获取成功", map[string]any{"items": items, "page": page, "pageSize": pageSize, "total": total, "dir": dir})
 }
 
 func (s *Server) download(w http.ResponseWriter, r *http.Request) {
@@ -2030,6 +2046,150 @@ func previewMIMEAllowed(contentType string) bool {
 		base = strings.TrimSpace(strings.SplitN(contentType, ";", 2)[0])
 	}
 	return previewMIMETypes[strings.ToLower(base)]
+}
+
+// folderRequest 是目录创建/重命名请求体。
+// folderRequest is the folder create/rename request body.
+type folderRequest struct {
+	Name   string `json:"name"`
+	Parent string `json:"parent"`
+}
+
+// validateFolderName 校验单个目录名（禁止路径分隔符，长度 ≤255 字节，拒绝控制字符与 Windows 非法字符）。
+// validateFolderName validates a single folder name (no separators, ≤255 bytes, no control or Windows-illegal characters).
+func validateFolderName(name string) (string, error) {
+	name = strings.TrimSpace(name)
+	if name == "" || strings.ContainsAny(name, `/\`) {
+		return "", errors.New("invalid folder name")
+	}
+	for _, char := range name {
+		if unicode.IsControl(char) || strings.ContainsRune(`<>:"|?*`, char) {
+			return "", errors.New("invalid folder name")
+		}
+	}
+	if len([]byte(name)) > 255 {
+		return "", errors.New("invalid folder name")
+	}
+	return name, nil
+}
+
+// createFolder 创建用户目录（parent 为空表示根目录）。
+// createFolder creates a user folder; an empty parent means the root directory.
+func (s *Server) createFolder(w http.ResponseWriter, r *http.Request) {
+	user := currentUser(r.Context())
+	var input folderRequest
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	name, err := validateFolderName(input.Name)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "目录名无效")
+		return
+	}
+	parent := ""
+	if strings.TrimSpace(input.Parent) != "" {
+		validated, err := validateUploadDir(input.Parent)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "目录无效")
+			return
+		}
+		parent = validated
+	}
+	folder, err := s.store.CreateFolder(r.Context(), user.ID, parent, name)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "父目录不存在")
+		return
+	}
+	if errors.Is(err, store.ErrConflict) {
+		writeError(w, http.StatusConflict, "同名目录已存在")
+		return
+	}
+	if err != nil {
+		log.Printf("create folder: %v", err)
+		writeError(w, http.StatusInternalServerError, "创建目录失败")
+		return
+	}
+	s.serviceEvent(r, "folder_create", user.Username, "target=%s result=success", folder.Path)
+	writeData(w, http.StatusCreated, "目录已创建", folder)
+}
+
+// listFolders 返回当前用户的全部目录。
+// listFolders returns all of the current user's folders.
+func (s *Server) listFolders(w http.ResponseWriter, r *http.Request) {
+	user := currentUser(r.Context())
+	folders, err := s.store.ListFolders(r.Context(), user.ID)
+	if err != nil {
+		log.Printf("list folders: %v", err)
+		writeError(w, http.StatusInternalServerError, "获取目录列表失败")
+		return
+	}
+	s.serviceEvent(r, "folder_list", user.Username, "result=success count=%d", len(folders))
+	writeData(w, http.StatusOK, "获取成功", map[string]any{"items": folders})
+}
+
+// renameFolder 重命名目录并级联更新子目录与文件路径。
+// renameFolder renames a folder and cascades the change to child folders and files.
+func (s *Server) renameFolder(w http.ResponseWriter, r *http.Request) {
+	user := currentUser(r.Context())
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "目录编号无效")
+		return
+	}
+	var input folderRequest
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	name, err := validateFolderName(input.Name)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "目录名无效")
+		return
+	}
+	err = s.store.RenameFolder(r.Context(), id, user.ID, name)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "目录不存在")
+		return
+	}
+	if errors.Is(err, store.ErrConflict) {
+		writeError(w, http.StatusConflict, "同名目录已存在")
+		return
+	}
+	if err != nil {
+		log.Printf("rename folder: %v", err)
+		writeError(w, http.StatusInternalServerError, "重命名目录失败")
+		return
+	}
+	folder, _ := s.store.GetFolderByID(r.Context(), id, user.ID)
+	s.serviceEvent(r, "folder_rename", user.Username, "target=%s result=success", folder.Path)
+	writeData(w, http.StatusOK, "目录已重命名", folder)
+}
+
+// deleteFolder 删除空目录（非空返回 400，防止误删）。
+// deleteFolder deletes an empty folder and rejects non-empty directories with 400.
+func (s *Server) deleteFolder(w http.ResponseWriter, r *http.Request) {
+	user := currentUser(r.Context())
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "目录编号无效")
+		return
+	}
+	folder, findErr := s.store.GetFolderByID(r.Context(), id, user.ID)
+	deleted, err := s.store.DeleteFolder(r.Context(), id, user.ID)
+	if errors.Is(err, store.ErrNotFound) || (findErr != nil && errors.Is(findErr, store.ErrNotFound)) {
+		writeError(w, http.StatusNotFound, "目录不存在")
+		return
+	}
+	if errors.Is(err, store.ErrNotEmpty) {
+		writeError(w, http.StatusBadRequest, "目录非空，无法删除")
+		return
+	}
+	if err != nil {
+		log.Printf("delete folder: %v", err)
+		writeError(w, http.StatusInternalServerError, "删除目录失败")
+		return
+	}
+	s.serviceEvent(r, "folder_delete", user.Username, "target=%s result=success", folder.Path)
+	writeData(w, http.StatusOK, "目录已删除", map[string]any{"removed": deleted})
 }
 
 func (s *Server) deleteFile(w http.ResponseWriter, r *http.Request) {

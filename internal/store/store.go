@@ -29,6 +29,10 @@ var ErrConflict = errors.New("conflict")
 // ErrQuota indicates that an operation would exceed the user's quota.
 var ErrQuota = errors.New("quota exceeded")
 
+// ErrNotEmpty 表示目录非空，禁止删除。
+// ErrNotEmpty indicates that a directory is not empty and cannot be deleted.
+var ErrNotEmpty = errors.New("directory not empty")
+
 const (
 	// BrandTitleKey 是网站标题的设置键。
 	// BrandTitleKey is the settings key for the site title.
@@ -138,6 +142,17 @@ type Share struct {
 	DownloadCount int64  `json:"downloadCount"`
 	MaxDownloads  int    `json:"maxDownloads"`
 	CreatedAt     string `json:"createdAt"`
+}
+
+// Folder 表示一个用户自定义目录（v011：移除自动年月层后的目录模型）。
+// Folder represents a user-defined directory (v011: directory model after removing the automatic year/month layer).
+type Folder struct {
+	ID        int64  `json:"id"`
+	UserID    int64  `json:"userId"`
+	ParentID  *int64 `json:"parentId,omitempty"`
+	Name      string `json:"name"`
+	Path      string `json:"path"`
+	CreatedAt string `json:"createdAt"`
 }
 
 // AuditLog 表示一次登录、上传或下载等操作的审计记录。
@@ -294,6 +309,16 @@ CREATE TABLE IF NOT EXISTS chunks (
   sha256 TEXT NOT NULL,
   PRIMARY KEY(task_id, idx)
 );
+CREATE TABLE IF NOT EXISTS folders (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  parent_id INTEGER REFERENCES folders(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  path TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE(user_id, path)
+);
+CREATE INDEX IF NOT EXISTS idx_folders_user ON folders(user_id);
 CREATE TABLE IF NOT EXISTS audit_logs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
@@ -1468,6 +1493,203 @@ WHERE token = ? AND expires_at > ? AND (max_downloads = 0 OR download_count < ma
 	return count == 1, err
 }
 
+// CreateFolder 校验父目录存在与路径唯一后创建用户目录。
+// CreateFolder creates a user folder after validating the parent path and path uniqueness.
+func (s *Store) CreateFolder(ctx context.Context, userID int64, parentPath, name string) (Folder, error) {
+	path := name
+	if parentPath != "" {
+		path = parentPath + "/" + name
+		if _, err := s.GetFolderByPath(ctx, userID, parentPath); err != nil {
+			return Folder{}, err
+		}
+	}
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return Folder{}, err
+	}
+	var parentID *int64
+	if parentPath != "" {
+		var id int64
+		if err := tx.QueryRowContext(ctx, "SELECT id FROM folders WHERE user_id = ? AND path = ?", userID, parentPath).Scan(&id); err != nil {
+			tx.Rollback()
+			if errors.Is(err, sql.ErrNoRows) {
+				return Folder{}, ErrNotFound
+			}
+			return Folder{}, err
+		}
+		parentID = &id
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	result, err := tx.ExecContext(ctx, "INSERT INTO folders(user_id, parent_id, name, path, created_at) VALUES(?, ?, ?, ?, ?)", userID, parentID, name, path, now)
+	if err != nil {
+		tx.Rollback()
+		if isUniqueError(err) {
+			return Folder{}, ErrConflict
+		}
+		return Folder{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Folder{}, err
+	}
+	id, _ := result.LastInsertId()
+	return Folder{ID: id, UserID: userID, ParentID: parentID, Name: name, Path: path, CreatedAt: now}, nil
+}
+
+// GetFolderByPath 按相对路径读取用户目录，缺失映射为 ErrNotFound。
+// GetFolderByPath loads a user folder by relative path, mapping missing entries to ErrNotFound.
+func (s *Store) GetFolderByPath(ctx context.Context, userID int64, path string) (Folder, error) {
+	var folder Folder
+	err := s.DB.QueryRowContext(ctx, "SELECT id, user_id, parent_id, name, path, created_at FROM folders WHERE user_id = ? AND path = ?", userID, path).Scan(&folder.ID, &folder.UserID, &folder.ParentID, &folder.Name, &folder.Path, &folder.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Folder{}, ErrNotFound
+	}
+	return folder, err
+}
+
+// GetFolderByID 按 ID 读取用户目录，归属或存在性校验由调用方负责。
+// GetFolderByID loads a user folder by ID; ownership/existence checks are the caller's responsibility.
+func (s *Store) GetFolderByID(ctx context.Context, id, userID int64) (Folder, error) {
+	var folder Folder
+	err := s.DB.QueryRowContext(ctx, "SELECT id, user_id, parent_id, name, path, created_at FROM folders WHERE id = ? AND user_id = ?", id, userID).Scan(&folder.ID, &folder.UserID, &folder.ParentID, &folder.Name, &folder.Path, &folder.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Folder{}, ErrNotFound
+	}
+	return folder, err
+}
+
+// ListFolders 返回用户的全部目录（前端自行构建树/面包屑）。
+// ListFolders returns all of a user's folders for the frontend to build trees and breadcrumbs.
+func (s *Store) ListFolders(ctx context.Context, userID int64) ([]Folder, error) {
+	rows, err := s.DB.QueryContext(ctx, "SELECT id, user_id, parent_id, name, path, created_at FROM folders WHERE user_id = ? ORDER BY path", userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	folders := make([]Folder, 0)
+	for rows.Next() {
+		var folder Folder
+		if err := rows.Scan(&folder.ID, &folder.UserID, &folder.ParentID, &folder.Name, &folder.Path, &folder.CreatedAt); err != nil {
+			return nil, err
+		}
+		folders = append(folders, folder)
+	}
+	return folders, rows.Err()
+}
+
+// EnsureFolderPath 按 mkdir -p 语义为缺失的路径段创建目录记录，保证上传目录与导航一致。
+// EnsureFolderPath creates missing folder records for each path segment (mkdir -p semantics) so uploads stay consistent with navigation.
+func (s *Store) EnsureFolderPath(ctx context.Context, userID int64, path string) error {
+	if path == "" {
+		return nil
+	}
+	acc := ""
+	for _, seg := range strings.Split(path, "/") {
+		acc = strings.TrimPrefix(acc+"/"+seg, "/")
+		var count int
+		if err := s.DB.QueryRowContext(ctx, "SELECT COUNT(id) FROM folders WHERE user_id = ? AND path = ?", userID, acc).Scan(&count); err != nil {
+			return err
+		}
+		if count == 0 {
+			parent := ""
+			if idx := strings.LastIndex(acc, "/"); idx >= 0 {
+				parent = acc[:idx]
+			}
+			if _, err := s.CreateFolder(ctx, userID, parent, seg); err != nil && !errors.Is(err, ErrConflict) {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// RenameFolder 事务性重命名目录：更新自身与全部子孙的 path、批量替换文件 storage_path 前缀，并物理移动磁盘目录。
+// RenameFolder transactionally renames a folder: updates the path of itself and descendants, rewrites file storage prefixes, and moves the disk directory.
+func (s *Store) RenameFolder(ctx context.Context, id, userID int64, newName string) error {
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var oldPath string
+	if err := tx.QueryRowContext(ctx, "SELECT path FROM folders WHERE id = ? AND user_id = ?", id, userID).Scan(&oldPath); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		}
+		return err
+	}
+	newPath := newName
+	if index := strings.LastIndex(oldPath, "/"); index >= 0 {
+		newPath = oldPath[:index+1] + newName
+	}
+	var count int
+	if err := tx.QueryRowContext(ctx, "SELECT COUNT(id) FROM folders WHERE user_id = ? AND path = ? AND id != ?", userID, newPath, id).Scan(&count); err != nil {
+		return err
+	}
+	if count > 0 {
+		return ErrConflict
+	}
+	oldPrefix := oldPath + "/"
+	newPrefix := newPath + "/"
+	if _, err := tx.ExecContext(ctx, "UPDATE folders SET name = ?, path = ? WHERE id = ?", newName, newPath, id); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, "UPDATE folders SET path = ? || substr(path, length(?) + 1) WHERE user_id = ? AND path LIKE ? ESCAPE '\\'", newPrefix, oldPrefix, userID, escapeLike(oldPrefix)+"%"); err != nil {
+		return err
+	}
+	filePrefix := filepath.Join("files", strconv.FormatInt(userID, 10), oldPath)
+	newFilePrefix := filepath.Join("files", strconv.FormatInt(userID, 10), newPath)
+	if _, err := tx.ExecContext(ctx, "UPDATE files SET storage_path = ? || substr(storage_path, length(?) + 1) WHERE user_id = ? AND status != 'deleted' AND storage_path LIKE ? ESCAPE '\\'", newFilePrefix, filePrefix, userID, escapeLike(filePrefix)+"%"); err != nil {
+		return err
+	}
+	oldDisk := filepath.Join(s.DataDir, filePrefix)
+	newDisk := filepath.Join(s.DataDir, newFilePrefix)
+	if err := os.Rename(oldDisk, newDisk); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("rename disk directory: %w", err)
+	}
+	return tx.Commit()
+}
+
+// DeleteFolder 仅删除空目录（无 ready 文件且无子目录），物理移除并删除记录。
+// DeleteFolder removes only empty folders (no ready files and no children), deleting the disk directory and the record.
+func (s *Store) DeleteFolder(ctx context.Context, id, userID int64) (bool, error) {
+	folder, err := s.GetFolderByID(ctx, id, userID)
+	if err != nil {
+		return false, err
+	}
+	pathPrefix := filepath.Join("files", strconv.FormatInt(userID, 10), folder.Path) + string(filepath.Separator)
+	var fileCount int
+	if err := s.DB.QueryRowContext(ctx, "SELECT COUNT(id) FROM files WHERE user_id = ? AND status != 'deleted' AND substr(storage_path, 1, length(?)) = ?", userID, pathPrefix, pathPrefix).Scan(&fileCount); err != nil {
+		return false, err
+	}
+	if fileCount > 0 {
+		return false, ErrNotEmpty
+	}
+	var childCount int
+	if err := s.DB.QueryRowContext(ctx, "SELECT COUNT(id) FROM folders WHERE user_id = ? AND parent_id = ?", userID, id).Scan(&childCount); err != nil {
+		return false, err
+	}
+	if childCount > 0 {
+		return false, ErrNotEmpty
+	}
+	disk := filepath.Join(s.DataDir, filepath.FromSlash(filepath.Join("files", strconv.FormatInt(userID, 10), folder.Path)))
+	if err := os.Remove(disk); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return false, err
+	}
+	result, err := s.DB.ExecContext(ctx, "DELETE FROM folders WHERE id = ? AND user_id = ?", id, userID)
+	if err != nil {
+		return false, err
+	}
+	count, err := result.RowsAffected()
+	return count == 1, err
+}
+
+func escapeLike(value string) string {
+	value = strings.ReplaceAll(value, `\`, `\\`)
+	value = strings.ReplaceAll(value, "%", `\%`)
+	value = strings.ReplaceAll(value, "_", `\_`)
+	return value
+}
+
 func scanFile(row *sql.Row) (File, error) {
 	var file File
 	err := row.Scan(&file.ID, &file.UserID, &file.Name, &file.StoredName, &file.Size, &file.Mime, &file.SHA256, &file.MD5, &file.Status, &file.StoragePath, &file.CreatedAt, &file.DeletedAt)
@@ -1477,15 +1699,27 @@ func scanFile(row *sql.Row) (File, error) {
 	return file, err
 }
 
-func (s *Store) ListFiles(ctx context.Context, userID int64, admin bool, keyword string, page, pageSize int) ([]File, int, error) {
-	// ListFiles 只返回 ready 文件；普通用户按所有权隔离，管理员可查看全部文件。
-	// ListFiles returns ready files only; regular users are isolated by ownership while admins can view all files.
+func (s *Store) ListFiles(ctx context.Context, userID int64, admin bool, keyword, dir string, page, pageSize int) ([]File, int, error) {
+	// ListFiles 只返回 ready 文件；普通用户按所有权隔离，管理员可查看全部文件；dir 限定 storage_path 前缀（v011 目录过滤）。
+	// ListFiles returns ready files only; regular users are isolated by ownership while admins can view all files; dir filters by storage-path prefix.
 	pattern := "%" + keyword + "%"
 	where := "status = 'ready' AND name LIKE ?"
 	args := []any{pattern}
 	if !admin {
 		where += " AND user_id = ?"
 		args = append(args, userID)
+	}
+	if dir != "" {
+		prefix := filepath.Join("files", strconv.FormatInt(userID, 10), dir) + string(filepath.Separator)
+		where += " AND substr(storage_path, 1, length(?)) = ?"
+		args = append(args, prefix, prefix)
+	} else if admin {
+		// 管理员无 dir 参数 = 全部文件（既有语义）
+	} else {
+		// 普通用户无 dir 参数 = 仅根目录层文件（v011 目录模型：子目录文件只在目录视图出现）
+		prefix := filepath.Join("files", strconv.FormatInt(userID, 10)) + string(filepath.Separator)
+		where += " AND substr(storage_path, 1, length(?)) = ? AND instr(substr(storage_path, length(?) + 1), ?) = 0"
+		args = append(args, prefix, prefix, prefix, string(filepath.Separator))
 	}
 	var total int
 	countArgs := append([]any{}, args...)

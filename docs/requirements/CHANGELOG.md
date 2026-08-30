@@ -1,5 +1,16 @@
 # Requirement Change Log
 
+## 2026-08-30 - v011 验证反馈批次（问题 6：用户自定义目录，并入阶段二 v0.2.0 交付）
+
+- **移除自动年月目录层**：存储结构由 `data/files/<user_id>/<yy>/<mm>[/<dir>]` 改为 `data/files/<user_id>[/<自定义目录>/]<stored_name>`（upload-init 与 complete 兜底均去掉 `<yy>/<mm>` 拼接）；不建目录时文件直接放用户根目录。
+- **新增 folders 模型与 CRUD API**：SQLite `folders` 表（user_id 归属、parent_id 父子、name、path 唯一 `UNIQUE(user_id, path)`、created_at）；`POST/GET/PATCH/DELETE /api/folders`：创建（中英文目录名，父目录可选）、列表、重命名（事务性级联更新子目录 path 与文件 storage_path 前缀 + 物理移动磁盘目录）、删除（仅空目录，非空返回 400「目录非空，无法删除」）。
+- **上传指定父目录 + 目录记录自动补齐**：upload-init 的 `dir` 字段沿用（上传到当前浏览目录）；`EnsureFolderPath` 按 mkdir -p 语义补齐缺失目录记录，保证导航与上传一致。
+- **列表按目录过滤 + 面包屑**：`GET /api/files?dir=<path>` 返回该目录下文件；普通用户无 dir 参数仅返回根目录层文件（子目录文件只在目录视图出现，管理员无 dir 仍为全部文件）。
+- **前端文件页**：面包屑导航（根目录可点击逐层进入）、「新建文件夹」按钮与弹窗（支持中文名）、子目录行（进入/重命名/删除，删除非空有确认且后端拒绝）、上传目标 = 当前目录。
+- **冲突策略**：目录内同名文件仍走 409/覆盖/重命名；跨目录同名不冲突；配额仍按用户维度（目录内文件计入配额）。
+- **旧数据迁移（用户已确认方案 B）**：新增 `filebox admin migrate-v010-paths --data=...` 命令——迁移前备份 DB（`filebox.db.bak-v011`），将 `files/<uid>/<yy>/<mm>/*` 物理移动到 `files/<uid>/<yy>-<mm>/`（4 位年份，如 `2026-08`），事务性批量重写 `files.storage_path` 前缀，并在 folders 表登记历史目录（仅当用户存在时）；幂等（已迁移目录跳过）。
+- 修复：迁移/重命名中的 SQLite `substr` 长度统一使用 `length(?)`（字符计数），目录过滤使用 `instr` 排除子目录文件，规避中文目录名（UTF-8 多字节）导致的字节/字符计数错位。
+
 ## 2026-08-30 - 用户实测反馈批次（并入阶段二 v0.2.0 交付）
 
 - 登录页不再展示初始默认账号提示：移除 LoginView 的 `login-foot` 渲染，并删除 zh-CN/zh-TW/en 三字典中的 `login.defaultAdmin` 键（不再引用，无残留）。
