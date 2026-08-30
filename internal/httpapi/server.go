@@ -104,6 +104,9 @@ type totpRequest struct {
 
 type totpToggleRequest struct {
 	Enabled bool `json:"enabled"`
+	// Reenroll 为 true 时生成新随机 secret 且 enabled=false，要求用户下次登录重新扫码绑定（问题 12）。
+	// Reenroll generates a fresh random secret with enabled=false so the user re-binds on their next login.
+	Reenroll bool `json:"reenroll"`
 }
 
 type ipACLRequest struct {
@@ -189,6 +192,7 @@ type brandResponse struct {
 	SiteDescription string `json:"siteDescription"`
 	ICPText         string `json:"icpText"`
 	PoliceText      string `json:"policeText"`
+	CopyrightText   string `json:"copyrightText"`
 	HasFavicon      bool   `json:"hasFavicon"`
 	HasLoginLogo    bool   `json:"hasLoginLogo"`
 	HasMainLogo     bool   `json:"hasMainLogo"`
@@ -352,6 +356,7 @@ func (s *Server) publicBrand(settings store.BrandSettings) brandResponse {
 		SiteDescription: settings.Description,
 		ICPText:         settings.ICP,
 		PoliceText:      settings.Police,
+		CopyrightText:   settings.Copyright,
 		HasFavicon:      s.brandAssetExists(brandAssets["favicon"], settings.Favicon),
 		HasLoginLogo:    s.brandAssetExists(brandAssets["login-logo"], settings.LoginLogo),
 		HasMainLogo:     s.brandAssetExists(brandAssets["main-logo"], settings.MainLogo),
@@ -439,6 +444,7 @@ func (s *Server) updateBrand(w http.ResponseWriter, r *http.Request) {
 		{formKey: "siteDescription", clearKey: "clearDescription", settingKey: store.BrandDescriptionKey, maxRunes: 200},
 		{formKey: "icpText", clearKey: "clearIcp", settingKey: store.BrandICPKey, maxRunes: 128},
 		{formKey: "policeText", clearKey: "clearPolice", settingKey: store.BrandPoliceKey, maxRunes: 128},
+		{formKey: "copyrightText", clearKey: "clearCopyright", settingKey: store.BrandCopyrightKey, maxRunes: 128},
 	}
 	for _, field := range textFields {
 		clear, err := parseOptionalBool(r.FormValue(field.clearKey))
@@ -523,7 +529,7 @@ type brandUpload struct {
 }
 
 func emptyBrandSettings() map[string]string {
-	return map[string]string{store.BrandTitleKey: "", store.BrandDescriptionKey: "", store.BrandICPKey: "", store.BrandPoliceKey: "", store.BrandFaviconKey: "", store.BrandLoginLogoKey: "", store.BrandMainLogoKey: ""}
+	return map[string]string{store.BrandTitleKey: "", store.BrandDescriptionKey: "", store.BrandICPKey: "", store.BrandPoliceKey: "", store.BrandCopyrightKey: "", store.BrandFaviconKey: "", store.BrandLoginLogoKey: "", store.BrandMainLogoKey: ""}
 }
 
 func parseOptionalBool(value string) (bool, error) {
@@ -2345,7 +2351,9 @@ func (s *Server) updateUserTOTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	secret := ""
-	if input.Enabled {
+	// 启用与要求重绑都会生成新随机 secret；enabled=false 时若未请求重绑则清空（禁用）。
+	// Both enabling and re-enrolling generate a fresh secret; disabling clears it unless re-enroll is requested.
+	if input.Enabled || input.Reenroll {
 		randomSecret := make([]byte, 20)
 		if _, err := rand.Read(randomSecret); err != nil {
 			writeError(w, http.StatusInternalServerError, "生成动态验证密钥失败")
@@ -2363,7 +2371,7 @@ func (s *Server) updateUserTOTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	updated, _ := s.store.GetUser(id)
-	s.serviceEvent(r, "totp_update", admin.Username, "target=%s enabled=%t result=success", user.Username, input.Enabled)
+	s.serviceEvent(r, "totp_update", admin.Username, "target=%s enabled=%t reenroll=%t result=success", user.Username, input.Enabled, input.Reenroll)
 	writeData(w, http.StatusOK, "动态验证设置已更新", publicUser(updated))
 }
 
@@ -2557,8 +2565,16 @@ func (s *Server) listLogs(w http.ResponseWriter, r *http.Request) {
 	writeData(w, http.StatusOK, "获取成功", map[string]any{"items": logs, "page": page, "pageSize": pageSize, "total": total})
 }
 
+// logActions 返回全部审计动作（含"系统配置"类事件），供日志页筛选。
+// logActions returns every audit action (including system-configuration events) for log-page filtering.
 func (s *Server) logActions(w http.ResponseWriter, _ *http.Request) {
-	writeData(w, http.StatusOK, "获取成功", []string{"login", "upload", "download", "share", "share_view", "share_download", "register"})
+	writeData(w, http.StatusOK, "获取成功", []string{
+		"login", "register", "upload", "download", "share", "share_view", "share_download",
+		"settings_update", "brand_update", "language_update", "password_change", "password_reset",
+		"user_create", "user_update", "user_disabled", "totp_update", "ip_acl_update",
+		"folder_create", "folder_list", "folder_rename", "folder_delete",
+		"file_list", "admin_stats", "log_list",
+	})
 }
 
 func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {

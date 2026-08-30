@@ -1,5 +1,12 @@
 # Requirement Change Log
 
+## 2026-08-30 - v011 验证反馈批次（问题 10-13，并入阶段二 v0.2.0 交付）
+
+- **问题 10（日志成功绿/失败红）**：`.result-label.success` 改用固定绿色（`color:#1e7e34; background:#e8f5ec`），不再跟随主题色；失败保持固定红 `#a83e2d/#fff0ed`；更换主题色后成功/失败配色不变。
+- **问题 11（日志"系统配置"类型）**：`logActions` 由 7 项硬编码扩为完整 24 项（新增 settings_update/brand_update/language_update/password_change/password_reset/user_create/user_update/user_disabled/totp_update/ip_acl_update/folder_*/file_list/admin_stats/log_list/register）；LogsView `actionLabel` 补全映射（i18n 三语），筛选下拉按「业务/系统配置」分组（optgroup）。
+- **问题 12（自助改密入口 + TOTP 重绑）**：FilesView/AdminView/LogsView 顶栏新增「修改密码」入口（跳转既有 /change-password 页，普通用户可随时自助改密；管理员重设密码强制改密原已具备）；后端 `PUT /api/admin/users/{id}/totp` 新增 `reenroll` 字段——为 true 时生成新随机 secret 且 enabled=false，用户下次登录自动进入 TOTP 扫码绑定流程（复用现有 totpSetup 分支）；AdminView 编辑面板新增「要求下次重新绑定 TOTP」复选框。
+- **问题 13（Copyright © 设置）**：store 新增 `brand_copyright` 键与 `BrandSettings.Copyright`（migrate 默认值/Get/Update/emptyBrandSettings 同步）；`/api/brand` 返回 `copyrightText`，`PUT /api/admin/brand` 支持 `copyrightText`（≤128 字）与 `clearCopyright`；前端品牌面板新增「版权信息」输入框、`BrandFooter` 按 `v-if` 渲染版权（与 ICP/公安同规则，空值不留空白）；i18n 三语（admin.copyright/admin.copyrightPlaceholder）。
+
 ## 2026-08-30 - v011 验证反馈批次（问题 7/8/9，并入阶段二 v0.2.0 交付）
 
 - **问题 7（logo 跳转）**：`BrandLogo.vue` 增加 `link` prop（默认 false），为 true 时以 `<RouterLink to="/">` 包裹并带 cursor 样式；文件/管理/日志/分享页顶栏 logo 均加 `link`，登录页与品牌面板预览不加；点击顶栏 logo 跳转首页 `/`。

@@ -68,6 +68,13 @@ Stage 2 release notes
 - Folders are isolated per user; quotas remain user-wide (files inside folders count toward the quota).
 - Added `filebox admin migrate-v010-paths`: migrates the legacy `files/<uid>/<yy>/<mm>` layout to `files/<uid>/<yy>-<mm>` (for example `2026-08`), backs up the database before migrating, registers historical folder records, and is idempotent.
 
+### Log and branding experience (v011 feedback batch, delivered with v0.2.0)
+
+- The log page "result" column now uses fixed green for success and fixed red for failure, independent of the theme color.
+- The log filter gained a "System configuration" group covering 20+ actions (settings/brand/language/password/user/TOTP/IP-allowlist/folders/stats) with trilingual labels.
+- The topbar gained a "Change password" entry so regular users can rotate their password anytime; admins can check "Require TOTP re-enrollment" so the user re-binds on the next login.
+- Brand settings gained a copyright field (for example `Copyright © 2026 xxx`) rendered in the footer with empty-value suppression.
+
 ### Single-binary delivery and deployment guide
 
 - The deliverable is a single executable (embedded frontend, pure-Go SQLite, zero runtime dependencies); `make release` (or `scripts\release.ps1` on Windows) produces `dist/filebox-windows-amd64.exe`, `dist/filebox-linux-amd64`, and `dist/SHA256SUMS.txt` (CGO_ENABLED=0, -trimpath, -s -w) that run without Go or Node installed.

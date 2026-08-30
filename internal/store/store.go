@@ -46,6 +46,9 @@ const (
 	// BrandPoliceKey 是公安备案文本的设置键。
 	// BrandPoliceKey is the settings key for public-security filing text.
 	BrandPoliceKey = "brand_police"
+	// BrandCopyrightKey 是页脚版权文本的设置键。
+	// BrandCopyrightKey is the settings key for the footer copyright text.
+	BrandCopyrightKey = "brand_copyright"
 	// BrandFaviconKey 是 favicon 资源文件名的设置键。
 	// BrandFaviconKey is the settings key for the favicon asset filename.
 	BrandFaviconKey = "brand_favicon"
@@ -216,6 +219,7 @@ type BrandSettings struct {
 	Description string
 	ICP         string
 	Police      string
+	Copyright   string
 	Favicon     string
 	LoginLogo   string
 	MainLogo    string
@@ -440,7 +444,7 @@ func (s *Store) migrateSettings() error {
 		"ipLockWindowMinutes": "10", "ipLockThreshold": "50", "ipAutoUnlockEnabled": "true", "ipUnlockMinutes": "30",
 		"defaultLang": "zh-CN",
 		"theme_color": "",
-		BrandTitleKey: "", BrandDescriptionKey: "", BrandICPKey: "", BrandPoliceKey: "", BrandFaviconKey: "", BrandLoginLogoKey: "", BrandMainLogoKey: "",
+		BrandTitleKey: "", BrandDescriptionKey: "", BrandICPKey: "", BrandPoliceKey: "", BrandCopyrightKey: "", BrandFaviconKey: "", BrandLoginLogoKey: "", BrandMainLogoKey: "",
 		"registerEnabled": "false", "uploadRateLimit": "0",
 	}
 	for key, value := range defaults {
@@ -462,7 +466,7 @@ func (s *Store) GetBrandSettings(ctx context.Context) (BrandSettings, error) {
 	// GetBrandSettings 读取品牌文本和自定义资源文件名，缺失值保持为空。
 	// GetBrandSettings reads branding text and custom asset filenames, leaving missing values empty.
 	settings := BrandSettings{}
-	rows, err := s.DB.QueryContext(ctx, "SELECT key, value FROM settings WHERE key IN (?, ?, ?, ?, ?, ?, ?)", BrandTitleKey, BrandDescriptionKey, BrandICPKey, BrandPoliceKey, BrandFaviconKey, BrandLoginLogoKey, BrandMainLogoKey)
+	rows, err := s.DB.QueryContext(ctx, "SELECT key, value FROM settings WHERE key IN (?, ?, ?, ?, ?, ?, ?, ?)", BrandTitleKey, BrandDescriptionKey, BrandICPKey, BrandPoliceKey, BrandCopyrightKey, BrandFaviconKey, BrandLoginLogoKey, BrandMainLogoKey)
 	if err != nil {
 		return settings, err
 	}
@@ -481,6 +485,8 @@ func (s *Store) GetBrandSettings(ctx context.Context) (BrandSettings, error) {
 			settings.ICP = value
 		case BrandPoliceKey:
 			settings.Police = value
+		case BrandCopyrightKey:
+			settings.Copyright = value
 		case BrandFaviconKey:
 			settings.Favicon = value
 		case BrandLoginLogoKey:
@@ -496,7 +502,7 @@ func (s *Store) UpdateBrandSettings(ctx context.Context, values map[string]strin
 	// UpdateBrandSettings 只接受已知品牌键，并在一个事务中 upsert 设置。
 	// UpdateBrandSettings accepts only known branding keys and upserts them in one transaction.
 	allowed := map[string]bool{
-		BrandTitleKey: true, BrandDescriptionKey: true, BrandICPKey: true, BrandPoliceKey: true,
+		BrandTitleKey: true, BrandDescriptionKey: true, BrandICPKey: true, BrandPoliceKey: true, BrandCopyrightKey: true,
 		BrandFaviconKey: true, BrandLoginLogoKey: true, BrandMainLogoKey: true,
 	}
 	tx, err := s.DB.BeginTx(ctx, nil)

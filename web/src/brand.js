@@ -8,6 +8,7 @@ const defaultBrand = {
   siteDescription: '',
   icpText: '',
   policeText: '',
+  copyrightText: '',
   hasFavicon: false,
   hasLoginLogo: false,
   hasMainLogo: false,
