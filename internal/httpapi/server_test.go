@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -306,12 +307,12 @@ func TestUniqueZipEntryNameAvoidsExistingSuffixes(t *testing.T) {
 func TestPartialSettingsUpdatePreservesOtherValues(t *testing.T) {
 	_, handler := newTestServer(t)
 	token := testAdminToken(t, handler)
-	update := testJSONRequest(t, handler, http.MethodPut, "/api/admin/settings", token, `{"ipLockThreshold":3}`)
+	update := testJSONRequest(t, handler, http.MethodPut, "/api/admin/settings", token, `{"ipLockThreshold":3,"trustProxy":true}`)
 	if update.Code != http.StatusOK {
 		t.Fatalf("partial settings update status = %d, want 200: %s", update.Code, update.Body.String())
 	}
 	settings := responseData(t, update)
-	if settings["ipLockThreshold"] != float64(3) || settings["passwordMinLength"] != float64(8) || settings["passwordComplexity"] != float64(3) {
+	if settings["ipLockThreshold"] != float64(3) || settings["passwordMinLength"] != float64(8) || settings["passwordComplexity"] != float64(3) || settings["trustProxy"] != true {
 		t.Fatalf("partial settings response = %#v", settings)
 	}
 	invalid := testJSONRequest(t, handler, http.MethodPut, "/api/admin/settings", token, `{"passwordMinLength":0}`)
@@ -324,6 +325,65 @@ func TestPartialSettingsUpdatePreservesOtherValues(t *testing.T) {
 	}
 	if body.Message != "密码最小长度无效" {
 		t.Fatalf("invalid settings message = %q, want field-specific message", body.Message)
+	}
+}
+
+func TestCreateUserAppliesSecuritySettings(t *testing.T) {
+	db, handler := newTestServer(t)
+	token := testAdminToken(t, handler)
+	created := testJSONRequest(t, handler, http.MethodPost, "/api/admin/users", token, `{"username":"secure-user","password":"Secure123!","role":"user","quotaBytes":1073741824,"totpEnabled":true,"ipAclEnabled":true,"ipWhitelist":"127.0.0.1, 10.0.0.0/8"}`)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create secure user status = %d: %s", created.Code, created.Body.String())
+	}
+	data := responseData(t, created)
+	secret, ok := data["totpSecret"].(string)
+	if !ok || len(secret) != 32 {
+		t.Fatalf("created TOTP secret = %#v", data["totpSecret"])
+	}
+	if data["totpEnabled"] != true || data["ipAclEnabled"] != true || data["ipWhitelist"] != "127.0.0.1,10.0.0.0/8" {
+		t.Fatalf("created security settings = %#v", data)
+	}
+	user, err := db.GetUserByUsername("secure-user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if user.TOTPSecret == "" || !user.TOTPEnabled || !user.IPACLEnabled || user.IPWhitelist != "127.0.0.1,10.0.0.0/8" {
+		t.Fatalf("stored security settings = %+v", user)
+	}
+
+	reenrolled := testJSONRequest(t, handler, http.MethodPost, "/api/admin/users", token, `{"username":"reenroll-user","password":"Reenroll123!","role":"user","reenroll":true}`)
+	if reenrolled.Code != http.StatusCreated {
+		t.Fatalf("create re-enroll user status = %d: %s", reenrolled.Code, reenrolled.Body.String())
+	}
+	reenrolledData := responseData(t, reenrolled)
+	if reenrolledData["totpSecret"] == "" || reenrolledData["totpEnabled"] != false {
+		t.Fatalf("re-enroll security settings = %#v", reenrolledData)
+	}
+}
+
+func TestRequestIPRequiresTrustProxySetting(t *testing.T) {
+	db, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	server := NewServer(db, Config{TrustedProxies: []*net.IPNet{{IP: net.ParseIP("127.0.0.1"), Mask: net.CIDRMask(32, 32)}}})
+	request := httptest.NewRequest(http.MethodGet, "/", nil)
+	request.RemoteAddr = "127.0.0.1:8080"
+	request.Header.Set("X-Forwarded-For", "203.0.113.10, 127.0.0.1")
+	if got := server.requestIP(request); got != "127.0.0.1" {
+		t.Fatalf("request IP with default setting = %q, want proxy address", got)
+	}
+	settings, err := db.GetLogSettings(request.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings.TrustProxy = true
+	if err := db.UpdateLogSettings(request.Context(), settings); err != nil {
+		t.Fatal(err)
+	}
+	if got := server.requestIP(request); got != "203.0.113.10" {
+		t.Fatalf("request IP with trusted proxy setting = %q, want forwarded address", got)
 	}
 }
 

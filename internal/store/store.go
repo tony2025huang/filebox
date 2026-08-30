@@ -202,6 +202,7 @@ type LogSettings struct {
 	IPUnlockMinutes     int    `json:"ipUnlockMinutes"`
 	RegisterEnabled     bool   `json:"registerEnabled"`
 	UploadRateLimit     int64  `json:"uploadRateLimit"`
+	TrustProxy          bool   `json:"trustProxy"`
 }
 
 // IPLock represents a source-IP failure window and its optional lock deadline.
@@ -460,7 +461,7 @@ func (s *Store) migrateSettings() error {
 		"defaultLang": "zh-CN",
 		"theme_color": "",
 		BrandTitleKey: "", BrandDescriptionKey: "", BrandICPKey: "", BrandPoliceKey: "", BrandCopyrightKey: "", BrandFaviconKey: "", BrandLoginLogoKey: "", BrandMainLogoKey: "",
-		"registerEnabled": "false", "uploadRateLimit": "0",
+		"registerEnabled": "false", "uploadRateLimit": "0", "trustProxy": "false",
 	}
 	for key, value := range defaults {
 		if _, err := s.DB.Exec("INSERT OR IGNORE INTO settings(key, value) VALUES(?, ?)", key, value); err != nil {
@@ -2002,8 +2003,8 @@ func (s *Store) Stats(ctx context.Context) (map[string]int64, error) {
 func (s *Store) GetLogSettings(ctx context.Context) (LogSettings, error) {
 	// GetLogSettings 读取日志留存和登录锁定设置，并为缺失或非法值使用默认值。
 	// GetLogSettings reads retention and lockout settings, applying defaults for missing or invalid values.
-	settings := LogSettings{LogRetentionDays: 30, LockThreshold: 5, AutoUnlockEnabled: true, AutoUnlockMinutes: 5, DefaultLang: "zh-CN", ThemeColor: DefaultThemeColor, PasswordMinLength: 8, PasswordComplexity: 3, IPLockWindowMinutes: 10, IPLockThreshold: 50, IPAutoUnlockEnabled: true, IPUnlockMinutes: 30, RegisterEnabled: false, UploadRateLimit: 0}
-	rows, err := s.DB.QueryContext(ctx, "SELECT key, value FROM settings WHERE key IN ('logRetentionDays', 'lockThreshold', 'autoUnlockEnabled', 'autoUnlockMinutes', 'defaultLang', 'theme_color', 'passwordMinLength', 'passwordComplexity', 'ipLockWindowMinutes', 'ipLockThreshold', 'ipAutoUnlockEnabled', 'ipUnlockMinutes', 'registerEnabled', 'uploadRateLimit')")
+	settings := LogSettings{LogRetentionDays: 30, LockThreshold: 5, AutoUnlockEnabled: true, AutoUnlockMinutes: 5, DefaultLang: "zh-CN", ThemeColor: DefaultThemeColor, PasswordMinLength: 8, PasswordComplexity: 3, IPLockWindowMinutes: 10, IPLockThreshold: 50, IPAutoUnlockEnabled: true, IPUnlockMinutes: 30, RegisterEnabled: false, UploadRateLimit: 0, TrustProxy: false}
+	rows, err := s.DB.QueryContext(ctx, "SELECT key, value FROM settings WHERE key IN ('logRetentionDays', 'lockThreshold', 'autoUnlockEnabled', 'autoUnlockMinutes', 'defaultLang', 'theme_color', 'passwordMinLength', 'passwordComplexity', 'ipLockWindowMinutes', 'ipLockThreshold', 'ipAutoUnlockEnabled', 'ipUnlockMinutes', 'registerEnabled', 'uploadRateLimit', 'trustProxy')")
 	if err != nil {
 		return settings, err
 	}
@@ -2066,6 +2067,10 @@ func (s *Store) GetLogSettings(ctx context.Context) (LogSettings, error) {
 			if parsed, err := strconv.ParseInt(value, 10, 64); err == nil && parsed >= 0 {
 				settings.UploadRateLimit = parsed
 			}
+		case "trustProxy":
+			if parsed, err := strconv.ParseBool(value); err == nil {
+				settings.TrustProxy = parsed
+			}
 		}
 	}
 	return settings, rows.Err()
@@ -2093,6 +2098,7 @@ func (s *Store) UpdateLogSettings(ctx context.Context, settings LogSettings) err
 		"ipUnlockMinutes":     strconv.Itoa(settings.IPUnlockMinutes),
 		"registerEnabled":     strconv.FormatBool(settings.RegisterEnabled),
 		"uploadRateLimit":     strconv.FormatInt(settings.UploadRateLimit, 10),
+		"trustProxy":          strconv.FormatBool(settings.TrustProxy),
 	}
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {

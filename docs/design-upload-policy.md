@@ -1,71 +1,108 @@
-# 设计：允许用户上传限制（需求第 6 项）
+# 设计：外部用户上传收集链接（需求第 6 项）
 
-> 状态：待确认（用户确认后由 codex 开发，dsh 校验测试）
+> 状态：**已确认**（用户已确认全部设计要点；codex 开发中，dsh 校验测试）
+> 确认记录：c1 所有登录用户可创建；c2 创建者目录自动子目录；c3 有效期+次数+单文件大小；
+> c4 路由 /u/:token；c5 上传者可选填**备注**（字段标签用「备注」，不出现「姓名」字样）。
 > 需求原文：支持允许用户上传（限制类似分享下载）——先进行设计，设计后确认后再执行
+> 2025 用户澄清：实际需求是**外部用户上传**（外部访客无需登录、通过链接向系统上传文件），
+> **不是**系统内用户的上传配额限制。本文档据此重写（v2）。
 
 ## 一、需求理解
 
-"允许用户上传"的开关 + "限制类似分享下载"的约束。参考分享下载的限制模型（有效期/次数），上传限制应提供：
+与「分享下载」对称：分享下载 = 把系统内文件给外部下载；**上传收集 = 接收外部文件**。
 
-1. **上传开关**：管理员可对单个用户启用/禁用上传（disabled 只禁登录，上传开关独立控制只读账号）。
-2. **上传次数限制**：类似 maxDownloads——每日或累计允许上传的文件数上限（0=不限）。
-3. **上传流量限制**：每日允许上传的字节总量（0=不限）；超出后拒绝 upload-init。
-4. **临时禁止上传**：管理员可手动锁定某用户上传一段时间（如锁 24 小时），用于应急。
+场景示例：合作方/客户通过一个链接把文件传给你，无需注册登录；你（创建者）在系统内即可看到、管理这些文件。
 
-## 二、设计决策
+「限制类似分享下载」= 沿用分享链接的限制模型：**有效期 + 次数上限**（可叠加单文件大小上限）。
 
-### 2.1 数据模型（store）
+## 二、设计
 
-users 表新增列（migrate 自动补）：
-- `upload_enabled INTEGER NOT NULL DEFAULT 1` —— 是否允许上传（0=禁止）
-- `upload_daily_limit INTEGER NOT NULL DEFAULT 0` —— 每日上传文件数上限（0=不限）
-- `upload_daily_bytes INTEGER NOT NULL DEFAULT 0` —— 每日上传字节上限（0=不限）
-- `upload_locked_until TEXT` —— 手动禁止上传截止时间（空=未锁定）
+### 2.1 核心概念
 
-每日统计需独立表（按用户+日期）：
-- `upload_usage(user_id, date, count, bytes)`：`date` 为 `YYYY-MM-DD`（UTC），UPSERT 累计；每日零时自动新行。
+- 系统内登录用户（创建者）生成一个「上传收集链接」（upload collection），类似创建分享链接。
+- 链接含 64 位随机 token，外部访客无需登录即可访问公开上传页，拖拽/选择文件上传。
+- 上传的文件归**创建者**所有，计入创建者配额，落入创建者目录下的自动子目录
+  `uploads/<token>/`，创建者可在文件管理页看到并删除。
+- 创建者可撤销链接（撤销后不可再上传，已传文件保留）。
 
-### 2.2 API
+### 2.2 数据模型（store，migrate 自动建表）
 
-- `GET/PUT /api/admin/users/{id}/upload-policy`：读取/更新上传策略（uploadEnabled/uploadDailyLimit/uploadDailyBytes/uploadLockedUntil）。
-- AdminView 用户编辑弹窗增加「上传策略」区块（与 TOTP/IP 白名单并列），可直接在创建用户时设置（配合第 3 项）。
-- 普通用户 `GET /api/auth/me` 返回 `uploadEnabled`（前端禁用上传按钮/拖拽区并提示原因）。
+新表 `upload_collections`：
 
-### 2.3 服务端强制（httpapi）
+| 列 | 说明 |
+|---|---|
+| id INTEGER PK | |
+| token TEXT UNIQUE | 64 位随机 token |
+| created_by INTEGER | 创建者用户 ID |
+| name TEXT | 收集名称/说明（创建者填写） |
+| expires_at TEXT | 有效期截止（RFC3339，必填） |
+| max_uploads INTEGER DEFAULT 0 | 总上传次数上限（0=不限） |
+| max_file_bytes INTEGER DEFAULT 0 | 单文件大小上限（0=不限） |
+| upload_count INTEGER DEFAULT 0 | 已上传次数 |
+| status TEXT DEFAULT 'active' | active / revoked |
+| created_at TEXT | |
 
-`uploadInit` 入口统一检查（在创建任务前）：
-1. `user.UploadEnabled == false` → 403 `UPLOAD_DISABLED`「当前账号不允许上传」。
-2. `upload_locked_until > now` → 403 `UPLOAD_LOCKED`「上传功能已被临时禁用，请稍后重试」。
-3. 今日 count/bytes 已达上限 → 403 `UPLOAD_LIMIT_REACHED`「今日上传次数/流量已用完」。
-4. 通过后尝试 UPSERT 今日 usage（count+1，bytes+size）；若与上限并发竞争，以事务内条件更新保证不超限。
-5. 失败原因记入审计（reason: upload_disabled/upload_locked/upload_daily_limit）。
+外部上传的文件直接复用 `files` 表（file 的 user_id = created_by，target 为
+`uploads/<token>/<name>`），**不新增**外部上传记录表——创建者通过文件管理即可查看。
+审计日志新增 action：`upload_collect`（外部上传成功）与 `upload_collect_fail`
+（失败原因细分）。
 
-> 说明：上限检查基于"发起 upload-init 时的预留"，实际完成/失败由 complete 回滚（预留-未完成部分按实际入库文件数修正）——为避免复杂度，**简化为 upload-init 即占用额度**（与现有 pending 配额预留一致），失败的任务在 24h 清理时释放当日额度。
+### 2.3 API
+
+| 方法 | 路径 | 鉴权 | 说明 |
+|---|---|---|---|
+| POST | `/api/collections` | JWT | 创建收集链接 `{name, expiresInHours, maxUploads, maxFileBytes}` |
+| GET | `/api/collections` | JWT | 我的收集链接列表（含 uploadCount、剩余可用、状态） |
+| DELETE | `/api/collections/{id}` | JWT+归属 | 撤销链接 |
+| GET | `/api/collections/{token}/meta` | 匿名 | 公开元数据（名称、到期、已收数/上限、单文件上限、是否可上传） |
+| POST | `/api/collections/{token}/upload-init` | token | 外部上传初始化（复用分片逻辑） |
+| POST | `/api/collections/{token}/upload-chunk` | token | 分片上传 |
+| POST | `/api/collections/{token}/upload-complete` | token | 完成/秒传/合并 |
+
+- 外部上传鉴权：`uploadInit` 等入口目前要求 JWT；新增按 token 校验的变体
+  （校验 collection 有效：status=active 且 expires_at 未过且 uploadCount<maxUploads）。
+- 上传前原子预留：`IncrementCollectionUploads`（同 IncrementShareDownloads 模式），
+  超限返回 403 `COLLECTION_LIMIT`（对应「下载次数用完」的对称错误）。
+- 超限/过期/撤销 → 403，错误码区分：`COLLECTION_EXPIRED` / `COLLECTION_REVOKED` /
+  `COLLECTION_LIMIT` / `COLLECTION_FILE_TOO_LARGE`（413）。
+- 匿名上传统一加 rate limit（IP 维度，复用现有 x/time/rate 基础设施）。
 
 ### 2.4 前端
 
-- AdminView 用户管理：表格「上传」状态列（正常/禁止/已锁定）；编辑弹窗含「允许上传」「每日上传文件数上限」「每日上传字节上限（MB）」「锁定上传至（日期时间）」；创建用户弹窗同步支持（第 3 项统一）。
-- FilesView：`user.uploadEnabled=false` 或锁定/超限时，上传区/拖拽/文件夹按钮禁用并显示原因；由后端 403 兜底（前端提示优先，后端强制）。
+- **公开上传页**：新路由 `/u/:token`（与分享下载 `/:token` 区分，避免路由冲突），
+  无登录，拖拽/选择文件、多文件排队、进度条、秒传提示、完成后显示已上传列表。
+  链接格式：`<origin>/u/<token>`。
+- **创建者端**：文件页新增「上传收集」入口（按钮 + 弹窗：名称、有效期小时、
+  上传次数上限、单文件大小上限 → 生成链接可复制）；「我的收集」列表（名称、状态、
+  已收/上限、剩余时间、撤销）；已收文件在文件树 `uploads/<token>/` 目录可见。
+- i18n 三语全量键。
 
 ### 2.5 与现有机制关系
 
-- 与 disabled（账号禁用）独立：禁用=不能登录；上传开关=能登录但只读。
-- 与配额（quotaBytes）独立：配额是空间总量；上传限制是操作频率/流量。
-- 与 max-file-size 独立：单文件大小限制保持不变。
+- 与系统内用户上传限制**无关**（用户澄清）；系统内用户上传不受影响。
+- 配额：外部上传计入创建者 quotaBytes，超配额返回 413 QUOTA_EXCEEDED。
+- 与分享链接并存：分享 = 出站，收集 = 入站，两套独立 token/表。
+- 大文件分片/秒传/断点续传复用现有 uploadInit/uploadChunk/complete 链路。
 
 ## 三、验收标准
 
-1. 管理员禁用某用户上传 → 该用户上传按钮/拖拽禁用，API 返回 403 UPLOAD_DISABLED，日志记 upload_disabled。
-2. 设置每日上传文件数上限 3 → 第 4 个文件 upload-init 403 UPLOAD_LIMIT_REACHED；次日重置。
-3. 设置每日字节上限 → 超量后 403。
-4. 临时锁定上传 → 锁定期内 403 UPLOAD_LOCKED，到期自动恢复。
-5. 创建用户时即可设置上传策略（无需二次编辑）。
-6. 普通用户 /me 可见 uploadEnabled；前端按状态禁用并提示。
-7. 审计日志可见 upload 失败（reason 细分）。
+1. 登录用户创建收集链接（名称+有效期+次数上限）→ 得到 `/u/<token>` 链接。
+2. 匿名访问 `/u/<token>`：可见名称、剩余次数、到期时间；可多文件上传，进度正常。
+3. 上传次数达到上限 → 后续上传 403 COLLECTION_LIMIT，前端明确提示「收集次数已用完」。
+4. 过期/撤销后 → 403 对应错误码，前端明确提示。
+5. 单文件超过 maxFileBytes → 413，前端提示。
+6. 上传成功后：创建者文件页出现 `uploads/<token>/` 目录，文件可预览/下载/删除。
+7. 撤销链接 → 列表状态变更，链接失效，已传文件保留。
+8. 审计日志记录外部上传（upload_collect）与失败原因。
+9. 匿名上传有 IP 限速。
 
-## 四、待确认点
+## 四、待确认点（v2，基于用户澄清重写）
 
-1. **上传次数/流量的统计口径**：按 UTC 自然日（0 点重置）？还是滚动 24h？→ 建议 UTC 自然日（与现有日志留存一致）。
-2. **锁定粒度**：手动锁定仅管理员操作？到期自动解除（locked_until 语义）？→ 建议仅管理员可锁，到 locked_until 自动解除。
-3. **前端展示位置**：上传策略字段放在编辑用户弹窗的「安全设置」区块（与 TOTP/IP 并列）？→ 建议如此。
-4. 是否需要「仅允许上传到指定目录」（写权限白名单）？→ 首版不做，如需可二期。
+1. **创建权限**：上传收集链接是否所有登录用户都能创建（推荐，与分享一致）？还是仅管理员？
+2. **文件落点**：自动落入创建者名下 `uploads/<token>/` 子目录（推荐，创建者直接可见可管）？
+   还是创建者可指定目标目录？
+3. **限制维度**：有效期 + 总上传次数 + 单文件大小上限（推荐，对齐「分享下载」的次数限制模型）。
+   是否需要额外「总字节上限」？
+4. **路由前缀**：公开上传页用 `/u/:token`，与分享下载 `/:token` 区分（推荐）——确认？
+5. **上传者备注**：外部上传页提供可选「备注」输入框（字段标签为「备注」，不含「姓名」字样），
+   创建者可在已收文件（文件树或收集详情）中查看备注。已确认：**要**。

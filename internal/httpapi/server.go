@@ -151,10 +151,14 @@ type registerRequest struct {
 }
 
 type createUserRequest struct {
-	Username   string `json:"username"`
-	Password   string `json:"password"`
-	Role       string `json:"role"`
-	QuotaBytes int64  `json:"quotaBytes"`
+	Username     string `json:"username"`
+	Password     string `json:"password"`
+	Role         string `json:"role"`
+	QuotaBytes   int64  `json:"quotaBytes"`
+	TOTPEnabled  bool   `json:"totpEnabled"`
+	Reenroll     bool   `json:"reenroll"`
+	IPACLEnabled bool   `json:"ipAclEnabled"`
+	IPWhitelist  string `json:"ipWhitelist"`
 }
 
 type updateUserRequest struct {
@@ -179,6 +183,7 @@ type logSettingsRequest struct {
 	IPUnlockMinutes     *int    `json:"ipUnlockMinutes"`
 	RegisterEnabled     *bool   `json:"registerEnabled"`
 	UploadRateLimit     *int64  `json:"uploadRateLimit"`
+	TrustProxy          *bool   `json:"trustProxy"`
 }
 
 type languageRequest struct {
@@ -2556,6 +2561,16 @@ func (s *Server) createUser(w http.ResponseWriter, r *http.Request) {
 	if input.QuotaBytes <= 0 {
 		input.QuotaBytes = 100 * 1024 * 1024 * 1024
 	}
+	whitelist, err := normalizeWhitelist(input.IPWhitelist)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "IP 白名单格式无效")
+		return
+	}
+	plainTOTPSecret, encryptedTOTPSecret, err := s.prepareTOTPSecret(input.TOTPEnabled || input.Reenroll)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "生成动态验证密钥失败")
+		return
+	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(input.Password), bcrypt.DefaultCost)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "密码处理失败")
@@ -2568,10 +2583,33 @@ func (s *Server) createUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "创建用户失败")
 		return
 	}
-	user, _ := s.store.GetUserByUsername(input.Username)
+	user, err := s.store.GetUserByUsername(input.Username)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "读取新用户信息失败")
+		return
+	}
+	if encryptedTOTPSecret != "" {
+		if err := s.store.SetTOTP(r.Context(), user.ID, encryptedTOTPSecret, input.TOTPEnabled && !input.Reenroll); err != nil {
+			writeError(w, http.StatusInternalServerError, "保存动态验证设置失败")
+			return
+		}
+	}
+	if err := s.store.UpdateIPACL(r.Context(), user.ID, input.IPACLEnabled, whitelist); err != nil {
+		writeError(w, http.StatusInternalServerError, "保存 IP 白名单失败")
+		return
+	}
+	user, err = s.store.GetUser(user.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "读取新用户信息失败")
+		return
+	}
 	admin := currentUser(r.Context())
-	s.serviceEvent(r, "user_create", admin.Username, "target=%s role=%s result=success", input.Username, input.Role)
-	writeData(w, http.StatusCreated, "用户已创建", publicUser(user))
+	s.serviceEvent(r, "user_create", admin.Username, "target=%s role=%s totp_enabled=%t ip_acl_enabled=%t result=success", input.Username, input.Role, input.TOTPEnabled && !input.Reenroll, input.IPACLEnabled)
+	data := publicUser(user)
+	if plainTOTPSecret != "" {
+		data["totpSecret"] = plainTOTPSecret
+	}
+	writeData(w, http.StatusCreated, "用户已创建", data)
 }
 
 func (s *Server) updateUser(w http.ResponseWriter, r *http.Request) {
@@ -2641,23 +2679,12 @@ func (s *Server) updateUserTOTP(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "获取用户信息失败")
 		return
 	}
-	secret := ""
-	// 启用与要求重绑都会生成新随机 secret；enabled=false 时若未请求重绑则清空（禁用）。
-	// Both enabling and re-enrolling generate a fresh secret; disabling clears it unless re-enroll is requested.
-	if input.Enabled || input.Reenroll {
-		randomSecret := make([]byte, 20)
-		if _, err := rand.Read(randomSecret); err != nil {
-			writeError(w, http.StatusInternalServerError, "生成动态验证密钥失败")
-			return
-		}
-		plain := base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(randomSecret)
-		secret, err = s.encryptTOTPSecret(plain)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "保存动态验证密钥失败")
-			return
-		}
+	_, secret, err := s.prepareTOTPSecret(input.Enabled || input.Reenroll)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "生成动态验证密钥失败")
+		return
 	}
-	if err := s.store.SetTOTP(r.Context(), user.ID, secret, false); err != nil {
+	if err := s.store.SetTOTP(r.Context(), user.ID, secret, input.Enabled && !input.Reenroll); err != nil {
 		writeError(w, http.StatusInternalServerError, "保存动态验证设置失败")
 		return
 	}
@@ -2692,6 +2719,24 @@ func (s *Server) updateUserIPACL(w http.ResponseWriter, r *http.Request) {
 	user, _ := s.store.GetUser(id)
 	s.serviceEvent(r, "ip_acl_update", admin.Username, "target=%s enabled=%t result=success", user.Username, input.Enabled)
 	writeData(w, http.StatusOK, "IP 白名单设置已更新", publicUser(user))
+}
+
+// prepareTOTPSecret 按需生成并加密新的 TOTP 密钥；返回值依次为明文和密文。
+// prepareTOTPSecret generates and encrypts a new TOTP secret when requested.
+func (s *Server) prepareTOTPSecret(requested bool) (string, string, error) {
+	if !requested {
+		return "", "", nil
+	}
+	randomSecret := make([]byte, 20)
+	if _, err := rand.Read(randomSecret); err != nil {
+		return "", "", err
+	}
+	plain := base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(randomSecret)
+	encrypted, err := s.encryptTOTPSecret(plain)
+	if err != nil {
+		return "", "", err
+	}
+	return plain, encrypted, nil
 }
 
 func normalizeWhitelist(value string) (string, error) {
@@ -2944,6 +2989,9 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	if input.UploadRateLimit != nil {
 		settings.UploadRateLimit = *input.UploadRateLimit
+	}
+	if input.TrustProxy != nil {
+		settings.TrustProxy = *input.TrustProxy
 	}
 	if validationError := validateLogSettings(settings); validationError != nil {
 		writeError(w, http.StatusBadRequest, validationError.Error())
@@ -3254,12 +3302,15 @@ func parseTime(value string) time.Time {
 }
 
 func (s *Server) requestIP(r *http.Request) string {
+	// 只有管理员显式开启且直连来源在可信代理白名单内时，才解析 X-Forwarded-For。
+	// X-Forwarded-For is used only when enabled in settings and the direct peer is trusted.
 	remote := r.RemoteAddr
 	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
 		remote = host
 	}
 	remoteIP := net.ParseIP(remote)
-	if remoteIP == nil || len(s.config.TrustedProxies) == 0 || !trustedIP(remoteIP, s.config.TrustedProxies) {
+	settings, err := s.store.GetLogSettings(r.Context())
+	if err != nil || !settings.TrustProxy || remoteIP == nil || len(s.config.TrustedProxies) == 0 || !trustedIP(remoteIP, s.config.TrustedProxies) {
 		return remote
 	}
 	forwarded := strings.Split(r.Header.Get("X-Forwarded-For"), ",")
