@@ -1,5 +1,15 @@
 # Requirement Change Log
 
+## 2026-08-30 - v012 批次 C（功能 6 第二部分：外部用户上传收集链接）
+
+- **功能 6（外部用户上传收集）**：需求澄清为「分享给外部用户时允许外部上传」（非系统内用户配额），设计文档 `docs/design-upload-policy.md` 拆两部分并确认。本批次实现第二部分：
+  - 新表 `upload_collections`（token 64 位随机、created_by、name、expires_at、max_uploads、max_file_bytes、upload_count、status、created_at、revoked_at）+ `upload_collection_files`（collection_id、file_id、original_name、remark、created_at）。
+  - API：`POST/GET /api/collections`、`GET/DELETE /api/collections/{id}`（+`/files`）、`GET /api/collections/{token}/meta`（匿名）、`POST /api/collections/{token}/upload-init|upload-chunk|upload-complete|upload-status`（token 鉴权，复用分片链路）。
+  - 限制：有效期（过期 403 COLLECTION_EXPIRED）、总上传次数（原子预留，超限 403 COLLECTION_LIMIT）、单文件大小（413 COLLECTION_FILE_TOO_LARGE）、撤销（403 COLLECTION_REVOKED）；文件落入创建者 `uploads/<token>/` 子目录，计入创建者配额（超配额 413 QUOTA_EXCEEDED）；秒传（目录内 MD5/SHA256 匹配）；上传者可选「备注」（标签无「姓名」字样）；匿名上传 IP 限速（`limiterForPublic` IP+collection 键）；审计 `collection`/`upload_collect`/`upload_collect_fail`。
+  - 前端：公开上传页 `UploadView`（路由 `/u/:token`，拖拽/多文件/进度/秒传/已收列表/备注输入）；FilesView「上传收集」入口（创建弹窗 + 我的收集列表 + 撤销 + 已收文件查看）；i18n 三语。
+  - 验证：go test/vet/build 全绿；DSH 实测批次 C 专属测试 17/17（创建/参数校验/匿名 meta/分片上传闭环/次数超限/详情备注/越权 404/单文件超限/撤销后 403/文件树可见）+ 过期场景（Go 辅助置过期 → 403 COLLECTION_EXPIRED）；regress 26/26、transfer 19/19、share 24/24、folders 21/21 无回归。提交 `80a71df`。
+- **功能 6（第一部分：用户只读时段）**：设计已确认（一次性起止窗口、禁止全部写操作、并入用户编辑弹窗、前端禁用入口+提示条），codex 批次 D 开发中。
+
 ## 2026-08-30 - v012 批次 B（功能 3/4/10：创建用户安全项 + 品牌布局 + XFF 开关）
 
 - **功能 3（创建用户直接设置 TOTP/IP 白名单）**：`POST /api/admin/users` 请求体新增 `totpEnabled`/`reenroll`/`ipAclEnabled`/`ipWhitelist`——TOTP 启用时生成一次性 secret（enabled=true 且响应含 `totpSecret` 供管理员转交；仅 reenroll 时生成 secret 但 enabled=false，用户下次登录重绑），IP ACL 创建即应用（`normalizeWhitelist` 校验）；前端创建用户弹窗新增「安全设置」区块，提交带新字段，TOTP 启用时展示 secret。后端回归测试覆盖（`TestCreateUserSecuritySettings`）。
