@@ -2029,6 +2029,33 @@ func (s *Store) ListAuditLogs(ctx context.Context, userID *int64, action, result
 	return logs, total, rows.Err()
 }
 
+// ListUsedActions 返回用户日志中实际存在的动作类型（按最近发生时间去重）；管理员返回全库动作。
+// ListUsedActions returns the action types actually present in a user's logs (deduplicated by
+// recency); admins get actions across all users.
+func (s *Store) ListUsedActions(ctx context.Context, userID int64, admin bool) ([]string, error) {
+	query := "SELECT action FROM audit_logs"
+	args := []any{}
+	if !admin {
+		query += " WHERE user_id = ?"
+		args = append(args, userID)
+	}
+	query += " GROUP BY action ORDER BY MAX(id) DESC"
+	rows, err := s.DB.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	used := make([]string, 0, 16)
+	for rows.Next() {
+		var action string
+		if err := rows.Scan(&action); err != nil {
+			return nil, err
+		}
+		used = append(used, action)
+	}
+	return used, rows.Err()
+}
+
 func nullableString(value string) any {
 	if value == "" {
 		return nil

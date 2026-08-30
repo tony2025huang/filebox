@@ -170,6 +170,28 @@ Use a dedicated run user, dedicated data/log directories, a strong random JWT se
 
 `make release` (or `scripts\release.ps1` on Windows) produces `dist/filebox-windows-amd64.exe`, `dist/filebox-linux-amd64`, and `dist/SHA256SUMS.txt` (checksums) using `CGO_ENABLED=0` and `-trimpath -ldflags="-s -w"`; the binaries are statically trimmed and run without Go or Node installed.
 
+### v010 → v011 migration and deployment
+
+Starting with v011 the storage layout changed from `data/files/<user_id>/<yy>/<mm>/<name>` to `data/files/<user_id>[/<custom-dir>/]<name>` (the automatic year/month layer was removed). **Run the migration command before upgrading**, otherwise legacy files will be unreachable (listing/downloads would fail):
+
+1. Stop the old service (Windows: `Stop-Process -Name filebox -Force`; Linux: `systemctl stop filebox`).
+2. Back up the data directory (recommended): copy the whole `--data` directory.
+3. Run the migration (idempotent, re-runnable; it also backs up the DB to `filebox.db.bak-v011`):
+
+   ```powershell
+   # Windows (use the new binary)
+   .\filebox-v011.exe admin migrate-v010-paths --data=C:\filebox\data
+   ```
+
+   ```bash
+   # Linux
+   ./filebox-linux-amd64 admin migrate-v010-paths --data=/var/lib/filebox
+   ```
+
+   What it does: physically moves `files/<uid>/<yy>/<mm>/*` → `files/<uid>/<yy>-<mm>/` (for example `2026-08`, preserving the time semantics), transactionally rewrites `files.storage_path` prefixes, registers historical folders, and cleans up empty directories; the file count and DB records stay consistent before/after.
+4. Start the new binary with the original arguments (`--data`, `--admin-user`/`--admin-pass` unchanged; existing users and passwords are untouched — `--admin-pass` only affects first-run creation).
+5. Verify after migration: the file list shows all files; download/delete/conflict/quota statistics work normally.
+
 ## Configuration
 
 Each flag reads its `FILEBOX_*` environment variable as the default; an explicit command-line value takes precedence.

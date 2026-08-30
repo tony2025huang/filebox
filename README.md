@@ -170,6 +170,28 @@ filebox --log-enabled=true --log-dir=/var/log/filebox --log-retention-days=90
 
 `make release`（或 Windows 下 `scripts\release.ps1`）产出 `dist/filebox-windows-amd64.exe`、`dist/filebox-linux-amd64` 与 `dist/SHA256SUMS.txt`（校验和）；使用 `CGO_ENABLED=0`、`-trimpath -ldflags="-s -w"` 静态精简构建，复制即用，无需安装 Go 或 Node。
 
+### v010 → v011 迁移部署
+
+v011 起存储结构由 `data/files/<user_id>/<yy>/<mm>/<name>` 改为 `data/files/<user_id>[/<自定义目录>/]<name>`（移除自动年月层）。**升级部署前必须执行迁移命令**，否则旧文件路径与新结构不一致（列表/下载会失败）：
+
+1. 停止旧版本服务（Windows：`Stop-Process -Name filebox -Force`；Linux：`systemctl stop filebox`）。
+2. 备份数据目录（可选但强烈建议）：复制整个 `--data` 目录。
+3. 运行迁移（幂等，可重复执行；会自动备份 DB 为 `filebox.db.bak-v011`）：
+
+   ```powershell
+   # Windows（用新二进制）
+   .\filebox-v011.exe admin migrate-v010-paths --data=C:\filebox\data
+   ```
+
+   ```bash
+   # Linux
+   ./filebox-linux-amd64 admin migrate-v010-paths --data=/var/lib/filebox
+   ```
+
+   迁移内容：物理移动 `files/<uid>/<yy>/<mm>/*` → `files/<uid>/<yy>-<mm>/`（如 `2026-08`，保留时间语义）、事务性重写 `files.storage_path` 前缀、在 `folders` 表登记历史目录、清理空目录；迁移前后文件数与 DB 记录一致。
+4. 用新二进制 + 原启动参数启动（`--data`、`--admin-user`/`--admin-pass` 不变；已有用户与密码不动，`--admin-pass` 仅影响首次创建）。
+5. 迁移后回归：登录后文件列表应显示全部文件，下载/删除/冲突/配额统计正常。
+
 ## 配置项
 
 命令行 flag 从同名 `FILEBOX_*` 环境变量读取默认值；命令行显式传入的值优先。

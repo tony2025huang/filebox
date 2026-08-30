@@ -111,6 +111,11 @@ func runServe(args []string) error {
 	if err != nil {
 		return fmt.Errorf("invalid trusted proxies: %w", err)
 	}
+	// 安全提示：未显式设置 JWT secret 时使用内置开发值，仅适合本地测试。
+	// Security notice: without an explicit JWT secret the built-in development value is used, which is only safe for local testing.
+	if !envSet("FILEBOX_JWT_SECRET") && !flagWasSet(flags, "jwt-secret") {
+		fmt.Fprintln(os.Stderr, "WARNING: using the built-in development JWT secret; set --jwt-secret or FILEBOX_JWT_SECRET to a strong random value in production")
+	}
 
 	logger, err := logging.newLogger()
 	if err != nil {
@@ -719,6 +724,18 @@ func envOr(key, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+// envSet 报告环境变量是否已设置（非空）。
+// envSet reports whether an environment variable is set to a non-empty value.
+func envSet(key string) bool { return os.Getenv(key) != "" }
+
+// flagWasSet 报告 flag 是否在命令行显式提供。
+// flagWasSet reports whether a flag was explicitly provided on the command line.
+func flagWasSet(flags *flag.FlagSet, name string) bool {
+	found := false
+	flags.Visit(func(flag *flag.Flag) { if flag.Name == name { found = true } })
+	return found
 }
 
 func defaultLogDir() string {

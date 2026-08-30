@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"crypto/aes"
@@ -135,6 +136,8 @@ type instantCheckRequest struct {
 	SHA256 string `json:"sha256"`
 	MD5    string `json:"md5"`
 	Size   int64  `json:"size"`
+	Name   string `json:"name"`
+	Dir    string `json:"dir"`
 }
 
 type shareRequest struct {
@@ -247,6 +250,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/files/{taskID}/status", s.requireAuth(s.uploadStatus))
 	mux.HandleFunc("POST /api/files/{taskID}/complete", s.requireAuth(s.completeUpload))
 	mux.HandleFunc("GET /api/files/{id}/download", s.requireAuth(s.download))
+	mux.HandleFunc("POST /api/files/batch-download", s.requireAuth(s.batchDownload))
 	mux.HandleFunc("GET /api/files/{id}/preview", s.requireAuth(s.preview))
 	mux.HandleFunc("POST /api/files/{id}/share", s.requireAuth(s.createShare))
 	mux.HandleFunc("DELETE /api/files/{id}/shares", s.requireAuth(s.deleteShares))
@@ -1589,6 +1593,7 @@ func (s *Server) uploadStatus(w http.ResponseWriter, r *http.Request) {
 func (s *Server) checkInstantUpload(w http.ResponseWriter, r *http.Request) {
 	// checkInstantUpload 在当前用户范围内查询 ready 文件，不创建新的上传内容。
 	// checkInstantUpload searches the current user's ready files without creating upload content.
+	user := currentUser(r.Context())
 	var input instantCheckRequest
 	if !decodeJSON(w, r, &input) {
 		return
@@ -1603,7 +1608,7 @@ func (s *Server) checkInstantUpload(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "文件校验值缺失")
 		return
 	}
-	file, err := s.store.FindInstantMatch(r.Context(), currentUser(r.Context()).ID, input.MD5, input.SHA256, input.Size)
+	file, err := s.store.FindInstantMatch(r.Context(), user.ID, input.MD5, input.SHA256, input.Size)
 	if errors.Is(err, store.ErrNotFound) {
 		writeData(w, http.StatusOK, "检查完成", map[string]any{"instant": false})
 		return
@@ -1613,8 +1618,51 @@ func (s *Server) checkInstantUpload(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "检查文件失败")
 		return
 	}
+	// 秒传与同名冲突协调：即使内容已在库中，若目标目录存在同名 ready 文件，本次上传
+	// 本应触发 409 冲突选择（覆盖/重命名），而非直接秒传——否则用户多次上传同名文件
+	// 永远秒传成功、从不弹冲突窗（问题 2）。此时返回 conflict 让前端走冲突流程。
+	// Instant-upload and name-conflict coordination: even when the content already exists, a
+	// same-name ready file in the target directory means this upload would normally get a 409
+	// conflict choice (overwrite/rename). Returning instant here would silently skip that flow.
+	// We therefore surface conflict so the frontend can prompt.
+	dir, dirErr := validateUploadDir(input.Dir)
+	if dirErr != nil {
+		dir = ""
+	}
+	relativeDir := filepath.Join("files", strconv.FormatInt(user.ID, 10), dir)
+	name, nameErr := sanitizeName(validateOrEmpty(input.Name))
+	if nameErr != nil || name == "" {
+		// 未提供文件名时无法做同名判断，保持纯秒传语义。
+		// Without a name there is no same-name check; keep pure instant-upload semantics.
+		s.recordAudit(r, &user.ID, user.Username, "upload", file.Name, "success", "instant")
+		writeData(w, http.StatusOK, "检查完成", map[string]any{"instant": true, "file": publicFile(file)})
+		return
+	}
+	conflict, conflictErr := s.store.FindUploadConflict(r.Context(), user.ID, relativeDir, name)
+	// 目录内存在同名 ready 文件即应触发冲突流程（覆盖/重命名），即使内容相同。
+	// 秒传只应在"目录内无同名文件"时命中——否则用户重复上传同名文件永远静默秒传、
+	// 从不弹冲突窗（问题 2）。FindUploadConflict 查的是目标目录内的同名文件。
+	// A same-name ready file in the target directory always triggers the conflict flow
+	// (overwrite/rename), even when the content matches. Instant upload only applies when
+	// no same-name file exists there — otherwise repeated same-name uploads would silently
+	// deduplicate and never show the conflict dialog.
+	if conflictErr == nil {
+		writeData(w, http.StatusOK, "检查完成", map[string]any{"instant": false, "conflict": true, "existing": map[string]any{"id": conflict.ID, "name": conflict.Name, "size": conflict.Size, "createdAt": conflict.CreatedAt, "md5": conflict.MD5}})
+		return
+	}
+	if !errors.Is(conflictErr, store.ErrNotFound) {
+		log.Printf("find upload conflict during instant check: %v", conflictErr)
+	}
+	// 秒传命中：记录审计（此前无任何日志，问题 9）。
+	// Instant-upload hit: record an audit row (previously nothing was logged).
+	s.recordAudit(r, &user.ID, user.Username, "upload", file.Name, "success", "instant")
+	s.serviceEvent(r, "upload", user.Username, "name=%s size=%d result=success reason=instant", file.Name, file.Size)
 	writeData(w, http.StatusOK, "检查完成", map[string]any{"instant": true, "file": publicFile(file)})
 }
+
+// validateOrEmpty 返回去除首尾空白后的字符串（非法时返回空）。
+// validateOrEmpty trims a string and returns it, or an empty string when invalid.
+func validateOrEmpty(value string) string { return strings.TrimSpace(value) }
 
 func (s *Server) completeUpload(w http.ResponseWriter, r *http.Request) {
 	// completeUpload 从临时内容计算 SHA-256 与 MD5，并在数据库事务中提交记录和最终文件路径。
@@ -1815,6 +1863,67 @@ func (s *Server) download(w http.ResponseWriter, r *http.Request) {
 	auditResult, auditReason = "success", ""
 	serviceResult, serviceReason = "success", ""
 	http.ServeContent(w, r, file.Name, parseTime(file.CreatedAt), handle)
+}
+
+// batchDownload 将多个文件打包为 zip 一次性下载（仅限本人文件，管理员可含他人）。
+// batchDownload zips multiple files into one download (owner-only, admins may include others).
+func (s *Server) batchDownload(w http.ResponseWriter, r *http.Request) {
+	user := currentUser(r.Context())
+	var input struct {
+		IDs []int64 `json:"ids"`
+	}
+	if !decodeJSON(w, r, &input) || len(input.IDs) == 0 {
+		writeError(w, http.StatusBadRequest, "请选择要下载的文件")
+		return
+	}
+	// 去重并限定归属；任一文件不存在或无权访问则整体拒绝（避免部分下载误导）。
+	// Deduplicate and enforce ownership; reject the whole batch if any file is missing or forbidden.
+	seen := make(map[int64]bool)
+	files := make([]store.File, 0, len(input.IDs))
+	for _, id := range input.IDs {
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		file, err := s.store.FindFile(r.Context(), id)
+		if err != nil || file.Status != "ready" || (file.UserID != user.ID && user.Role != "admin") {
+			writeError(w, http.StatusNotFound, "文件不存在")
+			return
+		}
+		files = append(files, file)
+	}
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Disposition", contentDisposition("filebox-batch-download.zip"))
+	zw := zip.NewWriter(w)
+	for _, file := range files {
+		path := filepath.Join(s.config.DataDir, file.StoragePath)
+		handle, err := os.Open(path)
+		if err != nil {
+			zw.Close()
+			return
+		}
+		entry, err := zw.Create(file.Name)
+		if err != nil {
+			handle.Close()
+			zw.Close()
+			return
+		}
+		_, copyErr := io.Copy(entry, handle)
+		handle.Close()
+		if copyErr != nil {
+			zw.Close()
+			return
+		}
+	}
+	if err := zw.Close(); err != nil {
+		return
+	}
+	names := make([]string, 0, len(files))
+	for _, file := range files {
+		names = append(names, file.Name)
+	}
+	s.recordAudit(r, &user.ID, user.Username, "download", strings.Join(names, ","), "success", "batch")
+	s.serviceEvent(r, "download", user.Username, "name=%s count=%d result=success reason=batch", strings.Join(names, ","), len(names))
 }
 
 // createShare validates ownership and creates a random, time-limited sharing link.
@@ -2071,8 +2180,8 @@ func (s *Server) preview(w http.ResponseWriter, r *http.Request) {
 }
 
 var previewMIMETypes = map[string]bool{
-	"image/png": true, "image/jpeg": true, "image/gif": true, "image/webp": true, "image/svg+xml": true,
-	"text/plain": true, "text/markdown": true, "text/csv": true, "text/x-log": true, "text/html": true,
+	"image/png": true, "image/jpeg": true, "image/gif": true, "image/webp": true,
+	"text/plain": true, "text/markdown": true, "text/csv": true, "text/x-log": true,
 	"application/json": true, "application/pdf": true,
 	"video/mp4": true, "video/webm": true,
 }
@@ -2613,14 +2722,30 @@ func (s *Server) listLogs(w http.ResponseWriter, r *http.Request) {
 
 // logActions 返回全部审计动作（含"系统配置"类事件），供日志页筛选。
 // logActions returns every audit action (including system-configuration events) for log-page filtering.
-func (s *Server) logActions(w http.ResponseWriter, _ *http.Request) {
-	writeData(w, http.StatusOK, "获取成功", []string{
+func (s *Server) logActions(w http.ResponseWriter, r *http.Request) {
+	// usedOnly=true 时仅返回当前用户日志中实际存在的动作类型（按发生时间去重），
+	// 避免普通用户看到自己从未触发的"系统配置"类筛选项（问题 6）；异步加载由前端控制。
+	// usedOnly=true returns only the action types actually present in the current user's logs
+	// (deduplicated by recency), so regular users are not offered filters they never triggered.
+	all := []string{
 		"login", "register", "upload", "upload_init", "upload_chunk", "download", "share", "share_view", "share_download",
 		"settings_update", "brand_update", "language_update", "password_change", "password_reset",
 		"user_create", "user_update", "user_disabled", "totp_update", "ip_acl_update",
 		"folder_create", "folder_list", "folder_rename", "folder_delete",
 		"file_list", "admin_stats", "log_list",
-	})
+	}
+	if r.URL.Query().Get("usedOnly") != "true" {
+		writeData(w, http.StatusOK, "获取成功", all)
+		return
+	}
+	user := currentUser(r.Context())
+	used, err := s.store.ListUsedActions(r.Context(), user.ID, user.Role == "admin")
+	if err != nil {
+		log.Printf("list used actions: %v", err)
+		writeData(w, http.StatusOK, "获取成功", all)
+		return
+	}
+	writeData(w, http.StatusOK, "获取成功", used)
 }
 
 func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {

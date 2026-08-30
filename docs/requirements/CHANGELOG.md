@@ -1,5 +1,17 @@
 # Requirement Change Log
 
+## 2026-08-30 - v012 用户反馈批次（问题 2-12 + codex 安全检视修复）
+
+- **问题 2+9（秒传与同名冲突协调 + 秒传审计）**：`checkInstantUpload` 接受 `name`+`dir`——目录内存在同名 ready 文件时返回 `conflict:true`（前端走冲突弹窗，覆盖/重命名），仅目录内无同名时才返回 `instant:true`（秒传）；修复"重复上传同名文件永远秒传、从不弹窗、不创建新文件"；秒传命中补审计（`recordAudit("upload", name, "success", "instant")` + serviceEvent）。同内容不同名仍秒传，同内容同名触发弹窗（可重命名创建多份）。
+- **问题 3（文件夹上传并发闸门）**：`queueFiles` 经 `runGated` 并发闸门（同时最多 3 个文件进入校验/初始化），避免大批量文件夹上传时同源连接数超限导致部分文件误报「网络连接失败」。
+- **问题 4（文件类型图标）**：`fileIcon` 按 MIME/扩展名映射图片/视频/音频/压缩包/JSON/表格/可执行/代码等图标，未知类型回退默认 `File` 图标。
+- **问题 5+6（日志分页与筛选）**：分页增加页码数字按钮（当前页前后 2 页 + 首末页 + 总页数）；`/api/logs/actions?usedOnly=true` 返回当前用户实际存在的动作类型（store `ListUsedActions`），普通用户不再看到从未触发的「系统配置」筛选项；前端异步加载筛选项并显示「加载中…」占位。
+- **问题 7（修改密码文案）**：顶栏改密入口带 `?mode=self`；ChangePasswordView 按 `mode` 区分——主动改密显示「修改密码」（ACCOUNT SECURITY），强制改密（守卫/403 跳转）仍显示「先更新初始密码」；i18n 三语 `password.self*` 键。
+- **问题 10（新建用户按钮位置）**：「新建用户」按钮从页签外 page-heading 移入「用户管理」页签 toolbar，不再每个页签显示。
+- **问题 11（多选聚合下载）**：新增 `POST /api/files/batch-download`（zip 打包，校验归属，任一越权整体拒绝，审计 reason=batch）；前端文件行复选框 + 全选 + toolbar「聚合下载（N）」按钮。
+- **问题 12（迁移部署文档）**：README×2 部署指南新增「v010 → v011 迁移部署」章节（停服/备份/迁移命令/启动/回归）。
+- **安全修复（codex 检视）**：① preview 白名单移除 `text/html` 与 `image/svg+xml`（存储型 XSS 面）——HTML/SVG 文件强制附件下载；② 默认 JWT secret 启动时打印生产警告（`--jwt-secret`/`FILEBOX_JWT_SECRET` 未设置时）；③ 修复 `startUpload` 冲突分支 `init` TDZ 错误（`let init = null` 提前声明）。
+
 ## 2026-08-30 - v011 验证反馈修复批次（问题 1-20，随 v0.2.0 交付）
 
 ### 批次 1（问题 1-6：用户实测反馈 + 自定义目录）
