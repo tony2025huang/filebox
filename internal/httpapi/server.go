@@ -1851,7 +1851,18 @@ func (s *Server) checkInstantUpload(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "目录无效")
 		return
 	}
-	file, err := s.store.FindInstantMatch(r.Context(), user.ID, input.MD5, input.SHA256, input.Size)
+	// 秒传限定在目标目录内查找（与收集箱行为一致）：不同目录的同内容文件不应跨目录秒传，
+	// 否则文件会静默落在错误目录而列表为空。未指定目录时回退到全库查找。
+	// Instant upload is scoped to the target storage directory (matching collection uploads)
+	// so identical content in another directory is not silently "uploaded" into this one.
+	// Without a directory the check falls back to a whole-user search.
+	var file store.File
+	var err error
+	if dir == "" {
+		file, err = s.store.FindInstantMatch(r.Context(), user.ID, input.MD5, input.SHA256, input.Size)
+	} else {
+		file, err = s.store.FindInstantMatchInDirectory(r.Context(), user.ID, filepath.Join("files", strconv.FormatInt(user.ID, 10), dir), input.MD5, input.SHA256, input.Size)
+	}
 	if errors.Is(err, store.ErrNotFound) {
 		writeData(w, http.StatusOK, "检查完成", map[string]any{"instant": false})
 		return
@@ -2785,6 +2796,16 @@ func (s *Server) shareDownload(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "分享链接已过期")
 		return
 	}
+	// 先打开文件再扣次：物理内容缺失（404）不应消耗分享额度，避免"0 字节交付烧光次数"。
+	// Open the file before consuming a download slot so a missing file (404) does not
+	// burn share quota — otherwise a storage failure can exhaust maxDownloads with zero bytes served.
+	handle, err := os.Open(filepath.Join(s.config.DataDir, file.StoragePath))
+	if err != nil {
+		reason = "content_not_found"
+		writeError(w, http.StatusNotFound, "文件内容不存在")
+		return
+	}
+	defer handle.Close()
 	allowed, err := s.store.IncrementShareDownloads(r.Context(), token, share.MaxDownloads)
 	if err != nil {
 		reason = "download_count_failed"
@@ -2814,13 +2835,6 @@ func (s *Server) shareDownload(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	handle, err := os.Open(filepath.Join(s.config.DataDir, file.StoragePath))
-	if err != nil {
-		reason = "content_not_found"
-		writeError(w, http.StatusNotFound, "文件内容不存在")
-		return
-	}
-	defer handle.Close()
 	w.Header().Set("Content-Type", effectiveFileMIME(file))
 	w.Header().Set("Content-Disposition", contentDisposition(file.Name))
 	result, reason = "success", ""
@@ -3870,7 +3884,11 @@ func (s *Server) authenticate(r *http.Request) (store.User, error) {
 	}
 	if user.LastPasswordChange != "" {
 		lastChange, parseErr := time.Parse(time.RFC3339, user.LastPasswordChange)
-		if parseErr == nil && issuedAt.Time.Before(lastChange) {
+		// 容差 1µs：JWT 的 iat 以 JSON number（float64）序列化/回读，纳秒精度会丢失约 ±0.5µs。
+		// 若新 token 恰在改密后的亚微秒窗口内签发，回读 iat 可能略小于 last_password_change 而被误拒。
+		// A 1µs tolerance absorbs the float64 round-trip error of the JWT iat claim (≈±0.5µs); without it a
+		// token issued within a microsecond of a password change could be wrongly rejected as pre-change.
+		if parseErr == nil && issuedAt.Time.Add(time.Microsecond).Before(lastChange) {
 			return store.User{}, errors.New("invalid token")
 		}
 	}

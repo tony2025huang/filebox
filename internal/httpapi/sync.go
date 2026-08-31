@@ -529,6 +529,13 @@ func (s *Server) browseLocalFileBox(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) mkdirSyncSystem(w http.ResponseWriter, r *http.Request) {
+	// mkdirSyncSystem 是远端写操作：只读时段内必须拒绝，避免绕过只读约束并泄露远端可达性。
+	// mkdirSyncSystem writes to a remote system, so the read-only window must reject it to
+	// prevent the read-only bypass and probing of remote reachability.
+	user := currentUser(r.Context())
+	if s.rejectReadOnly(w, r, user, "sync_system_mkdir", "") {
+		return
+	}
 	item, err := s.loadSyncSystem(r)
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "目标系统不存在")
