@@ -1565,6 +1565,13 @@ func (s *Store) DeleteUploadTask(ctx context.Context, taskID string) error {
 	}
 	// Keep the expiration check and deletion in one write transaction. A task can
 	// finish between ListExpiredUploadTasks and this call, and must then be kept.
+	now := time.Now().UTC().Format(time.RFC3339)
+	if _, err := tx.ExecContext(ctx, `UPDATE upload_collections
+		SET upload_count = MAX(0, upload_count - 1), updated_at = ?
+		WHERE id = (SELECT collection_id FROM upload_tasks WHERE id = ? AND status = 'pending')`, now, taskID); err != nil {
+		tx.Rollback()
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM chunks
 		WHERE task_id = ? AND EXISTS (SELECT 1 FROM upload_tasks WHERE id = ? AND status = 'pending')`, taskID, taskID); err != nil {
 		tx.Rollback()

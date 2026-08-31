@@ -855,6 +855,39 @@ func TestSharingLifecycleAndAtomicDownloadLimit(t *testing.T) {
 	}
 }
 
+func TestSharePreviewLimitsLargeTextAndRange(t *testing.T) {
+	_, handler := newTestServer(t)
+	token := testAdminToken(t, handler)
+	content := bytes.Repeat([]byte("preview content\n"), 4097)
+	file := uploadTestFile(t, handler, token, "large-preview.txt", "text/plain", content)
+	id := int64(file["id"].(float64))
+	created := testJSONRequest(t, handler, http.MethodPost, "/api/files/"+strconv.FormatInt(id, 10)+"/share", token, `{"expiresInHours":1,"maxDownloads":1}`)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create share status = %d: %s", created.Code, created.Body.String())
+	}
+	shareToken := responseData(t, created)["token"].(string)
+	const previewLimit = 64 * 1024
+
+	preview := testBinaryRequest(t, handler, http.MethodGet, "/api/files/shared/"+shareToken+"/preview", "", nil)
+	if preview.Code != http.StatusOK || len(preview.Body.Bytes()) != previewLimit {
+		t.Fatalf("large share preview = %d bytes, status %d; want %d bytes and 200", preview.Body.Len(), preview.Code, previewLimit)
+	}
+	if preview.Header().Get("X-Content-Length-Limit") != strconv.Itoa(previewLimit) {
+		t.Fatalf("preview limit header = %q, want %d", preview.Header().Get("X-Content-Length-Limit"), previewLimit)
+	}
+
+	rangeRequest := httptest.NewRequest(http.MethodGet, "/api/files/shared/"+shareToken+"/preview", nil)
+	rangeRequest.Header.Set("Range", "bytes=0-100000")
+	rangeResponse := httptest.NewRecorder()
+	handler.ServeHTTP(rangeResponse, rangeRequest)
+	if rangeResponse.Code != http.StatusPartialContent || len(rangeResponse.Body.Bytes()) != previewLimit {
+		t.Fatalf("large share range preview = %d bytes, status %d; want %d bytes and 206", rangeResponse.Body.Len(), rangeResponse.Code, previewLimit)
+	}
+	if got := rangeResponse.Header().Get("Content-Range"); got != "bytes 0-65535/65536" {
+		t.Fatalf("range content header = %q, want bytes 0-65535/65536", got)
+	}
+}
+
 func TestSharePreviewDoesNotConsumeDownloadCount(t *testing.T) {
 	db, handler := newTestServer(t)
 	token := testAdminToken(t, handler)

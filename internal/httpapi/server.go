@@ -2896,8 +2896,19 @@ func (s *Server) sharePreview(w http.ResponseWriter, r *http.Request) {
 	} else {
 		w.Header().Set("Content-Disposition", contentDisposition(file.Name))
 	}
+	var content io.ReadSeeker = handle
+	if bound := previewContentLimit(contentType); bound > 0 {
+		if file.Size > bound {
+			w.Header().Set("X-Content-Length-Limit", strconv.FormatInt(bound, 10))
+		}
+		contentSize := file.Size
+		if contentSize > bound {
+			contentSize = bound
+		}
+		content = io.NewSectionReader(handle, 0, contentSize)
+	}
 	result, reason = "success", ""
-	http.ServeContent(w, r, file.Name, parseTime(file.CreatedAt), handle)
+	http.ServeContent(w, r, file.Name, parseTime(file.CreatedAt), content)
 }
 
 // deleteShares revokes all links for an owned file without exposing other users' files.
@@ -3025,6 +3036,23 @@ func previewMIMEAllowed(contentType string) bool {
 		base = strings.TrimSpace(strings.SplitN(contentType, ";", 2)[0])
 	}
 	return previewMIMETypes[strings.ToLower(base)]
+}
+
+func previewContentLimit(contentType string) int64 {
+	// previewContentLimit bounds preview streams so they cannot become an unmetered full download.
+	// previewContentLimit 限制预览流大小，避免预览变成不计次的完整下载。
+	base, _, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		base = strings.TrimSpace(strings.SplitN(contentType, ";", 2)[0])
+	}
+	base = strings.ToLower(base)
+	if !previewMIMETypes[base] {
+		return 0
+	}
+	if strings.HasPrefix(base, "text/") || base == "application/json" {
+		return 64 * 1024
+	}
+	return 512 * 1024
 }
 
 // folderRequest 是目录创建/重命名请求体。

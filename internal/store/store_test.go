@@ -135,6 +135,59 @@ func TestUploadTaskProgressAndConditionalDelete(t *testing.T) {
 	}
 }
 
+func TestDeleteCollectionUploadTasksReleasesSlots(t *testing.T) {
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.EnsureAdmin("admin", "admin123", 1024); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	collection, err := db.CreateUploadCollection(ctx, UploadCollection{
+		CreatedBy: 1, Name: "cleanup", Token: "cleanup-token",
+		ExpiresAt: time.Now().UTC().Add(time.Hour).Format(time.RFC3339), MaxUploads: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"collection-task-1", "collection-task-2"} {
+		if err := db.CreateCollectionUploadTask(ctx, UploadTask{ID: id, UserID: 1, CollectionID: collection.ID, Name: id, Size: 1, ChunkSize: 1, TotalChunks: 1, Status: "pending", Mime: "text/plain"}, collection.Token); err != nil {
+			t.Fatalf("CreateCollectionUploadTask(%q) = %v", id, err)
+		}
+	}
+	var count int
+	if err := db.DB.QueryRow("SELECT upload_count FROM upload_collections WHERE id = ?", collection.ID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 {
+		t.Fatalf("upload_count before cleanup = %d, want 2", count)
+	}
+	old := time.Now().UTC().Add(-25 * time.Hour).Format(time.RFC3339)
+	if _, err := db.DB.Exec("UPDATE upload_tasks SET created_at = ? WHERE collection_id = ?", old, collection.ID); err != nil {
+		t.Fatal(err)
+	}
+	expired, err := db.ListExpiredUploadTasks(ctx, 24*time.Hour)
+	if err != nil || len(expired) != 2 {
+		t.Fatalf("ListExpiredUploadTasks() = %v, %v; want 2 tasks", expired, err)
+	}
+	for _, id := range expired {
+		if err := db.DeleteUploadTask(ctx, id); err != nil {
+			t.Fatalf("DeleteUploadTask(%q) = %v", id, err)
+		}
+	}
+	if err := db.DB.QueryRow("SELECT upload_count FROM upload_collections WHERE id = ?", collection.ID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("upload_count after cleanup = %d, want 0", count)
+	}
+	if err := db.CreateCollectionUploadTask(ctx, UploadTask{ID: "collection-task-3", UserID: 1, CollectionID: collection.ID, Name: "collection-task-3", Size: 1, ChunkSize: 1, TotalChunks: 1, Status: "pending", Mime: "text/plain"}, collection.Token); err != nil {
+		t.Fatalf("new collection task after cleanup = %v", err)
+	}
+}
+
 func TestClearAllLocks(t *testing.T) {
 	db, err := Open(t.TempDir())
 	if err != nil {
