@@ -9,6 +9,7 @@ import UploadView from './views/UploadView.vue'
 import SharesView from './views/SharesView.vue'
 import SyncView from './views/SyncView.vue'
 import BatchShareView from './views/BatchShareView.vue'
+import CollectionsView from './views/CollectionsView.vue'
 
 const router = createRouter({
   history: createWebHistory(),
@@ -19,6 +20,10 @@ const router = createRouter({
     { path: '/logs', component: LogsView, meta: { titleKey: 'page.logs' } },
     { path: '/shares', component: SharesView, meta: { titleKey: 'page.shares' } },
     { path: '/sync', component: SyncView, meta: { titleKey: 'page.sync' } },
+    // v014（#7）："我的收集"独立页面；置于 /:token 之前，避免被公开分享路由吞掉。
+    // v014 (#7): standalone "My collections" page; registered before /:token so the public
+    // share route never swallows it.
+    { path: '/collections', component: CollectionsView, meta: { titleKey: 'page.collections' } },
     { path: '/admin', component: AdminView, meta: { admin: true, titleKey: 'page.admin' } },
     { path: '/u/:token', component: UploadView, meta: { public: true, uploadCollection: true, titleKey: 'collection.upload' } },
     { path: '/g/:token', component: BatchShareView, meta: { public: true, share: true, titleKey: 'batchShare.heading' } },

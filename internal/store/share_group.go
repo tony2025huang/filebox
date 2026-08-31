@@ -240,3 +240,45 @@ WHERE token = ? AND revoked_at IS NULL AND expires_at > ? AND (max_downloads = 0
 	}
 	return count == 1, nil
 }
+
+// UpdateShareGroupExpiry 延长聚合分享有效期，且新截止时间不会缩短原有截止时间（#6）。
+// UpdateShareGroupExpiry extends an aggregate share without moving its expiry backwards (#6).
+func (s *Store) UpdateShareGroupExpiry(ctx context.Context, token string, newExpiresAt time.Time, ownerID int64) error {
+	value := newExpiresAt.UTC().Format(time.RFC3339)
+	result, err := s.DB.ExecContext(ctx, `UPDATE share_groups SET expires_at = CASE WHEN expires_at > ? THEN expires_at ELSE ? END
+WHERE token = ? AND created_by = ? AND revoked_at IS NULL`, value, value, token, ownerID)
+	if err != nil {
+		return err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if count != 1 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// UpdateShareGroupMaxDownloads 提高聚合分享下载上限，拒绝降低上限（0 表示不限，允许从有限提升为不限）（#6）。
+// UpdateShareGroupMaxDownloads raises an aggregate share's download limit and rejects decreases;
+// 0 means unlimited and a finite limit may be raised to unlimited (#6).
+func (s *Store) UpdateShareGroupMaxDownloads(ctx context.Context, token string, newMax int, ownerID int64) error {
+	result, err := s.DB.ExecContext(ctx, `UPDATE share_groups SET max_downloads = ?
+WHERE token = ? AND created_by = ? AND revoked_at IS NULL AND max_downloads > 0 AND (? = 0 OR ? > max_downloads)`, newMax, token, ownerID, newMax, newMax)
+	if err != nil {
+		return err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if count != 1 {
+		current, lookupErr := s.GetShareGroupByTokenIncludingRevoked(ctx, token)
+		if lookupErr != nil || current.CreatedBy != ownerID || current.RevokedAt != "" {
+			return ErrNotFound
+		}
+		return ErrConflict
+	}
+	return nil
+}

@@ -400,6 +400,89 @@ func (s *Server) shareGroupBatchDownload(w http.ResponseWriter, r *http.Request)
 	result, reason = "success", ""
 }
 
+// managedShareGroup 校验 token 对应的聚合分享由当前用户创建（或当前用户为管理员）。
+// managedShareGroup loads an aggregate share and enforces owner/admin scope.
+func (s *Server) managedShareGroup(r *http.Request) (store.ShareGroup, error) {
+	user := currentUser(r.Context())
+	group, err := s.store.GetShareGroupByTokenIncludingRevoked(r.Context(), r.PathValue("token"))
+	if err != nil || (group.CreatedBy != user.ID && user.Role != "admin") || group.RevokedAt != "" {
+		return store.ShareGroup{}, store.ErrNotFound
+	}
+	return group, nil
+}
+
+// extendShareGroup 延长聚合分享有效期（创建者或管理员），不缩短原截止时间（#6）。
+// extendShareGroup extends an aggregate share's validity (owner or admin) without shortening it (#6).
+func (s *Server) extendShareGroup(w http.ResponseWriter, r *http.Request) {
+	user := currentUser(r.Context())
+	group, err := s.managedShareGroup(r)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "分享不存在")
+		return
+	}
+	if s.rejectReadOnly(w, r, user, "share", group.Token) {
+		return
+	}
+	var input shareExtendRequest
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	if input.ExpiresInHours < 1 || input.ExpiresInHours > 87600 {
+		writeError(w, http.StatusBadRequest, "分享有效期无效")
+		return
+	}
+	if err := s.store.UpdateShareGroupExpiry(r.Context(), group.Token, time.Now().UTC().Add(time.Duration(input.ExpiresInHours)*time.Hour), group.CreatedBy); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "分享不存在")
+		} else {
+			log.Printf("extend share group: %v", err)
+			writeError(w, http.StatusInternalServerError, "延期分享失败")
+		}
+		return
+	}
+	updated, _ := s.store.GetShareGroupByTokenIncludingRevoked(r.Context(), group.Token)
+	s.recordAudit(r, &user.ID, user.Username, "share_group_extend", group.Token, "success", "extend")
+	s.serviceEvent(r, "share_group_extend", user.Username, "target=%s hours=%d result=success", group.Token, input.ExpiresInHours)
+	writeData(w, http.StatusOK, "分享有效期已更新", publicShareGroup(updated))
+}
+
+// increaseShareGroup 提高聚合分享下载上限，拒绝降低（#6）。
+// increaseShareGroup raises an aggregate share's download limit and rejects decreases (#6).
+func (s *Server) increaseShareGroup(w http.ResponseWriter, r *http.Request) {
+	user := currentUser(r.Context())
+	group, err := s.managedShareGroup(r)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "分享不存在")
+		return
+	}
+	if s.rejectReadOnly(w, r, user, "share", group.Token) {
+		return
+	}
+	var input shareIncreaseRequest
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	if input.MaxDownloads < 0 || input.MaxDownloads > 100000 || group.MaxDownloads == 0 || (input.MaxDownloads != 0 && input.MaxDownloads <= group.MaxDownloads) {
+		writeError(w, http.StatusBadRequest, "分享次数限制无效")
+		return
+	}
+	if err := s.store.UpdateShareGroupMaxDownloads(r.Context(), group.Token, input.MaxDownloads, group.CreatedBy); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "分享不存在")
+		} else if errors.Is(err, store.ErrConflict) {
+			writeError(w, http.StatusBadRequest, "分享次数限制无效")
+		} else {
+			log.Printf("increase share group: %v", err)
+			writeError(w, http.StatusInternalServerError, "增加分享次数失败")
+		}
+		return
+	}
+	updated, _ := s.store.GetShareGroupByTokenIncludingRevoked(r.Context(), group.Token)
+	s.recordAudit(r, &user.ID, user.Username, "share_group_increase", group.Token, "success", "increase")
+	s.serviceEvent(r, "share_group_increase", user.Username, "target=%s max=%d result=success", group.Token, input.MaxDownloads)
+	writeData(w, http.StatusOK, "分享次数已更新", publicShareGroup(updated))
+}
+
 // revokeShareGroup 撤销聚合分享（创建者或管理员）。
 // revokeShareGroup revokes an aggregate share (owner or admin).
 func (s *Server) revokeShareGroup(w http.ResponseWriter, r *http.Request) {

@@ -30,6 +30,8 @@ type RemoteSystem struct {
 	AuthPassphrase     string `json:"-"`
 	HostKeyFingerprint string `json:"hostKeyFingerprint"`
 	TaskCount          int64  `json:"taskCount"`
+	LastTestAt         string `json:"lastTestAt"`
+	LastTestResult     string `json:"lastTestResult"`
 	CreatedAt          string `json:"createdAt"`
 }
 
@@ -146,6 +148,18 @@ CREATE INDEX IF NOT EXISTS idx_sync_logs_run ON sync_logs(run_at);`)
 			return err
 		}
 	}
+	// v014（#5）：记录最近一次连通性测试的结果与时间（仅 ok/failure，不保存错误详情）。
+	// v014 (#5): persist the latest connectivity-test outcome and time (ok/failure only).
+	if !columns["last_test_at"] {
+		if _, err := s.DB.Exec("ALTER TABLE remote_systems ADD COLUMN last_test_at TEXT NOT NULL DEFAULT ''"); err != nil {
+			return err
+		}
+	}
+	if !columns["last_test_result"] {
+		if _, err := s.DB.Exec("ALTER TABLE remote_systems ADD COLUMN last_test_result TEXT NOT NULL DEFAULT ''"); err != nil {
+			return err
+		}
+	}
 	syncColumns, err := tableColumns(s.DB, "sync_tasks")
 	if err != nil {
 		return err
@@ -163,7 +177,7 @@ CREATE INDEX IF NOT EXISTS idx_sync_logs_run ON sync_logs(run_at);`)
 func scanRemoteSystem(row interface{ Scan(...any) error }) (RemoteSystem, error) {
 	var item RemoteSystem
 	var err error
-	err = row.Scan(&item.ID, &item.UserID, &item.Name, &item.Kind, &item.Host, &item.URL, &item.Port, &item.Username, &item.AuthType, &item.AuthSecret, &item.AuthPassphrase, &item.HostKeyFingerprint, &item.CreatedAt, &item.TaskCount)
+	err = row.Scan(&item.ID, &item.UserID, &item.Name, &item.Kind, &item.Host, &item.URL, &item.Port, &item.Username, &item.AuthType, &item.AuthSecret, &item.AuthPassphrase, &item.HostKeyFingerprint, &item.LastTestAt, &item.LastTestResult, &item.CreatedAt, &item.TaskCount)
 	if errors.Is(err, sql.ErrNoRows) {
 		return RemoteSystem{}, ErrNotFound
 	}
@@ -171,7 +185,8 @@ func scanRemoteSystem(row interface{ Scan(...any) error }) (RemoteSystem, error)
 }
 
 const remoteSystemColumns = `r.id, r.user_id, r.name, r.kind, r.host, COALESCE(r.url, ''), r.port, r.username, r.auth_type,
- r.auth_secret, COALESCE(r.auth_passphrase, ''), COALESCE(r.host_key_fingerprint, ''), r.created_at,
+ r.auth_secret, COALESCE(r.auth_passphrase, ''), COALESCE(r.host_key_fingerprint, ''), COALESCE(r.last_test_at, ''), COALESCE(r.last_test_result, ''),
+ r.created_at,
  (SELECT COUNT(t.id) FROM sync_tasks t WHERE t.remote_system_id = r.id)`
 
 // CreateRemoteSystem 写入目标系统配置。
@@ -251,6 +266,29 @@ func (s *Store) UpdateRemoteSystem(ctx context.Context, item RemoteSystem, userI
 		return err
 	}
 	count, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if count != 1 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// UpdateRemoteSystemTest 持久化最近一次连通性测试结果（#5），仅记录 ok/failure 与测试时间。
+// UpdateRemoteSystemTest persists the latest connectivity-test outcome (#5); only the
+// ok/failure result and the tested time are stored.
+func (s *Store) UpdateRemoteSystemTest(ctx context.Context, id, userID int64, admin bool, testedAt, result string) error {
+	where := "id = ? AND user_id = ?"
+	args := []any{testedAt, result, id, userID}
+	if admin {
+		where, args = "id = ?", []any{testedAt, result, id}
+	}
+	exec, err := s.DB.ExecContext(ctx, "UPDATE remote_systems SET last_test_at = ?, last_test_result = ? WHERE "+where, args...)
+	if err != nil {
+		return err
+	}
+	count, err := exec.RowsAffected()
 	if err != nil {
 		return err
 	}

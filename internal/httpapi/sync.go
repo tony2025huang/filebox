@@ -69,12 +69,16 @@ type syncMkdirRequest struct {
 	Path string `json:"path"`
 }
 
+// errFileBoxSecretRequired 表示 FileBox 目标系统缺少账号密码（#3）。
+// errFileBoxSecretRequired signals that a FileBox remote system lacks a password (#3).
+var errFileBoxSecretRequired = errors.New("filebox secret required")
+
 func publicSyncSystem(item store.RemoteSystem) map[string]any {
 	kind := item.Kind
 	if kind == "" {
 		kind = "sftp"
 	}
-	return map[string]any{"id": item.ID, "name": item.Name, "kind": kind, "host": item.Host, "url": item.URL, "port": item.Port, "username": item.Username, "authType": item.AuthType, "hostKeyFingerprint": item.HostKeyFingerprint, "hasCredentials": item.AuthSecret != "", "taskCount": item.TaskCount, "createdAt": item.CreatedAt}
+	return map[string]any{"id": item.ID, "name": item.Name, "kind": kind, "host": item.Host, "url": item.URL, "port": item.Port, "username": item.Username, "authType": item.AuthType, "hostKeyFingerprint": item.HostKeyFingerprint, "hasCredentials": item.AuthSecret != "", "taskCount": item.TaskCount, "lastTestAt": item.LastTestAt, "lastTestResult": item.LastTestResult, "createdAt": item.CreatedAt}
 }
 
 func publicSyncTask(item store.SyncTask) map[string]any {
@@ -130,6 +134,12 @@ func validateSyncSystemInput(input syncSystemRequest, requireSecret bool) (syncS
 		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil || strings.ContainsAny(input.URL, "\r\n\x00") {
 			return input, errors.New("invalid remote system")
 		}
+		// v014（#3）：FileBox 目标系统必须以密码认证登录，创建与更新都必须提供密码（更新留空=保留原凭据，由调用方先填充 __keep__）。
+		// v014 (#3): a FileBox remote system authenticates with a password; create and update must
+		// provide one (blank on update means "keep existing", replaced with __keep__ by the caller).
+		if input.AuthSecret == "" {
+			return input, errFileBoxSecretRequired
+		}
 		input.HostKeyFingerprint = ""
 		input.AuthPassphrase = ""
 	} else {
@@ -180,6 +190,10 @@ func (s *Server) createSyncSystem(w http.ResponseWriter, r *http.Request) {
 	}
 	var err error
 	input, err = validateSyncSystemInput(input, true)
+	if errors.Is(err, errFileBoxSecretRequired) {
+		writeError(w, http.StatusBadRequest, "FileBox 目标系统必须设置账号密码")
+		return
+	}
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "目标系统参数无效")
 		return
@@ -249,8 +263,19 @@ func (s *Server) updateSyncSystem(w http.ResponseWriter, r *http.Request) {
 		input.AuthSecret = "__keep__"
 	}
 	input, err = validateSyncSystemInput(input, false)
+	if errors.Is(err, errFileBoxSecretRequired) {
+		writeError(w, http.StatusBadRequest, "FileBox 目标系统必须设置账号密码")
+		return
+	}
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "目标系统参数无效")
+		return
+	}
+	// v014（#3）：编辑 FileBox 目标系统时留空密码=保留原凭据；若原系统没有凭据则拒绝保存。
+	// v014 (#3): a blank password on edit means "keep existing credentials"; if the stored system
+	// has none, the update is rejected so a FileBox system can never end up without a password.
+	if input.Kind == "filebox" && input.AuthSecret == "__keep__" && existing.AuthSecret == "" {
+		writeError(w, http.StatusBadRequest, "FileBox 目标系统必须设置账号密码")
 		return
 	}
 	secret := existing.AuthSecret
@@ -355,6 +380,71 @@ func (s *Server) browseSyncSystem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeData(w, http.StatusOK, "获取成功", map[string]any{"path": remotePath, "items": items})
+}
+
+// testSyncSystem 探测目标系统连通性（#5）：SFTP 走 openSFTP + home Stat，
+// FileBox 走 openFileBox + /api/auth/me；成功返回 {ok:true, latencyMs, testedAt}，
+// 失败返回 {ok:false, message, testedAt}。message 经 DataDir 脱敏且不包含任何凭据。
+// testSyncSystem probes a remote system's connectivity (#5): SFTP via openSFTP plus a home
+// Stat, FileBox via openFileBox plus /api/auth/me; on success it returns {ok:true, latencyMs,
+// testedAt}, on failure {ok:false, message, testedAt}. The message masks DataDir and never
+// contains credentials.
+func (s *Server) testSyncSystem(w http.ResponseWriter, r *http.Request) {
+	user := currentUser(r.Context())
+	item, err := s.loadSyncSystem(r)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "目标系统不存在")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "读取目标系统失败")
+		return
+	}
+	started := time.Now()
+	testedAt := time.Now().UTC().Format(time.RFC3339)
+	message := ""
+	if item.Kind == "filebox" {
+		client, openErr := s.openFileBox(r.Context(), item)
+		if openErr != nil {
+			message = s.syncErrorDetail(openErr)
+		} else {
+			defer client.close()
+			var out struct {
+				Data map[string]any `json:"data"`
+			}
+			if meErr := client.doJSON(r.Context(), http.MethodGet, "/api/auth/me", nil, &out, true); meErr != nil {
+				message = s.syncErrorDetail(meErr)
+			}
+		}
+	} else {
+		client, closeClient, openErr := s.openSFTP(r.Context(), item)
+		if openErr != nil {
+			message = s.syncErrorDetail(openErr)
+		} else {
+			defer closeClient()
+			if _, statErr := client.Stat("."); statErr != nil {
+				message = s.syncErrorDetail(statErr)
+			}
+		}
+	}
+	// 只持久化 ok/失败与测试时间，错误详情不落库，避免敏感信息残留（#5）。
+	// Only ok/failure and the tested time are persisted; error details never touch the DB (#5).
+	result := "success"
+	if message != "" {
+		result = "failure"
+	}
+	if updateErr := s.store.UpdateRemoteSystemTest(r.Context(), item.ID, user.ID, user.Role == "admin", testedAt, result); updateErr != nil {
+		log.Printf("update remote system test: %v", updateErr)
+	}
+	latencyMs := time.Since(started).Milliseconds()
+	if message != "" {
+		if len(message) > 500 {
+			message = message[:500]
+		}
+		writeData(w, http.StatusOK, "测试完成", map[string]any{"ok": false, "message": message, "testedAt": testedAt, "latencyMs": latencyMs})
+		return
+	}
+	writeData(w, http.StatusOK, "测试完成", map[string]any{"ok": true, "latencyMs": latencyMs, "testedAt": testedAt})
 }
 
 // browseRemoteEntries 按目标系统类型（SFTP/FileBox）返回远端直接子项。

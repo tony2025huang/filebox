@@ -351,3 +351,179 @@ func TestValidateSyncSystemInputFileBoxKind(t *testing.T) {
 		}
 	}
 }
+
+func TestCreateFileBoxSystemRequiresPassword(t *testing.T) {
+	// v014（#3）：FileBox 目标系统必须提供账号密码，缺少时返回明确中文提示。
+	// v014 (#3): a FileBox remote system must carry a password; omitting it returns a clear message.
+	db, handler := newTestServer(t)
+	adminToken := testAdminToken(t, handler)
+	missing := testJSONRequest(t, handler, http.MethodPost, "/api/sync/systems", adminToken, `{"name":"remote-filebox","kind":"filebox","url":"https://files.example.com","username":"u","authType":"password","authSecret":""}`)
+	if missing.Code != http.StatusBadRequest || !strings.Contains(missing.Body.String(), "FileBox 目标系统必须设置账号密码") {
+		t.Fatalf("create filebox without password = %d: %s", missing.Code, missing.Body.String())
+	}
+	created := testJSONRequest(t, handler, http.MethodPost, "/api/sync/systems", adminToken, `{"name":"remote-filebox","kind":"filebox","url":"https://files.example.com","username":"u","authType":"password","authSecret":"secret"}`)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create filebox with password = %d: %s", created.Code, created.Body.String())
+	}
+	systemID := int64(responseData(t, created)["id"].(float64))
+	// 编辑时留空密码 = 保留原凭据，应成功。
+	// A blank password on edit keeps the existing credentials and must succeed.
+	updated := testJSONRequest(t, handler, http.MethodPut, "/api/sync/systems/"+strconv.FormatInt(systemID, 10), adminToken, `{"name":"remote-filebox","kind":"filebox","url":"https://files.example.com","username":"u","authType":"password","authSecret":""}`)
+	if updated.Code != http.StatusOK {
+		t.Fatalf("update filebox keeping password = %d: %s", updated.Code, updated.Body.String())
+	}
+	// 更新为 SFTP 后不带密码：filebox 校验不再触发，但 requireSecret=false 允许留空保留原凭据。
+	// 切换回 filebox 且原系统没有凭据的场景由 updateSyncSystem 拒绝，这里验证正常路径不受影响。
+	var secretColumn string
+	if err := db.DB.QueryRow("SELECT auth_secret FROM remote_systems WHERE id = ?", systemID).Scan(&secretColumn); err != nil || secretColumn == "" {
+		t.Fatalf("kept credential after update = %q, %v", secretColumn, err)
+	}
+}
+
+func TestSyncTaskRootPathAllowedAndSaved(t *testing.T) {
+	// v014（#4）：源/目标路径为空串表示根目录，后端校验放行并可保存任务。
+	// v014 (#4): an empty source/target path means the root directory; validation allows it and
+	// the task saves successfully.
+	db, handler := newTestServer(t)
+	adminToken := testAdminToken(t, handler)
+	createdSystem := testJSONRequest(t, handler, http.MethodPost, "/api/sync/systems", adminToken, `{"name":"local-test","host":"localhost","username":"u","authType":"password","authSecret":"p"}`)
+	systemID := int64(responseData(t, createdSystem)["id"].(float64))
+	rootTask := `{"name":"root-sync","direction":"push","remoteSystemId":` + strconv.FormatInt(systemID, 10) + `,"sourceType":"filebox","sourcePath":"","sourceKind":"directory","targetType":"sftp","targetPath":"","conflictPolicy":"overwrite","scheduleType":"once","enabled":true}`
+	created := testJSONRequest(t, handler, http.MethodPost, "/api/sync/tasks", adminToken, rootTask)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create root-path task = %d: %s", created.Code, created.Body.String())
+	}
+	taskID := int64(responseData(t, created)["id"].(float64))
+	// 拉取侧根目录：远端源空=home（.），本地目标空=根目录。
+	pullRoot := `{"name":"root-pull","direction":"pull","remoteSystemId":` + strconv.FormatInt(systemID, 10) + `,"sourceType":"sftp","sourcePath":"","targetType":"filebox","targetPath":"","conflictPolicy":"skip","scheduleType":"once","enabled":true}`
+	if response := testJSONRequest(t, handler, http.MethodPost, "/api/sync/tasks", adminToken, pullRoot); response.Code != http.StatusCreated {
+		t.Fatalf("create root pull task = %d: %s", response.Code, response.Body.String())
+	}
+	// 非法路径仍被拒绝并返回明确中文提示。
+	bad := testJSONRequest(t, handler, http.MethodPost, "/api/sync/tasks", adminToken, `{"name":"bad","direction":"push","remoteSystemId":`+strconv.FormatInt(systemID, 10)+`,"sourceType":"filebox","sourcePath":"../escape","targetType":"sftp","targetPath":"/x","conflictPolicy":"overwrite","scheduleType":"once","enabled":true}`)
+	if bad.Code != http.StatusBadRequest || !strings.Contains(bad.Body.String(), "同步任务参数无效") {
+		t.Fatalf("invalid path task = %d: %s", bad.Code, bad.Body.String())
+	}
+	task, err := db.GetSyncTask(context.Background(), taskID, 1, true)
+	if err != nil || task.SourcePath != "" || task.TargetPath != "." {
+		t.Fatalf("stored root task = %+v, %v", task, err)
+	}
+}
+
+func TestSyncSystemConnectivityTestEndpoint(t *testing.T) {
+	// v014（#5）：POST /api/sync/systems/{id}/test 返回 {ok:false, message, testedAt}，
+	// message 不含凭据，并把失败结果持久化到 last_test_at/last_test_result。
+	// v014 (#5): POST /api/sync/systems/{id}/test returns {ok:false, message, testedAt} without
+	// leaking credentials and persists the failure into last_test_at/last_test_result.
+	db, handler := newTestServer(t)
+	adminToken := testAdminToken(t, handler)
+	createdSFTP := testJSONRequest(t, handler, http.MethodPost, "/api/sync/systems", adminToken, `{"name":"dead-sftp","host":"127.0.0.1","port":1,"username":"u","authType":"password","authSecret":"top-secret"}`)
+	sftpID := int64(responseData(t, createdSFTP)["id"].(float64))
+	sftpTest := testJSONRequest(t, handler, http.MethodPost, "/api/sync/systems/"+strconv.FormatInt(sftpID, 10)+"/test", adminToken, "")
+	if sftpTest.Code != http.StatusOK {
+		t.Fatalf("sftp test status = %d: %s", sftpTest.Code, sftpTest.Body.String())
+	}
+	sftpData := responseData(t, sftpTest)
+	if sftpData["ok"] != false || sftpData["testedAt"] == "" || sftpData["message"] == "" || strings.Contains(sftpData["message"].(string), "top-secret") {
+		t.Fatalf("sftp test payload = %#v", sftpData)
+	}
+	createdFileBox := testJSONRequest(t, handler, http.MethodPost, "/api/sync/systems", adminToken, `{"name":"dead-filebox","kind":"filebox","url":"http://127.0.0.1:1","username":"u","authType":"password","authSecret":"secret-2"}`)
+	fileboxID := int64(responseData(t, createdFileBox)["id"].(float64))
+	fileboxTest := testJSONRequest(t, handler, http.MethodPost, "/api/sync/systems/"+strconv.FormatInt(fileboxID, 10)+"/test", adminToken, "")
+	if fileboxTest.Code != http.StatusOK {
+		t.Fatalf("filebox test status = %d: %s", fileboxTest.Code, fileboxTest.Body.String())
+	}
+	fileboxData := responseData(t, fileboxTest)
+	if fileboxData["ok"] != false || fileboxData["testedAt"] == "" || fileboxData["message"] == "" || strings.Contains(fileboxData["message"].(string), "secret-2") {
+		t.Fatalf("filebox test payload = %#v", fileboxData)
+	}
+	var lastTestAt, lastTestResult string
+	if err := db.DB.QueryRow("SELECT last_test_at, last_test_result FROM remote_systems WHERE id = ?", fileboxID).Scan(&lastTestAt, &lastTestResult); err != nil {
+		t.Fatal(err)
+	}
+	if lastTestAt == "" || lastTestResult != "failure" {
+		t.Fatalf("persisted last test = %q, %q", lastTestAt, lastTestResult)
+	}
+	// 越权：普通用户不能测试他人系统。
+	_ = testJSONRequest(t, handler, http.MethodPost, "/api/admin/users", adminToken, `{"username":"sync-other","password":"SyncOther123!","role":"user","quotaBytes":1048576}`)
+	otherLogin := testJSONRequest(t, handler, http.MethodPost, "/api/auth/login", "", `{"username":"sync-other","password":"SyncOther123!"}`)
+	if otherLogin.Code != http.StatusOK {
+		t.Fatalf("other user login = %d: %s", otherLogin.Code, otherLogin.Body.String())
+	}
+	otherToken := responseData(t, otherLogin)["token"].(string)
+	if denied := testJSONRequest(t, handler, http.MethodPost, "/api/sync/systems/"+strconv.FormatInt(sftpID, 10)+"/test", otherToken, ""); denied.Code != http.StatusNotFound {
+		t.Fatalf("cross-user test = %d: %s", denied.Code, denied.Body.String())
+	}
+}
+
+func TestShareGroupExtendAndIncreaseManagement(t *testing.T) {
+	// v014（#6）：聚合分享支持延期（不缩短）与增次（不降低），越权一律 404。
+	// v014 (#6): aggregate shares support extend (never shortened) and increase (never lowered);
+	// unauthorized access returns 404.
+	db, handler := newTestServer(t)
+	adminToken := testAdminToken(t, handler)
+	var adminID int64
+	if err := db.DB.QueryRow("SELECT id FROM users WHERE username = 'admin'").Scan(&adminID); err != nil {
+		t.Fatal(err)
+	}
+	var fileIDs []string
+	for _, name := range []string{"group-a.txt", "group-b.txt"} {
+		result, err := db.DB.Exec("INSERT INTO files(user_id, name, stored_name, size, mime, sha256, md5, status, storage_path, created_at) VALUES(?, ?, ?, 1, 'text/plain', 'sha', 'md5', 'ready', ?, ?)", adminID, name, name, "files/"+strconv.FormatInt(adminID, 10)+"/"+name, time.Now().UTC().Format(time.RFC3339))
+		if err != nil {
+			t.Fatal(err)
+		}
+		id, _ := result.LastInsertId()
+		fileIDs = append(fileIDs, strconv.FormatInt(id, 10))
+	}
+	created := testJSONRequest(t, handler, http.MethodPost, "/api/files/batch-share-group", adminToken, `{"fileIds":[`+strings.Join(fileIDs, ",")+`],"expiresInHours":24,"maxDownloads":2}`)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create share group = %d: %s", created.Code, created.Body.String())
+	}
+	groupToken := responseData(t, created)["token"].(string)
+	// 越权：其他用户延期/增次/撤销均 404。
+	_ = testJSONRequest(t, handler, http.MethodPost, "/api/admin/users", adminToken, `{"username":"group-other","password":"GroupOther123!","role":"user","quotaBytes":1048576}`)
+	otherLogin := testJSONRequest(t, handler, http.MethodPost, "/api/auth/login", "", `{"username":"group-other","password":"GroupOther123!"}`)
+	otherToken := responseData(t, otherLogin)["token"].(string)
+	for _, path := range []string{"/extend", "/increase"} {
+		body := `{"expiresInHours":5}`
+		if strings.HasSuffix(path, "increase") {
+			body = `{"maxDownloads":5}`
+		}
+		if denied := testJSONRequest(t, handler, http.MethodPut, "/api/shared-groups/"+groupToken+path, otherToken, body); denied.Code != http.StatusNotFound {
+			t.Fatalf("cross-user %s = %d: %s", path, denied.Code, denied.Body.String())
+		}
+	}
+	// 上限校验：小时越界 / 次数降低 / 无效上限。
+	if bad := testJSONRequest(t, handler, http.MethodPut, "/api/shared-groups/"+groupToken+"/extend", adminToken, `{"expiresInHours":0}`); bad.Code != http.StatusBadRequest {
+		t.Fatalf("bad extend hours = %d: %s", bad.Code, bad.Body.String())
+	}
+	if bad := testJSONRequest(t, handler, http.MethodPut, "/api/shared-groups/"+groupToken+"/increase", adminToken, `{"maxDownloads":1}`); bad.Code != http.StatusBadRequest {
+		t.Fatalf("decrease max = %d: %s", bad.Code, bad.Body.String())
+	}
+	if bad := testJSONRequest(t, handler, http.MethodPut, "/api/shared-groups/"+groupToken+"/increase", adminToken, `{"maxDownloads":-1}`); bad.Code != http.StatusBadRequest {
+		t.Fatalf("negative max = %d: %s", bad.Code, bad.Body.String())
+	}
+	// 合法延期：新截止时间晚于原截止时间（87600 小时 ≈ 10 年）。
+	extended := testJSONRequest(t, handler, http.MethodPut, "/api/shared-groups/"+groupToken+"/extend", adminToken, `{"expiresInHours":87600}`)
+	if extended.Code != http.StatusOK {
+		t.Fatalf("extend group = %d: %s", extended.Code, extended.Body.String())
+	}
+	extendedData := responseData(t, extended)
+	expiresAt, _ := time.Parse(time.RFC3339, extendedData["expiresAt"].(string))
+	if !expiresAt.After(time.Now().UTC().Add(80 * 24 * time.Hour)) {
+		t.Fatalf("extended expiresAt not pushed far enough: %s", extendedData["expiresAt"])
+	}
+	// 合法增次：上限从 2 提升到 5。
+	increased := testJSONRequest(t, handler, http.MethodPut, "/api/shared-groups/"+groupToken+"/increase", adminToken, `{"maxDownloads":5}`)
+	if increased.Code != http.StatusOK || responseData(t, increased)["maxDownloads"] != float64(5) {
+		t.Fatalf("increase group = %d: %s", increased.Code, increased.Body.String())
+	}
+	// 审计登记。
+	var extendAudits, increaseAudits int
+	if err := db.DB.QueryRow("SELECT COUNT(*) FROM audit_logs WHERE action = 'share_group_extend'").Scan(&extendAudits); err != nil || extendAudits != 1 {
+		t.Fatalf("share_group_extend audits = %d, %v", extendAudits, err)
+	}
+	if err := db.DB.QueryRow("SELECT COUNT(*) FROM audit_logs WHERE action = 'share_group_increase'").Scan(&increaseAudits); err != nil || increaseAudits != 1 {
+		t.Fatalf("share_group_increase audits = %d, %v", increaseAudits, err)
+	}
+}

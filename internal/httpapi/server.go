@@ -286,6 +286,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/shared-groups/{token}/download/{fileID}", s.shareGroupDownload)
 	mux.HandleFunc("POST /api/shared-groups/{token}/batch-download", s.shareGroupBatchDownload)
 	mux.HandleFunc("DELETE /api/shared-groups/{token}", s.requireAuth(s.revokeShareGroup))
+	mux.HandleFunc("PUT /api/shared-groups/{token}/extend", s.requireAuth(s.extendShareGroup))
+	mux.HandleFunc("PUT /api/shared-groups/{token}/increase", s.requireAuth(s.increaseShareGroup))
 	mux.HandleFunc("POST /api/files/batch-delete", s.requireAuth(s.batchDelete))
 	mux.HandleFunc("GET /api/files/progress/stream", s.requireAuth(s.uploadProgressStream))
 	mux.HandleFunc("GET /api/files/{id}/preview", s.requireAuth(s.preview))
@@ -328,6 +330,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/sync/systems/{id}", s.requireAuth(s.updateSyncSystem))
 	mux.HandleFunc("DELETE /api/sync/systems/{id}", s.requireAuth(s.deleteSyncSystem))
 	mux.HandleFunc("GET /api/sync/systems/{id}/browse", s.requireAuth(s.browseSyncSystem))
+	mux.HandleFunc("POST /api/sync/systems/{id}/test", s.requireAuth(s.testSyncSystem))
 	mux.HandleFunc("POST /api/sync/systems/{id}/mkdir", s.requireAuth(s.mkdirSyncSystem))
 	mux.HandleFunc("GET /api/sync/browse-filebox", s.requireAuth(s.browseLocalFileBox))
 	mux.HandleFunc("GET /api/sync/tasks", s.requireAuth(s.listSyncTasks))
@@ -3618,7 +3621,7 @@ func (s *Server) logActions(w http.ResponseWriter, r *http.Request) {
 	// (deduplicated by recency), so regular users are not offered filters they never triggered.
 	all := []string{
 		"login", "register", "upload", "upload_init", "upload_chunk", "download", "delete", "share", "share_view", "share_download",
-		"share_extend", "share_increase", "share_revoke", "batch_share",
+		"share_extend", "share_increase", "share_revoke", "batch_share", "share_group_extend", "share_group_increase",
 		"settings_update", "brand_update", "language_update", "password_change", "password_reset",
 		"user_create", "user_update", "user_disabled", "totp_update", "ip_acl_update",
 		"folder_create", "folder_list", "folder_rename", "folder_delete", "collection", "upload_collect", "upload_collect_fail",
