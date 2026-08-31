@@ -1,5 +1,16 @@
 # Requirement Change Log
 
+## 2026-08-31 - v014（7 项用户问题修复批次）
+
+- **#1 管理后台概览文案**：根因为 `admin.heading` 键值即"工作区管理"；三语改为 管理后台/管理後台/Admin console，eyebrow 同步（ADMIN / 管理后台）。
+- **#2 导航文案**：`nav.sync` 三语改为 同步任务/同步任務/Sync tasks（`page.sync` 保留"同步中心"）。
+- **#3 filebox 目标系统密码字段**：SyncView filebox 分支新增密码输入框（编辑留空=保留凭据）；后端 create/update 校验 filebox 必须提供密码，返回明确提示「FileBox 目标系统必须设置账号密码」。
+- **#4 根目录与选文件**：路径 picker 两侧统一支持选文件（includeFiles=1，sourceKind=file）；源/目标路径空串=根目录（后端放行），表单去除 required 加根目录占位，错误经 formError 展示。
+- **#5 目标系统连通性测试**：新增 `POST /api/sync/systems/{id}/test`（SFTP openSFTP+Stat / filebox openFileBox+auth/me，返回 ok/latencyMs/testedAt，失败信息脱敏不泄漏凭据）；`remote_systems` 迁移加 `last_test_at`/`last_test_result` 持久化；前端系统表「测试连接」按钮+结果徽标+时间。
+- **#6 聚合分享编辑**：新增 `PUT /api/shared-groups/{token}/extend`（1..87600h 不缩短）与 `increase`（maxDownloads 不降低）；store 两方法；审计 share_group_extend/increase 登记 logActions；SharesView 聚合分组延期/增次弹窗。
+- **#7 我的收集独立页**：新建 CollectionsView.vue + `/collections` 受保护路由（置于 /:token 前）；顶栏收集入口改 RouterLink to=/collections；FilesView 内嵌区块保留兼容。
+- 验证：go build/vet/test 全绿；go test -race（httpapi+store）无竞态；DSH 实测连通性测试（成功/失败）、聚合分享 extend/increase、filebox 密码必填、根目录任务保存均通过；npm build + sync-web 通过。提交 `6211349`。
+
 ## 2026-08-30 - v013（三轮修复 + 15 项需求批次）
 
 - **第三轮安全加固（G1-G14，commit `7032402`）**：SFTP 指纹严格解码（拒绝 base64 padding-bit 损坏、常量时间比较）；sharePreview 匿名限速 30/min；collectionUploadChunk 补 owner 只读检查；覆盖上传原子替换（旧文件保留至 complete 成功，消除路径复用竞态）；RenameFolder 预检+失败反向修正+per-user 目录锁；限速器三桶容量上限 10000；backup 外层 0600+O_EXCL、restore 解压限额+拒绝重复条目；`--jwt-secret` 空值/短密钥校验；keys.json 明文警告；syncLocks 清理；前端 api() 统一 401 跳登录。

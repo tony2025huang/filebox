@@ -1,6 +1,6 @@
 # FileBox Requirement State
 
-Updated: 2026-08-30 (v013：三轮安全加固 + 15 项需求全部交付)
+Updated: 2026-08-31 (v014：7 项用户问题全部交付)
 
 | Requirement | State | Notes |
 |---|---|---|
