@@ -22,6 +22,10 @@ import (
 )
 
 func newTestServer(t *testing.T) (*store.Store, http.Handler) {
+	return newTestServerWithMinFreeSpace(t, 0)
+}
+
+func newTestServerWithMinFreeSpace(t *testing.T, minFreeSpace int64) (*store.Store, http.Handler) {
 	t.Helper()
 	db, err := store.Open(t.TempDir())
 	if err != nil {
@@ -35,7 +39,7 @@ func newTestServer(t *testing.T) (*store.Store, http.Handler) {
 		db.Close()
 		t.Fatal(err)
 	}
-	server := NewServer(db, Config{DataDir: db.DataDir, MaxFileSize: 32 * 1024 * 1024, MinFreeSpace: 0, JWTSecret: []byte("test-secret")})
+	server := NewServer(db, Config{DataDir: db.DataDir, MaxFileSize: 32 * 1024 * 1024, MinFreeSpace: minFreeSpace, JWTSecret: []byte("test-secret")})
 	t.Cleanup(func() { db.Close() })
 	return db, server.Handler()
 }
@@ -111,6 +115,41 @@ func TestUploadCollectionLifecycleAndAnonymousUpload(t *testing.T) {
 	var auditCount int
 	if err := db.DB.QueryRow("SELECT COUNT(*) FROM audit_logs WHERE action = 'upload_collect' AND reason = 'collection_upload'").Scan(&auditCount); err != nil || auditCount != 1 {
 		t.Fatalf("collection success audit count = %d, %v", auditCount, err)
+	}
+}
+
+func TestCollectionUploadRejectsWhenDiskFull(t *testing.T) {
+	_, handler := newTestServerWithMinFreeSpace(t, 100)
+	adminToken := testAdminToken(t, handler)
+	previousDiskUsage := diskUsageFunc
+	t.Cleanup(func() { diskUsageFunc = previousDiskUsage })
+	diskUsageFunc = func(string) (int64, int64, int64, error) {
+		return 1000, 10, 990, nil
+	}
+	created := testJSONRequest(t, handler, http.MethodPost, "/api/collections", adminToken, `{"name":"disk-check","expiresInHours":1}`)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create collection = %d: %s", created.Code, created.Body.String())
+	}
+	collectionToken := responseData(t, created)["token"].(string)
+	init := testJSONRequest(t, handler, http.MethodPost, "/api/collections/"+collectionToken+"/upload-init", "", `{"name":"blocked.txt","size":1,"chunkSize":0}`)
+	if init.Code != http.StatusServiceUnavailable || responseData(t, init)["code"] != "DISK_FULL" {
+		t.Fatalf("collection disk-full init = %d: %s", init.Code, init.Body.String())
+	}
+
+	diskUsageFunc = func(string) (int64, int64, int64, error) {
+		return 1000, 1000, 0, nil
+	}
+	allowedInit := testJSONRequest(t, handler, http.MethodPost, "/api/collections/"+collectionToken+"/upload-init", "", `{"name":"blocked.txt","size":1,"chunkSize":0}`)
+	if allowedInit.Code != http.StatusOK {
+		t.Fatalf("collection init with free space = %d: %s", allowedInit.Code, allowedInit.Body.String())
+	}
+	taskID := responseData(t, allowedInit)["taskId"].(string)
+	diskUsageFunc = func(string) (int64, int64, int64, error) {
+		return 1000, 10, 990, nil
+	}
+	chunk := testBinaryRequest(t, handler, http.MethodPut, "/api/collections/"+collectionToken+"/upload-chunk/"+taskID+"/0", "", []byte("x"))
+	if chunk.Code != http.StatusServiceUnavailable || responseData(t, chunk)["code"] != "DISK_FULL" {
+		t.Fatalf("collection disk-full chunk = %d: %s", chunk.Code, chunk.Body.String())
 	}
 }
 

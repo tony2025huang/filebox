@@ -35,6 +35,7 @@ import (
 	"filebox/internal/webassets"
 	"golang.org/x/crypto/bcrypt"
 	"golang.org/x/crypto/pbkdf2"
+	_ "modernc.org/sqlite"
 )
 
 const version = "dev"
@@ -650,6 +651,77 @@ type archiveEntry struct {
 	diskPath string
 }
 
+// checkpointDatabase merges SQLite WAL pages into the main database before the
+// backup reads any files. A busy checkpoint is retried briefly, then rejected.
+// checkpointDatabase 在读取备份文件前将 SQLite WAL 合并到主库；checkpoint 忙时短暂重试，仍失败则拒绝备份。
+func checkpointDatabase(dataDir string) error {
+	dbPath := filepath.Join(dataDir, "filebox.db")
+	db, err := sql.Open("sqlite", dbPath+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		return fmt.Errorf("open database for WAL checkpoint: %w", err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+
+	for attempt := 0; attempt < 3; attempt++ {
+		var busy, logFrames, checkpointed int
+		if err := db.QueryRow("PRAGMA wal_checkpoint(TRUNCATE)").Scan(&busy, &logFrames, &checkpointed); err != nil {
+			return fmt.Errorf("checkpoint WAL: %w", err)
+		}
+		if busy == 0 {
+			if err := db.Close(); err != nil {
+				return fmt.Errorf("close database after WAL checkpoint: %w", err)
+			}
+			walPath := dbPath + "-wal"
+			info, err := os.Stat(walPath)
+			if err != nil {
+				if os.IsNotExist(err) {
+					return nil
+				}
+				return fmt.Errorf("check WAL after checkpoint: %w", err)
+			}
+			if info.Size() > 0 {
+				return fmt.Errorf("SQLite WAL remains non-empty after checkpoint (%d bytes); refusing backup", info.Size())
+			}
+			return nil
+		}
+		if attempt < 2 {
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+		return fmt.Errorf("SQLite WAL checkpoint is busy after retries (busy=%d log=%d checkpointed=%d)", busy, logFrames, checkpointed)
+	}
+	return errors.New("SQLite WAL checkpoint failed")
+}
+
+// validateRestoredDatabase checks the extracted database before it can replace
+// the active data directory.
+// validateRestoredDatabase 在恢复库替换活动数据目录前检查其可读且包含 schema。
+func validateRestoredDatabase(dataDir string) error {
+	dbPath := filepath.Join(dataDir, "filebox.db")
+	info, err := os.Stat(dbPath)
+	if err != nil {
+		return err
+	}
+	if info.Size() == 0 {
+		return errors.New("restored database is empty or unreadable")
+	}
+	db, err := sql.Open("sqlite", dbPath+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	var tables int
+	if err := db.QueryRow("SELECT count(*) FROM sqlite_master").Scan(&tables); err != nil {
+		return err
+	}
+	if tables == 0 {
+		return errors.New("restored database is empty or unreadable")
+	}
+	return nil
+}
+
 func collectDirEntries(root, prefix string) ([]archiveEntry, error) {
 	var result []archiveEntry
 	err := filepath.WalkDir(root, func(current string, entry fs.DirEntry, walkErr error) error {
@@ -694,13 +766,7 @@ func runAdminBackup(args []string) int {
 	defer func() {
 		logger.Event("ops", "operator=cli ip=- command=admin backup target=%s result=%s reason=%s", *dataDir, result, reason)
 	}()
-	fmt.Fprintln(os.Stdout, "note: stop the FileBox service before backup to guarantee a consistent snapshot")
-	handle, err := os.Open(filepath.Join(*dataDir, "filebox.db"))
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "data directory %s has no readable filebox.db: %v\n", *dataDir, err)
-		return 1
-	}
-	handle.Close()
+	fmt.Fprintln(os.Stdout, "note: backup automatically checkpoints SQLite WAL; active writes may leave a small consistency window, so production backups should still stop the FileBox service")
 	explicit := *jwtSecretFlag
 	if !flagWasSet(flags, "jwt-secret") {
 		explicit = os.Getenv("FILEBOX_JWT_SECRET")
@@ -748,6 +814,9 @@ func runAdminBackup(args []string) int {
 }
 
 func buildBackupArchive(dataDir, outPath, secret, passphrase string) (backupManifest, error) {
+	if err := checkpointDatabase(dataDir); err != nil {
+		return backupManifest{}, err
+	}
 	manifest := backupManifest{
 		FormatVersion:  1,
 		CreatedAt:      time.Now().UTC().Format(time.RFC3339),
@@ -1044,6 +1113,10 @@ func runAdminRestore(args []string) int {
 			fmt.Fprintf(os.Stderr, "manifest file %q is missing from archive\n", name)
 			return 1
 		}
+	}
+	if err := validateRestoredDatabase(staging); err != nil {
+		fmt.Fprintf(os.Stderr, "restored database is empty or unreadable: %v\n", err)
+		return 1
 	}
 	keysData, err := os.ReadFile(filepath.Join(staging, "keys.json"))
 	if err != nil {

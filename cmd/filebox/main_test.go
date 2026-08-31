@@ -250,7 +250,11 @@ func TestJWTSecretValidation(t *testing.T) {
 
 // buildTestArchive 构造一个含指定条目（name/size/内容）的 tar.gz 归档，用于恢复限额测试。
 // buildTestArchive builds a tar.gz archive with the given entries for restore-limit tests.
-func buildTestArchive(t *testing.T, entries []struct{ name string; size int64; content []byte }) []byte {
+func buildTestArchive(t *testing.T, entries []struct {
+	name    string
+	size    int64
+	content []byte
+}) []byte {
 	t.Helper()
 	var buffer bytes.Buffer
 	gz := gzip.NewWriter(&buffer)
@@ -387,5 +391,81 @@ func TestRestoreRejectsMaliciousArchives(t *testing.T) {
 		rawTarHeader("files/f01", restoreMaxSingleBytes-1)))
 	if code := run([]string{"admin", "restore", "--data", t.TempDir(), "--in", overTotal}); code != 1 {
 		t.Fatalf("restore with oversized total = %d, want 1", code)
+	}
+}
+
+func TestBackupCheckpointsWALAndRestoreValidatesDatabase(t *testing.T) {
+	dataDir := t.TempDir()
+	db, err := store.Open(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.EnsureAdmin("admin", "admin123", 1024); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var userID int64
+	if err := db.DB.QueryRow("SELECT id FROM users WHERE username = 'admin'").Scan(&userID); err != nil {
+		t.Fatal(err)
+	}
+	storagePath := filepath.Join("files", fmt.Sprint(userID), "live.txt")
+	physicalPath := filepath.Join(dataDir, filepath.FromSlash(storagePath))
+	if err := os.MkdirAll(filepath.Dir(physicalPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(physicalPath, []byte("live-file-content"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.DB.Exec("INSERT INTO files(user_id, name, stored_name, size, mime, sha256, md5, status, storage_path, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, 'ready', ?, ?)", userID, "live.txt", "live.txt", int64(len("live-file-content")), "text/plain", "sha256", "md5", storagePath, time.Now().UTC().Format(time.RFC3339)); err != nil {
+		t.Fatal(err)
+	}
+
+	archive := filepath.Join(t.TempDir(), "backup.tar.gz")
+	if _, err := buildBackupArchive(dataDir, archive, "v016-test-secret-123", ""); err != nil {
+		t.Fatalf("build backup: %v", err)
+	}
+	restoredDir := t.TempDir()
+	if code := runAdminRestore([]string{"--data", restoredDir, "--in", archive, "--force", "--yes"}); code != 0 {
+		t.Fatalf("restore exit code = %d", code)
+	}
+	if err := validateRestoredDatabase(restoredDir); err != nil {
+		t.Fatalf("validate restored database: %v", err)
+	}
+	restoredDB, err := store.Open(restoredDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restoredDB.Close()
+	var users int
+	if err := restoredDB.DB.QueryRow("SELECT count(*) FROM users").Scan(&users); err != nil {
+		t.Fatal(err)
+	}
+	if users != 1 {
+		t.Fatalf("restored users = %d, want 1", users)
+	}
+	var files int
+	if err := restoredDB.DB.QueryRow("SELECT count(*) FROM files WHERE status = 'ready'").Scan(&files); err != nil {
+		t.Fatal(err)
+	}
+	if files != 1 {
+		t.Fatalf("restored files = %d, want 1", files)
+	}
+	restoredContent, err := os.ReadFile(filepath.Join(restoredDir, filepath.FromSlash(storagePath)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(restoredContent) != "live-file-content" {
+		t.Fatalf("restored file content = %q", restoredContent)
+	}
+}
+
+func TestValidateRestoredDatabaseRejectsEmptyDatabase(t *testing.T) {
+	dataDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dataDir, "filebox.db"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateRestoredDatabase(dataDir); err == nil {
+		t.Fatal("empty restored database was accepted")
 	}
 }

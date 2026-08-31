@@ -45,6 +45,8 @@ FileBox is a self-hosted file transfer and management service that runs as a sin
 - Interface theme color: administrators can enter `#RGB`/`#RRGGBB` or use the color picker, restore the default, and apply the main color immediately across the site.
 - Advanced account security: configurable initial admin credentials with forced password change, password strength policy, TOTP, per-user IP allowlists, IP login locks, and lock management.
 
+For public upload collections, set `maxUploads` and `maxFileBytes` to bound anonymous uploads. The `--min-free-space` disk protection also applies to collection initialization and every collection chunk write.
+
 ### Stage delivery markers
 
 `MVP`: login, JWT, bcrypt, SQLite, multi-user isolation, file upload/download/deletion, paginated search, single-file single-chunk transfer, MD5/SHA-256, and the admin console.

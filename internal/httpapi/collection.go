@@ -434,6 +434,20 @@ func (s *Server) collectionUploadInit(w http.ResponseWriter, r *http.Request) {
 		s.collectionFailure(w, r, name, "collection_file_too_large", http.StatusRequestEntityTooLarge, "文件超过收集链接单文件大小上限", map[string]any{"code": "COLLECTION_FILE_TOO_LARGE", "maxFileBytes": collection.MaxFileBytes})
 		return
 	}
+	if s.config.MinFreeSpace > 0 {
+		// 磁盘保护在创建收集上传任务前拒绝低于阈值的可用空间。
+		// Disk protection rejects collection upload initialization below the configured free-space threshold.
+		_, free, _, diskErr := diskUsageFunc(s.config.DataDir)
+		if diskErr != nil {
+			log.Printf("check collection disk usage: %v", diskErr)
+			s.collectionFailure(w, r, name, "disk_check_failed", http.StatusInternalServerError, "无法检查系统存储空间", nil)
+			return
+		}
+		if free < s.config.MinFreeSpace {
+			s.collectionFailure(w, r, name, "disk_full", http.StatusServiceUnavailable, "系统存储空间不足，暂时禁止上传", map[string]string{"code": "DISK_FULL"})
+			return
+		}
+	}
 	if len(input.Remark) > 2000 {
 		s.collectionFailure(w, r, name, "invalid_remark", http.StatusBadRequest, "备注过长", nil)
 		return
@@ -524,6 +538,10 @@ func (s *Server) collectionUploadInit(w http.ResponseWriter, r *http.Request) {
 // collectionUploadChunk writes one anonymous chunk after token/task validation.
 // collectionUploadChunk 在 token 和任务校验后写入一个匿名分片。
 func (s *Server) collectionUploadChunk(w http.ResponseWriter, r *http.Request) {
+	if !s.rateLimiter.allowPublicRequest(s.requestIP(r), 30, 10) {
+		s.collectionFailure(w, r, r.PathValue("token"), "rate_limited", http.StatusTooManyRequests, "请求过于频繁，请稍后重试", nil)
+		return
+	}
 	collection, owner, task, err := s.loadCollectionTask(r)
 	if err != nil {
 		s.writeCollectionTaskError(w, r, err)
@@ -564,6 +582,20 @@ func (s *Server) collectionUploadChunk(w http.ResponseWriter, r *http.Request) {
 		cancel()
 		if err != nil {
 			s.collectionFailure(w, r, task.Name, "rate_limited", http.StatusTooManyRequests, "上传过慢，请稍后重试", nil)
+			return
+		}
+	}
+	if s.config.MinFreeSpace > 0 {
+		// 分片写入前重新检查磁盘，防止 init 后磁盘状态变化导致绕过保护。
+		// Recheck free space before every chunk write because the disk state may change after init.
+		_, free, _, diskErr := diskUsageFunc(s.config.DataDir)
+		if diskErr != nil {
+			log.Printf("check collection disk usage before chunk: %v", diskErr)
+			s.collectionFailure(w, r, task.Name, "disk_check_failed", http.StatusInternalServerError, "无法检查系统存储空间", nil)
+			return
+		}
+		if free < s.config.MinFreeSpace {
+			s.collectionFailure(w, r, task.Name, "disk_full", http.StatusServiceUnavailable, "系统存储空间不足，暂时禁止上传", map[string]string{"code": "DISK_FULL"})
 			return
 		}
 	}

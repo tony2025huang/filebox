@@ -72,6 +72,11 @@ type Server struct {
 	syncLocks   map[int64]*sync.Mutex
 }
 
+// diskUsageFunc is replaceable in package tests so disk-full behavior can be
+// exercised without depending on the host filesystem's actual free space.
+// diskUsageFunc 可在包内测试中替换，以便不依赖测试机真实磁盘空间验证磁盘保护。
+var diskUsageFunc = diskusage.DiskUsage
+
 // rateLimiter keeps one token bucket per authenticated user and evicts idle buckets.
 // rateLimiter 按用户维护令牌桶，并清理长期未访问的桶。
 type rateLimiter struct {
