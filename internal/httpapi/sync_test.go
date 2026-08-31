@@ -14,8 +14,31 @@ import (
 	"time"
 
 	"filebox/internal/store"
+	"github.com/robfig/cron/v3"
 	"golang.org/x/crypto/ssh"
 )
+
+// TestLatestCronOccurrenceReturnsMostRecentMissedRun verifies a long outage yields only the latest due occurrence.
+// TestLatestCronOccurrenceReturnsMostRecentMissedRun 验证长时间停机只补跑最近一次到期执行。
+func TestLatestCronOccurrenceReturnsMostRecentMissedRun(t *testing.T) {
+	schedule, err := cron.ParseStandard("* * * * *")
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseline := time.Date(2026, time.August, 1, 8, 0, 0, 0, time.Local)
+	now := time.Date(2026, time.August, 31, 12, 34, 50, 0, time.Local)
+	next, ok := latestCronOccurrence(schedule, baseline, now)
+	if !ok {
+		t.Fatal("latest cron occurrence not found")
+	}
+	want := time.Date(2026, time.August, 31, 12, 34, 0, 0, time.Local)
+	if !next.Equal(want) {
+		t.Fatalf("latest cron occurrence = %s, want %s", next, want)
+	}
+	if _, ok := latestCronOccurrence(schedule, now, now); ok {
+		t.Fatal("cron occurrence found when baseline was not before now")
+	}
+}
 
 func TestHostKeyFingerprintMatches(t *testing.T) {
 	bytes := make([]byte, 32)

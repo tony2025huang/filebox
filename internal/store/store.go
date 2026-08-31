@@ -1650,6 +1650,12 @@ func (s *Store) completeUpload(ctx context.Context, task UploadTask, file File, 
 func (s *Store) completeUploadWithCollection(ctx context.Context, task UploadTask, file File, place func(storagePath string, replace bool) error, originalName, remark string) (File, error) {
 	// completeUpload 在同一事务中协调路径分配、文件放置、元数据写入、配额更新和任务完成。
 	// completeUpload coordinates path allocation, content placement, metadata, quota, and task completion in one transaction.
+	// 目录锁覆盖路径分配、磁盘放置和事务提交，避免与提交后移动目录的重命名交错。
+	// The folder lock covers allocation, disk placement, and commit so they cannot interleave with a post-commit folder move.
+	lock := s.folderLock(file.UserID)
+	lock.Lock()
+	defer lock.Unlock()
+
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return File{}, err

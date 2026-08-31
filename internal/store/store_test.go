@@ -784,6 +784,60 @@ func TestRenameFolderMovesDiskDirectoryAfterCommit(t *testing.T) {
 	}
 }
 
+// TestCompleteUploadWaitsForFolderLock verifies completion cannot allocate or place while a folder operation holds the user lock.
+// TestCompleteUploadWaitsForFolderLock 验证目录操作持有用户锁时 complete 不会分配或放置文件。
+func TestCompleteUploadWaitsForFolderLock(t *testing.T) {
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.EnsureAdmin("admin", "admin123", 1024*1024); err != nil {
+		t.Fatal(err)
+	}
+	user, err := db.GetUserByUsername("admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if _, err := db.CreateFolder(ctx, user.ID, "", "docs"); err != nil {
+		t.Fatal(err)
+	}
+	storageDir := filepath.Join("files", strconv.FormatInt(user.ID, 10), "docs")
+	task := UploadTask{ID: "folder-lock-complete", UserID: user.ID, Name: "report.txt", Size: 1, ChunkSize: 1, TotalChunks: 1, Status: "pending", StorageDir: storageDir}
+	if err := db.CreateUploadTask(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+
+	lock := db.folderLock(user.ID)
+	lock.Lock()
+	placed := make(chan string, 1)
+	completed := make(chan error, 1)
+	go func() {
+		file := File{UserID: user.ID, Name: task.Name, StoredName: task.Name, Size: task.Size, StoragePath: storageDir}
+		_, completeErr := db.CompleteUploadWithPlacement(ctx, task, file, func(storagePath string, replace bool) error {
+			placed <- storagePath
+			return nil
+		})
+		completed <- completeErr
+	}()
+	select {
+	case path := <-placed:
+		t.Fatalf("placement started while folder lock was held: %q", path)
+	case <-time.After(100 * time.Millisecond):
+	}
+	lock.Unlock()
+
+	select {
+	case err := <-completed:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("completion did not proceed after folder lock was released")
+	}
+}
+
 // TestRenameFolderClearsDeletedRows: 目录重命名会把其下 ready 文件的 storage_path
 // 前缀改写为新目录；若目标前缀下残留同名的软删除记录（删除后重传再改目录），
 // UNIQUE(storage_path) 会冲突。deleted 内容已物理删除，重命名前应清理。

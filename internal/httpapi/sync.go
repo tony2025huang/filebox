@@ -915,10 +915,15 @@ func (s *Server) runSyncTaskNow(w http.ResponseWriter, r *http.Request) {
 		writeErrorData(w, http.StatusConflict, "同步任务正在执行", map[string]string{"code": "SYNC_TASK_RUNNING"})
 		return
 	}
-	defer lock.Unlock()
-	entry := s.executeSyncTask(r.Context(), item)
-	writeData(w, http.StatusOK, "同步执行完成", publicSyncLog(entry))
-	s.serviceEvent(r, "sync_run", user.Username, "target=%d result=success", item.ID)
+	go func(task store.SyncTask, taskLock *sync.Mutex) {
+		defer taskLock.Unlock()
+		runCtx, cancel := context.WithTimeout(context.Background(), syncTaskTimeout)
+		defer cancel()
+		entry := s.executeSyncTask(runCtx, task)
+		log.Printf("manual sync task %d completed: %s", task.ID, entry.Result)
+	}(item, lock)
+	writeData(w, http.StatusAccepted, "同步任务已开始", map[string]any{"taskId": item.ID, "status": "running"})
+	s.serviceEvent(r, "sync_run", user.Username, "target=%d result=started", item.ID)
 }
 
 // StartSyncScheduler 每分钟扫描周期任务，服务重启后按当前 cron 重新恢复调度。
@@ -952,8 +957,16 @@ func (s *Server) scheduleSyncTasks(ctx context.Context) {
 		if err != nil {
 			continue
 		}
-		next := schedule.Next(now.Add(-time.Minute))
-		if next.After(now) || next.Before(now.Add(-time.Minute)) {
+		lastRunAt, lastRunErr := time.Parse(time.RFC3339, item.LastRunAt)
+		createdAt, createdAtErr := time.Parse(time.RFC3339, item.CreatedAt)
+		baseline := createdAt
+		if lastRunErr == nil && item.LastRunAt != "" {
+			baseline = lastRunAt
+		} else if createdAtErr != nil {
+			baseline = now.Add(-8 * 365 * 24 * time.Hour)
+		}
+		next, ok := latestCronOccurrence(schedule, baseline, now)
+		if !ok || (lastRunErr == nil && item.LastRunAt != "" && !lastRunAt.Before(next)) {
 			continue
 		}
 		owner, err := s.store.GetUser(item.UserID)
@@ -978,6 +991,28 @@ func (s *Server) scheduleSyncTasks(ctx context.Context) {
 			s.executeSyncTask(ctx, task)
 		}(item, lock)
 	}
+}
+
+const syncTaskTimeout = 30 * time.Minute
+
+func latestCronOccurrence(schedule cron.Schedule, baseline, now time.Time) (time.Time, bool) {
+	if !baseline.Before(now) || schedule.Next(baseline).After(now) {
+		return time.Time{}, false
+	}
+	low, high := baseline, now
+	for high.Sub(low) > time.Second {
+		middle := low.Add(high.Sub(low) / 2)
+		if schedule.Next(middle).After(now) {
+			high = middle
+		} else {
+			low = middle
+		}
+	}
+	next := schedule.Next(low.Add(-time.Second))
+	if next.Before(baseline) || next.After(now) {
+		return time.Time{}, false
+	}
+	return next, true
 }
 
 func (s *Server) encryptSyncSecret(secret string) (string, error) {
@@ -1090,19 +1125,32 @@ func (s *Server) openSFTP(ctx context.Context, item store.RemoteSystem) (*sftp.C
 	if err != nil {
 		return nil, func() {}, err
 	}
+	_ = netConn.SetDeadline(time.Now().Add(syncTaskTimeout))
+	connectionDone := make(chan struct{})
+	var connectionDoneOnce sync.Once
+	stopConnection := func() { connectionDoneOnce.Do(func() { close(connectionDone) }) }
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = netConn.Close()
+		case <-connectionDone:
+		}
+	}()
 	sshConfig := &ssh.ClientConfig{User: item.Username, Auth: auth, HostKeyCallback: hostKeyCallbackFor(address, strings.TrimSpace(item.HostKeyFingerprint)), Timeout: 15 * time.Second}
 	connection, channels, requests, err := ssh.NewClientConn(netConn, address, sshConfig)
 	if err != nil {
+		stopConnection()
 		netConn.Close()
 		return nil, func() {}, err
 	}
 	sshClient := ssh.NewClient(connection, channels, requests)
 	client, err := sftp.NewClient(sshClient)
 	if err != nil {
+		stopConnection()
 		sshClient.Close()
 		return nil, func() {}, err
 	}
-	return client, func() { client.Close(); sshClient.Close() }, nil
+	return client, func() { stopConnection(); client.Close(); sshClient.Close() }, nil
 }
 
 type syncRunResult struct {
@@ -1115,6 +1163,9 @@ type syncRunResult struct {
 func (s *Server) executeSyncTask(ctx context.Context, task store.SyncTask) store.SyncLog {
 	// executeSyncTask 在执行前再次校验任务所有者的只读状态。
 	// executeSyncTask rechecks the task owner's read-only state before execution.
+	ctx, cancel := context.WithTimeout(ctx, syncTaskTimeout)
+	defer cancel()
+
 	owner, ownerErr := s.store.GetUser(task.UserID)
 	if ownerErr != nil {
 		// 所有者加载失败按失败记录并跳过执行（fail-closed），与调度/手动路径一致。
@@ -1143,7 +1194,7 @@ func (s *Server) executeSyncTask(ctx context.Context, task store.SyncTask) store
 	}
 	runAt := time.Now().UTC().Format(time.RFC3339)
 	result := syncRunResult{}
-	item, err := s.store.GetRemoteSystem(context.Background(), task.RemoteSystemID, task.UserID, false)
+	item, err := s.store.GetRemoteSystem(ctx, task.RemoteSystemID, task.UserID, false)
 	if err == nil {
 		if task.Direction == "push" {
 			result = s.executeSyncPush(ctx, task, item)
