@@ -216,9 +216,9 @@ Object.assign(en, {
   'logs.shareGroupExtend': 'Aggregate share extended', 'logs.shareGroupIncrease': 'Aggregate share limit increased'
 })
 
-Object.assign(zhCN, { 'logs.fromTime': '开始时间', 'logs.toTime': '结束时间' })
-Object.assign(zhTW, { 'logs.fromTime': '開始時間', 'logs.toTime': '結束時間' })
-Object.assign(en, { 'logs.fromTime': 'Start time', 'logs.toTime': 'End time' })
+Object.assign(zhCN, { 'logs.fromTime': '开始时间', 'logs.toTime': '结束时间', 'logs.timeRange': '时间范围' })
+Object.assign(zhTW, { 'logs.fromTime': '開始時間', 'logs.toTime': '結束時間', 'logs.timeRange': '時間範圍' })
+Object.assign(en, { 'logs.fromTime': 'Start time', 'logs.toTime': 'End time', 'logs.timeRange': 'Time range' })
 
 Object.assign(zhCN, { 'notice.passwordChanged': '密码已修改' })
 Object.assign(zhTW, { 'notice.passwordChanged': '密碼已修改' })
