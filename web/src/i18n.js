@@ -224,6 +224,10 @@ Object.assign(zhCN, { 'notice.passwordChanged': '密码已修改' })
 Object.assign(zhTW, { 'notice.passwordChanged': '密碼已修改' })
 Object.assign(en, { 'notice.passwordChanged': 'Password changed' })
 
+Object.assign(zhCN, { 'common.pageSize': '每页条数', 'common.jump': '跳转', 'common.pageInput': '页码' })
+Object.assign(zhTW, { 'common.pageSize': '每頁條數', 'common.jump': '跳轉', 'common.pageInput': '頁碼' })
+Object.assign(en, { 'common.pageSize': 'Per page', 'common.jump': 'Go', 'common.pageInput': 'Page #' })
+
 export const dictionaries = { 'zh-CN': zhCN, 'zh-TW': zhTW, en }
 export const currentLocale = ref('zh-CN')
 export const systemLocale = ref('zh-CN')
