@@ -232,6 +232,10 @@ Object.assign(zhCN, { 'common.pageSize': '每页条数', 'common.jump': '跳转'
 Object.assign(zhTW, { 'common.pageSize': '每頁條數', 'common.jump': '跳轉', 'common.pageInput': '頁碼' })
 Object.assign(en, { 'common.pageSize': 'Per page', 'common.jump': 'Go', 'common.pageInput': 'Page #' })
 
+Object.assign(zhCN, { 'files.folder': '目录' })
+Object.assign(zhTW, { 'files.folder': '目錄' })
+Object.assign(en, { 'files.folder': 'Folder' })
+
 export const dictionaries = { 'zh-CN': zhCN, 'zh-TW': zhTW, en }
 export const currentLocale = ref('zh-CN')
 export const systemLocale = ref('zh-CN')
