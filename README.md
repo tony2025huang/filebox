@@ -2,7 +2,7 @@
 
 [English](README.en.md)
 
-FileBox 是一个可自托管的文件传输与管理系统，使用单个 Go 二进制文件跨 Windows/Linux 部署。阶段一提供多用户隔离、JWT 登录、单文件上传、Range 下载、双哈希校验、配额、磁盘保护、审计日志、品牌定制和多语言界面；阶段二（v0.2.0）在此基础上加入分片断点续传、秒传、文件夹上传、分享链接、在线预览、上传限速、开放注册开关和系统统计补全；v012 批次进一步提供批量操作、外部用户上传收集、用户只读时段、分享管理、SFTP 双向同步等能力。
+FileBox 是一个可自托管的文件传输与管理系统，使用单个 Go 二进制文件跨 Windows/Linux 部署。阶段一提供多用户隔离、JWT 登录、单文件上传、Range 下载、双哈希校验、配额、磁盘保护、审计日志、品牌定制和多语言界面；阶段二（v0.2.0）在此基础上加入分片断点续传、秒传、文件夹上传、分享链接、在线预览、上传限速、开放注册开关和系统统计补全；v012 批次进一步提供批量操作、外部用户上传收集、用户只读时段、分享管理、SFTP 双向同步等能力；v016 完成 codex + DSH 双路检视的 38 项安全与逻辑修复。
 
 ## 功能清单
 
@@ -11,7 +11,7 @@ FileBox 是一个可自托管的文件传输与管理系统，使用单个 Go �
 - 文件传输：上传初始化、单分片 `0` 上传、完成提交、列表搜索/分页、删除和下载；`http.ServeContent` 支持 `Range`，范围请求返回 `206 Partial Content`。
 - 分片断点续传：支持 2–8 MiB 分片，分片可乱序/重复上传（幂等覆盖），服务端以 `chunks` 表持久化已上传分片，`GET /api/files/{taskID}/status` 供断点续传，`complete` 校验缺片后流式合并并计算双哈希；前端 4 路并发分片、暂停/继续、失败重试。
 - 秒传：`POST /api/files/check` 按 md5 优先、sha256 兜底在本人文件内匹配，命中直接返回已有记录，不重复落盘；前端用 WebCrypto 计算 sha256 实现秒传检查。
-- 文件夹上传：`upload-init` 支持 `dir` 相对目录字段，保留 `data/files/<user>/<yy>/<mm>/<相对目录>/<name>` 结构；不同相对目录同名文件不加序号。
+- 文件夹上传：`upload-init` 支持 `dir` 相对目录字段，保留 `data/files/<user>/<相对目录>/<name>` 结构；不同相对目录同名文件不加序号。
 - 用户自定义目录（v011）：移除自动年月目录层，存储结构为 `data/files/<user_id>/[<自定义目录>/]<name>`；文件页提供面包屑导航、「新建文件夹」按钮（支持中文名）、目录重命名（级联生效）与空目录删除；`GET /api/files?dir=` 按目录过滤；`filebox admin migrate-v010-paths` 将旧 `yy/mm` 结构迁移为 `yy-mm`（迁移前自动备份 DB）。
 - 分享链接：创建（有效期/最大下载次数）、匿名元数据与匿名下载（过期/超次数拒绝）、撤销分享；分享创建/查看/下载计入审计日志；前端提供 `/:token` 匿名分享页。
 - 在线预览：`GET /api/files/{id}/preview` 对图片/文本/视频/PDF/JSON 白名单 inline 输出，其余类型强制附件下载。
@@ -32,9 +32,10 @@ FileBox 是一个可自托管的文件传输与管理系统，使用单个 Go �
 - 批量分享（v012）：`POST /api/files/batch-share` 一次为多个选中文件创建独立分享链接（整批校验归属，任一越权整体拒绝），前端弹窗展示逐文件链接并可复制。
 - 下载详细进度（v012）：单文件与批量 zip 下载均流式读取，传输面板显示已下载字节/总字节/百分比与实时速率（B/KB/MB/GB/s），支持取消。
 - 同步功能（v012）：按用户配置「目标系统」（SFTP 主机，密码/密钥含 passphrase，凭据 AES-GCM 加密存储）与「同步任务」——push（FileBox→SFTP）与 pull（SFTP→FileBox）双向，自动创建目标目录，冲突策略覆盖/跳过/重命名，一次性或 cron 周期执行（服务端调度，同任务互斥防重叠），每次执行记录详细日志（文件数/字节/错误，默认保留 30 天）。
+- v016 安全与逻辑检视修复：运行中 backup 自动 checkpoint WAL 且 restore 拒绝空库；收集 init/chunk 接入 `DISK_FULL` 磁盘保护；秒传限定目标目录；分享 Range 60 秒窗口去重与 preview 字节上限；新增 `DELETE /api/upload-tasks/{taskID}` 取消并释放配额；只读写入口全覆盖；logout 通过 `last_logout_at` 撤销旧 JWT；ZIP/同步/审计/恢复/管理员守卫和 `x/crypto` 安全版本同步加固。
 - 废弃上传任务定时清理（v012 补充批次）：后台每小时清理超过 24 小时未完成的 pending 上传任务及其分片/tmp 目录（事务删除，防清理竞态）。
 - 服务端主动推送上传进度（v012 补充批次）：`GET /api/files/progress/stream` SSE 端点每秒推送当前用户所有进行中任务进度；前端用带 Bearer 认证且可取消的流式 fetch 订阅，刷新/多标签页同步恢复。
-- 同名冲突：同一用户当月目录存在同名文件时，初始化返回 `409`，前端可选择覆盖或重命名；覆盖事务性替换，重命名分配最小可用数字后缀。
+- 同名冲突：同一用户当前目录存在同名文件时，初始化返回 `409`，前端可选择覆盖或重命名；覆盖事务性替换，重命名分配最小可用数字后缀。
 - 文件名安全：上传前拒绝路径分隔符、控制字符、Windows 非法字符、点号遍历标记、空名/`.`/`..` 和超过 255 字节的名称；落盘名保留原名语义并替换部分非法字符。
 - 配额：初始化时预留待上传字节，默认配额为 100 GiB；覆盖时先扣除旧文件占用。
 - 完整性：服务端从实际内容计算 MD5 和 SHA-256；客户端可选提交期望值进行比对。
@@ -233,9 +234,9 @@ systemd、Windows NSSM/sc 和 Nginx 反向代理的完整示例与安全说明�
 
 ## API 摘要
 
-JSON 响应格式为 `{ "code": number, "message": string, "data": any }`；受保护接口需要 `Authorization: Bearer <token>`。主要路径包括：认证 `/api/auth/login`、`/api/auth/register`、`/api/auth/totp`、`/api/auth/totp-qrcode`、`/api/auth/change-password`、`/api/auth/logout`、`/api/auth/me`、`/api/auth/language`；公开品牌 `/api/brand` 和 `/brand/{asset}`；文件 `/api/files`、`/api/files/upload-init`、`/api/files/check`、`/api/files/{taskID}/chunks/{index}`、`/api/files/{taskID}/status`、`/api/files/{taskID}/complete`、`/api/files/{id}/download`、`/api/files/batch-download`、`/api/files/batch-delete`、`/api/files/batch-share`、`/api/files/{id}/preview`、`/api/files/{id}/share`、`/api/files/{id}/shares`、`/api/files/shared/{token}/meta`、`/api/files/shared/{token}/download`、`/api/files/progress/stream`、`/api/files/{id}`；分享管理 `/api/shares`、`/api/shares/{token}`、`/api/shares/{token}/extend|increase|logs`；外部上传收集 `/api/collections`、`/api/collections/{id}`、`/api/collections/{token}/meta|upload-init|upload-chunk|upload-complete`；同步 `/api/sync/systems[/{id}]`、`/api/sync/systems/{id}/browse|mkdir`、`/api/sync/tasks[/{id}]`、`/api/sync/tasks/{id}/run|logs`；日志 `/api/logs`、`/api/logs/actions`；管理员 `/api/admin/users[/{id}]`、`/api/admin/users/{id}/totp`、`/api/admin/users/{id}/ip-acl`、`/api/admin/users/{id}/read-only`、`/api/admin/stats`、`/api/admin/settings`、`/api/admin/brand`、`/api/admin/locks`。
+JSON 响应格式为 `{ "code": number, "message": string, "data": any }`；受保护接口需要 `Authorization: Bearer <token>`。主要路径包括：认证 `/api/auth/login`、`/api/auth/register`、`/api/auth/totp`、`/api/auth/totp-qrcode`、`/api/auth/change-password`、`/api/auth/logout`、`/api/auth/me`、`/api/auth/language`；公开品牌 `/api/brand` 和 `/brand/{asset}`；文件 `/api/files`、`/api/files/upload-init`、`/api/files/check`、`/api/files/{taskID}/chunks/{index}`、`/api/files/{taskID}/status`、`/api/files/{taskID}/complete`、`/api/upload-tasks/{taskID}`、`/api/files/{id}/download`、`/api/files/batch-download`、`/api/files/batch-delete`、`/api/files/batch-share`、`/api/files/{id}/preview`、`/api/files/{id}/share`、`/api/files/{id}/shares`、`/api/files/shared/{token}/meta`、`/api/files/shared/{token}/download`、`/api/files/progress/stream`、`/api/files/{id}`；分享管理 `/api/shares`、`/api/shares/{token}`、`/api/shares/{token}/extend|increase|logs`；外部上传收集 `/api/collections`、`/api/collections/{id}`、`/api/collections/{token}/meta|upload-init|upload-chunk|upload-complete`；同步 `/api/sync/systems[/{id}]`、`/api/sync/systems/{id}/browse|mkdir`、`/api/sync/tasks[/{id}]`、`/api/sync/tasks/{id}/run|logs`；日志 `/api/logs`、`/api/logs/actions`；管理员 `/api/admin/users[/{id}]`、`/api/admin/users/{id}/totp`、`/api/admin/users/{id}/ip-acl`、`/api/admin/users/{id}/read-only`、`/api/admin/stats`、`/api/admin/settings`、`/api/admin/brand`、`/api/admin/locks`。
 
-文件列表、用户列表和日志列表默认 `pageSize=20`，服务端最大 100。管理员可查看全部文件和日志，普通用户按账户隔离。下载支持 Range；登出不建立 JWT 服务端黑名单。
+文件列表、用户列表和日志列表默认 `pageSize=20`，服务端最大 100。管理员可查看全部文件和日志，普通用户按账户隔离。下载支持 Range；logout 会通过 `last_logout_at` 撤销此前签发的 JWT。
 
 ## 目录结构
 
@@ -247,10 +248,11 @@ JSON 响应格式为 `{ "code": number, "message": string, "data": any }`；受�
 
 ## 已知限制
 
-- 秒传仅在同一用户范围内匹配（跨用户不做内容去重）。
+- 秒传默认限定当前目标目录；省略目录时保留根目录兼容回退，不提供跨用户内容去重。
 - 分享 token 随机生成；`meta` 接口公开文件名/大小/次数等元数据，请勿分享含敏感信息的文件。
+- 分享 preview 只返回受限字节范围；Range 请求在短窗口内去重下载计数。生产备份虽会自动 checkpoint WAL，仍建议停服执行备份。
 - 限速按用户令牌桶生效于分片写入；速率变更在下一请求生效。
-- 同步功能（SFTP push/pull）依赖目标服务器提供 SSH/SFTP 服务；周期任务在服务运行期间触发，服务完全停止期间不会补跑错过的周期。
+- 同步功能（SFTP push/pull）依赖目标服务器提供 SSH/SFTP 服务；服务重启时只补跑最近的符合条件的错过周期，不会重放所有历史周期。
 
 ## 许可与致谢
 

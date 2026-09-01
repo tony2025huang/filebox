@@ -4,6 +4,23 @@
 
 [English](RELEASE_NOTES.en.md)
 
+## v0.2.0-v016（安全与逻辑检视修复批次）发布说明
+
+v016 由 codex 与 DSH 双路独立检视，发现的 38 项问题已全部修复，并完成反转验证与回归测试。
+
+### 修复清单
+
+- **严重问题**：运行中 `admin backup` 自动执行 WAL checkpoint，restore 激活前校验数据库可读且非空；收集上传 `init/chunk` 接入磁盘保护，空间不足返回 `DISK_FULL`，并增加分片请求限速。
+- **实证中等问题**：`mkdirSyncSystem` 接入只读拦截；秒传限定目标目录；分享下载先开文件再扣次，Range 在 60 秒窗口内去重；收集槽位改为 complete 成功时消耗；分享 preview 限制为文本 64KB、其他类型 512KB，并支持 Range 截断。
+- **其余中等问题**：complete/rename 共享目录锁；cron 错过任务补跑；手动同步独立 context；SFTP 整体超时；批量 ZIP 总字节与磁盘检查；backup/restore 流式哈希；新增上传任务取消和同步 pull 失败回滚；同步 goroutine recover 与类型断言安全。
+- **轻微问题**：完成 share_groups 清理、fileCount 口径、JWT 登出撤销、i18n 补键、batchShare 回滚、注册 5/min 限速、分片超时、审计写入去清理、TOTP 单调、只读全覆盖、秒传 fail-closed、撤销统一 404、pull 临时目录、secrets 长度校验、点击劫持头、前端 401 会话处理、restore 必需条目与九项小修，以及改密审计、唯一管理员守卫、删户清目录、不限转有限、x/crypto 升级、admin dir 前缀过滤。
+
+### 数据与部署注意
+
+- `backup` 现在会自动 checkpoint WAL；生产环境仍建议停服后备份，以缩小活跃写入带来的一致性窗口。
+- 新增上传任务取消 API：`DELETE /api/upload-tasks/{taskID}`。取消会删除 pending 任务及临时分片并释放配额预留。
+- `logout` 现在通过 `last_logout_at` 撤销旧 JWT；登出后，签发时间早于该时间的 token 不能继续访问受保护接口。
+
 ## v0.2.0-v013（修复与新功能批次）发布说明
 
 v013 是三轮修复 + 15 项需求批次（codex 开发 + dsh 复核测试），随 v0.2.0 单二进制发布：

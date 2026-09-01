@@ -1,6 +1,6 @@
 # FileBox Requirement State
 
-Updated: 2026-08-31 (v014：7 项用户问题全部交付)
+Updated: 2026-09-01 (v016：38 项检视修复全部交付)
 
 | Requirement | State | Notes |
 |---|---|---|
@@ -69,3 +69,9 @@ Updated: 2026-08-31 (v014：7 项用户问题全部交付)
 | Share download logs & failure reasons (v012 功能9) | done | `shares.revoked_at` soft revoke (anonymous access 403 + audit share_revoked); `audit_logs.share_owner_id` lets sharers see anonymous download logs for their own shares; failure reasons expanded to share_not_found/share_expired/share_revoked/share_limit/share_denied; logActions adds share_extend/share_increase/share_revoke. |
 | Batch sharing and detailed download progress (功能 5) | done | `POST /api/files/batch-share` creates one independent link per authorized file with all-or-nothing ownership validation and `batch_share` audit; FilesView shows/copies each link; single and ZIP downloads stream chunks with bytes, percentage, rate, cancellation, and ZIP `Content-Length`. |
 | Sync feature filebox↔sftp (v012 功能11) | done | Per-user remote systems (password/key/passphrase auth, AES-GCM encrypted credentials) referenced by sync tasks; push/pull directions over SFTP with auto-created target directories, overwrite/skip/rename conflict policies, once/cron periodic scheduling (robfig/cron), immediate run with per-task mutex, 30-day log retention, and 404 cross-user isolation. End-to-end verified on a real Linux SFTP server (password/key/passphrase auth, push, pull with subdirs, cron auto-trigger, isolation); commit `d1c5b0c`. |
+| v016 running backup WAL consistency | done | `admin backup` checkpoints SQLite WAL before archiving; restore validates that `filebox.db` is readable and non-empty before activation, with streaming hash verification for large files. Stage3 backup/restore reversal passed. |
+| v016 collection upload disk protection and slot semantics | done | Collection `init` and `chunk` enforce minimum free space and request rate limits; collection slots are consumed only after successful `complete`, and abandoned task cleanup releases reservations. `DISK_FULL` and empty-init assertions passed. |
+| v016 share download and preview safeguards | done | Missing files are opened before download counters are incremented; continuous Range requests deduplicate within a 60-second window; shared previews are capped at 64KB for text and 512KB for other content, including Range truncation. |
+| v016 upload-task cancellation and sync resilience | done | `DELETE /api/upload-tasks/{taskID}` removes pending tasks/tmp chunks and releases quota; failed sync pulls roll back pending tasks; cron catch-up, independent manual-sync context, SFTP timeout, ZIP limits, folder locking, streaming backup/restore, and goroutine recovery are covered. |
+| v016 JWT logout revocation and read-only coverage | done | `last_logout_at` invalidates tokens issued before logout; the read-only guard covers sync mkdir, password/language changes, collection and all other write paths; revoked-share responses are normalized. |
+| v016 security and correctness hardening | done | Audit writes no longer prune on every insert; TOTP counters are monotonic; secrets length and frame-protection headers are enforced; restore requires `filebox.db`; admin safeguards, finite-share conversion, frontend 401 handling, directory-prefix filtering, i18n, and `golang.org/x/crypto` v0.35.0+ are complete. |

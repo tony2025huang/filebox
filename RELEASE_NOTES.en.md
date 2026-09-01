@@ -4,6 +4,23 @@ Stage 2 release notes
 
 [中文](RELEASE_NOTES.md)
 
+## v0.2.0-v016 (security and logic review fixes) release notes
+
+v016 was reviewed independently by codex and DSH. All 38 identified issues were fixed, followed by reversal tests and regression checks.
+
+### Fix list
+
+- **Critical issues**: running `admin backup` now checkpoints SQLite WAL, and restore validates that the database is readable and non-empty before activation; collection upload `init/chunk` now enforce disk protection, return `DISK_FULL` when space is insufficient, and apply request-level chunk throttling.
+- **Evidence-backed medium issues**: `mkdirSyncSystem` is protected by the read-only guard; instant upload is limited to the target directory; share downloads open the file before incrementing the counter and deduplicate Range requests within a 60-second window; collection slots are consumed only after successful completion; shared previews are capped at 64KB for text and 512KB for other content, with Range truncation.
+- **Remaining medium issues**: complete/rename share a directory lock; missed cron tasks are caught up; manual sync uses an independent context; SFTP has an overall timeout; batch ZIPs enforce total-byte and disk checks; backup/restore use streaming hashes; upload-task cancellation and sync-pull rollback were added; sync goroutines recover from panics and remote type assertions are safe.
+- **Minor issues**: share-group cleanup, file-count semantics, JWT logout revocation, missing i18n keys, batch-share rollback, 5/min registration limiting, chunk read timeout, audit-write cleanup decoupling, monotonic TOTP counters, complete read-only coverage, fail-closed instant-upload errors, unified 404 revocation responses, data-directory pull temp files, secret-length validation, clickjacking headers, frontend 401 session handling, required restore entries and the nine V1-27 fixes were completed, along with password-change audit, last-admin protection, user-directory cleanup, unlimited-to-finite shares, the x/crypto upgrade, and admin directory-prefix filtering.
+
+### Data and deployment notes
+
+- `backup` now automatically checkpoints WAL; production deployments should still stop the service before backups to reduce the consistency window during active writes.
+- New upload-task cancellation API: `DELETE /api/upload-tasks/{taskID}`. Cancellation removes the pending task and temporary chunks and releases the quota reservation.
+- `logout` now revokes old JWTs through `last_logout_at`; tokens issued before that timestamp can no longer access protected endpoints.
+
 ## v0.2.0-v013 (fixes and new features) release notes
 
 v013 is the batch of three fix rounds plus 15 feature requests (developed by codex, re-verified by dsh), released in the v0.2.0 single binary:

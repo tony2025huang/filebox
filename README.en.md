@@ -2,7 +2,7 @@
 
 [中文](README.md)
 
-FileBox is a self-hosted file transfer and management service that runs as a single Go binary on Windows or Linux. Stage 1 provides multi-user isolation, JWT login, single-file uploads, Range downloads, dual-hash verification, quotas, disk protection, audit logs, configurable branding, and a multilingual interface; Stage 2 (v0.2.0) adds resumable chunked uploads, instant upload, folder upload, share links, online preview, upload rate limiting, an optional public registration switch, and extended system statistics; the v012 batch further adds batch operations, external-user upload collections, per-user read-only windows, share management, and bidirectional SFTP sync.
+FileBox is a self-hosted file transfer and management service that runs as a single Go binary on Windows or Linux. Stage 1 provides multi-user isolation, JWT login, single-file uploads, Range downloads, dual-hash verification, quotas, disk protection, audit logs, configurable branding, and a multilingual interface; Stage 2 (v0.2.0) adds resumable chunked uploads, instant upload, folder upload, share links, online preview, upload rate limiting, an optional public registration switch, and extended system statistics; the v012 batch further adds batch operations, external-user upload collections, per-user read-only windows, share management, and bidirectional SFTP sync; v016 completes 38 security and logic fixes from independent codex and DSH reviews.
 
 ## Features
 
@@ -11,7 +11,7 @@ FileBox is a self-hosted file transfer and management service that runs as a sin
 - File transfer: upload initialization, single chunk `0` upload, completion, paginated/searchable listing, deletion, and download; `http.ServeContent` supports `Range` and returns `206 Partial Content` for range requests.
 - Resumable chunked uploads: chunks of 2–8 MiB with out-of-order/idempotent re-uploads; the server persists uploaded chunks in the `chunks` table, `GET /api/files/{taskID}/status` reports progress for resume, and `complete` verifies all chunks then merges them as a stream while computing MD5 and SHA-256; the frontend uploads with 4 concurrent workers, pause/resume, and retry.
 - Instant upload: `POST /api/files/check` matches MD5 first then SHA-256 within the same user; a hit returns the existing record without writing new content; the frontend computes SHA-256 with WebCrypto for instant checks.
-- Folder upload: `upload-init` accepts a relative `dir` field and preserves `data/files/<user>/<yy>/<mm>/<relative-dir>/<name>`; identical names in different directories stay unsuffixed.
+- Folder upload: `upload-init` accepts a relative `dir` field and preserves `data/files/<user>/<relative-dir>/<name>`; identical names in different directories stay unsuffixed.
 - User-defined folders (v011): the automatic year/month storage layer was removed in favor of `data/files/<user_id>/[<custom-dir>/]<name>`; the file page offers breadcrumbs, a "New folder" button (Chinese names supported), cascading folder renames, and empty-folder deletion; `GET /api/files?dir=` filters by directory; `filebox admin migrate-v010-paths` migrates the legacy `yy/mm` layout to `yy-mm` (with an automatic database backup).
 - Share links: create with an expiry and download limit, anonymous metadata and downloads (expired/over-limit requests are rejected), and revocation; share create/view/download are recorded in the audit log, and an anonymous `/:token` share page is included.
 - Online preview: `GET /api/files/{id}/preview` serves images/text/video/PDF/JSON inline from a MIME whitelist and forces attachment downloads for everything else.
@@ -32,9 +32,10 @@ FileBox is a self-hosted file transfer and management service that runs as a sin
 - Batch sharing (v012): `POST /api/files/batch-share` creates independent links for multiple selected files at once (all-or-nothing ownership validation); the dialog shows each link for copying.
 - Detailed download progress (v012): single-file and batch zip downloads are streamed; the transfer drawer shows bytes downloaded/total, percentage, and live rate (B/KB/MB/GB/s) with cancellation.
 - Sync feature (v012): per-user "remote systems" (SFTP hosts; password/key incl. passphrase; credentials stored AES-GCM encrypted) and "sync tasks" — push (FileBox→SFTP) and pull (SFTP→FileBox), auto-created target directories, overwrite/skip/rename conflict policies, one-shot or cron periodic runs (server scheduler with per-task mutex against overlap), and detailed per-run logs (files/bytes/errors, retained 30 days by default).
+- v016 security and logic review fixes: running backups checkpoint WAL and restores reject empty databases; collection init/chunk enforce `DISK_FULL` protection; instant upload is directory-scoped; share Range requests deduplicate within 60 seconds and previews have byte caps; `DELETE /api/upload-tasks/{taskID}` cancels tasks and releases quota; all write paths honor read-only windows; logout revokes old JWTs through `last_logout_at`; ZIP/sync/audit/restore/admin-guard logic and the `x/crypto` security version were hardened together.
 - Scheduled cleanup of abandoned upload tasks (v012 batch): a background job hourly removes pending upload tasks older than 24 hours together with their chunks/tmp directories (transactional, race-safe).
 - Server-pushed upload progress (v012 batch): `GET /api/files/progress/stream` pushes live progress of all in-flight tasks every second over SSE; the frontend subscribes with an authenticated, cancellable streaming fetch that survives refresh and multi-tab. 
-- Name conflicts: a same-name file in the user's current monthly directory causes `409`; the frontend offers overwrite or rename; overwrite is transactional and rename allocates the smallest available numeric suffix.
+- Name conflicts: a same-name file in the user's current directory causes `409`; the frontend offers overwrite or rename; overwrite is transactional and rename allocates the smallest available numeric suffix.
 - Filename security: pre-upload validation rejects separators, control characters, Windows-illegal characters, traversal markers, empty/`.`/`..` names, and names over 255 bytes; the on-disk name preserves the original semantics while replacing selected illegal characters.
 - Quotas: initialization reserves pending bytes and the default quota is 100 GiB; overwrite subtracts the old file usage first.
 - Integrity: the server computes MD5 and SHA-256 from the actual content; clients may submit expected values for comparison.
@@ -235,7 +236,9 @@ Complete systemd, Windows NSSM/sc, and Nginx reverse-proxy examples and security
 
 JSON responses use `{ "code": number, "message": string, "data": any }`; protected endpoints require `Authorization: Bearer <token>`. Main paths are auth `/api/auth/login`, `/api/auth/register`, `/api/auth/totp`, `/api/auth/totp-qrcode`, `/api/auth/change-password`, `/api/auth/logout`, `/api/auth/me`, `/api/auth/language`; public branding `/api/brand` and `/brand/{asset}`; files `/api/files`, `/api/files/upload-init`, `/api/files/check`, `/api/files/{taskID}/chunks/{index}`, `/api/files/{taskID}/status`, `/api/files/{taskID}/complete`, `/api/files/{id}/download`, `/api/files/batch-download`, `/api/files/batch-delete`, `/api/files/batch-share`, `/api/files/{id}/preview`, `/api/files/{id}/share`, `/api/files/{id}/shares`, `/api/files/shared/{token}/meta`, `/api/files/shared/{token}/download`, `/api/files/progress/stream`, `/api/files/{id}`; share management `/api/shares`, `/api/shares/{token}`, `/api/shares/{token}/extend|increase|logs`; upload collections `/api/collections`, `/api/collections/{id}`, `/api/collections/{token}/meta|upload-init|upload-chunk|upload-complete`; sync `/api/sync/systems[/{id}]`, `/api/sync/systems/{id}/browse|mkdir`, `/api/sync/tasks[/{id}]`, `/api/sync/tasks/{id}/run|logs`; logs `/api/logs`, `/api/logs/actions`; and admin `/api/admin/users[/{id}]`, `/api/admin/users/{id}/totp`, `/api/admin/users/{id}/ip-acl`, `/api/admin/users/{id}/read-only`, `/api/admin/stats`, `/api/admin/settings`, `/api/admin/brand`, `/api/admin/locks`.
 
-File, user, and log lists default to `pageSize=20` and cap it at 100. Administrators can view all files and logs; regular users are isolated by account. Downloads support Range, and logout does not maintain a server-side JWT blacklist.
+File, user, and log lists default to `pageSize=20` and cap it at 100. Administrators can view all files and logs; regular users are isolated by account. Downloads support Range, and logout revokes JWTs issued before `last_logout_at`.
+
+Upload-task cancellation is available at `DELETE /api/upload-tasks/{taskID}`; it removes the pending task and temporary chunks and releases its quota reservation.
 
 ## Directory structure
 
@@ -247,10 +250,11 @@ Under `--data`: `filebox.db`; with the default path, `data/files/<userID>[/<cust
 
 ## Known limitations
 
-- Instant upload matches only within the same user (no cross-user content deduplication).
+- Instant upload is scoped to the current target directory by default; omitting a directory retains the root-directory compatibility fallback, and there is no cross-user content deduplication.
 - Share links are random-token based; the `meta` endpoint exposes the file name, size, and usage counters, so do not share files that are sensitive in name or size.
+- Shared previews return only a bounded byte range, and Range requests deduplicate download counts within a short window. Backups checkpoint WAL automatically, but production backups should still stop the service.
 - Rate limiting is a per-user token bucket applied to chunk writes; setting changes take effect on the next request.
-- The sync feature (SFTP push/pull) requires the target server to expose SSH/SFTP; periodic tasks fire while the service is running and missed cycles are not backfilled after a full service stop.
+- The sync feature (SFTP push/pull) requires the target server to expose SSH/SFTP; on restart only the most recent eligible missed cycle is caught up, rather than replaying all historical cycles.
 
 ## License and acknowledgements
 

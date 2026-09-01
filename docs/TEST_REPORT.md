@@ -63,3 +63,29 @@
 ## 五、结论
 
 阶段二全部验收标准达成：124/124 用例通过（9 套件，含 v011 反馈批次 5/6/7 前端专项 14/14/6 项），0 遗留缺陷（测试发现的 3 个缺陷均已代码级修复并复测）。满足 docs/DEV_DOC.md 阶段二验收标准与 docs/CODEX_TASK_2.md 全部条目；v011 验证问题修复单 20 项全部交付。
+
+## 六、v016 深入检视修复测试报告
+
+v016 完成 V1-01～V1-38 共 38 项修复。DSH 在 `.test-data\stage3\` 执行反转验证 11/11，通过项如下：
+
+1. `test-v128-backup-wal.ps1`：运行中备份恢复后用户/文件数据保持一致；空数据库归档和缺少 `filebox.db` 的归档均被拒绝。
+2. `test-v101-collection-disk.ps1`：普通上传与收集上传在最小可用空间不足时均返回 `503 DISK_FULL`，收集入口不能绕过磁盘保护。
+3. `test-v130-mkdir-readonly.ps1`：只读窗口内 `mkdirSyncSystem` 在远端连接前返回 `403 READ_ONLY`。
+4. `test-v129-instant-crossdir.ps1`：跨目录内容不命中秒传；同目录仍命中；省略目录的根目录兼容回退仍命中。
+5. `test-v104-collection-slot.ps1`：空 `init` 均成功且 `uploadCount=0`；两个真实 complete 后计数为 2；第三次 init 返回 `403 COLLECTION_LIMIT`。
+6. `test-v102-preview-limit.ps1`：下载次数耗尽后 preview 仍可用但响应不超过 512KB，不能通过 preview 取走全文。
+7. `test-v103-share-count.ps1`：物理文件缺失返回 404 且不扣次；连续 3 次 Range 最多扣 1 次；正常下载仍正确计数。
+8. `test-v132-quota-cancel.ps1`：配额被两个 pending 任务占满时第三次 init 被拒；DELETE 返回 200、删除临时目录并释放配额；重复 DELETE 返回 404，管理员可取消其他用户任务。
+9. `test-v131-backup-stream.ps1`：64MB 文件 backup/restore 成功，恢复内容和大小与源文件一致，验证流式处理结果。
+10. `test-v123-secrets-length.ps1`：`secrets.json` 中短 JWT secret 使服务以非零状态退出，不能带短密钥启动。
+11. `test-v134-batch4-runtime.ps1`：验证防点击劫持响应头、改密审计、唯一管理员守卫、不限次转有限、fileCount、logout 后旧 JWT 返回 401、只读改密/改语言 403、撤销 meta/download 状态一致，以及注册超过 5/min 返回 429。
+
+### v016 新增单测清单
+
+- `cmd/filebox/main_test.go`：`TestBackupCheckpointsWALAndRestoreValidatesDatabase`、`TestValidateRestoredDatabaseRejectsEmptyDatabase`、`TestBackupRestoreLargeFileStreams`、`TestRestoreRejectsArchiveWithoutDatabase`。
+- `internal/httpapi/server_test.go`：`TestCollectionUploadRejectsWhenDiskFull`、`TestSharePreviewLimitsLargeTextAndRange`、`TestDeleteCollectionUploadTasksReleasesSlots`、`TestCompleteUploadWaitsForFolderLock`、`TestBatchDownloadsRejectOversizedArchives`、`TestDeleteUploadTaskReleasesQuotaAndTemporaryChunks`、`TestLogoutRevokesJWT`、`TestBatchShareRollsBackCreatedShares`、`TestRegistrationRateLimit`、`TestShareGroupFileCountMatchesReadyMembers`、`TestCheckInstantUploadReturns500WhenConflictLookupFails`、`TestFileBoxDownloadUsesDataDirectoryTemp`、`TestSecurityHeadersIncludeFrameProtection`、`TestPasswordChangeWritesAudit`、`TestCompleteRejectsChangedChunkHash`、`TestAdminGuardsLastAdministratorAndRemovesUserDirectory`、`TestUnlimitedShareCanBecomeFinite`、`TestAdminListFilesDirUsesStoragePrefix`、`TestCollectionUploadInitDoesNotConsumeSlots`、`TestDeleteCollectionUploadTasksDoesNotChangeSlots`、`TestShareDownloadRangeWindowDeduplicatesContinuousRanges`。
+- `internal/httpapi/read_only_test.go`：`TestReadOnlyBlocksSyncAndCollectionWrites`、`TestReadOnlyBlocksCollectionChunkUpload`。
+- `internal/httpapi/sync_test.go`：`TestLatestCronOccurrenceReturnsMostRecentMissedRun`、`TestFileBoxRemoteClientRejectsMalformedBrowseEntry`。
+- `internal/store/store_test.go`：`TestAddAuditLogOnlyInsertsWithoutPruning`、`TestConsumeTOTPRejectsReplayedAndOlderCounters`。
+
+全量复检：`go build ./...`、`go vet ./...`、`go test -count=1 ./...` 全绿；`go test -race`（`internal/httpapi`、`internal/store`）全绿。阶段 3 反转验证结果为 11/11，未发现遗留失败项。
