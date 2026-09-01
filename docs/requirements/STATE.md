@@ -100,3 +100,9 @@ Updated: 2026-09-01 (v018：8 项新需求全部交付)
 | v016 upload-task cancellation and sync resilience | done | `DELETE /api/upload-tasks/{taskID}` removes pending tasks/tmp chunks and releases quota; failed sync pulls roll back pending tasks; cron catch-up, independent manual-sync context, SFTP timeout, ZIP limits, folder locking, streaming backup/restore, and goroutine recovery are covered. |
 | v016 JWT logout revocation and read-only coverage | done | `last_logout_at` invalidates tokens issued before logout; the read-only guard covers sync mkdir, password/language changes, collection and all other write paths; revoked-share responses are normalized. |
 | v016 security and correctness hardening | done | Audit writes no longer prune on every insert; TOTP counters are monotonic; secrets length and frame-protection headers are enforced; restore requires `filebox.db`; admin safeguards, finite-share conversion, frontend 401 handling, directory-prefix filtering, i18n, and `golang.org/x/crypto` v0.35.0+ are complete. |
+| v019 log time-range confirm/clear | done | Log filter popover gained Confirm/Clear actions; unconfirmed edits do not apply. |
+| v019 pagination display fix | done | Logs and files pages show pagination correctly (template ref-unwrap bug fixed); per-page size and jump controls work. |
+| v019 folder navigation normalization | done | navigateDir normalizes separators and trims slashes so entering folders never reports an invalid directory. |
+| v019 aggregate-share eye interaction | done | The group eye opens the edit dialog (members add/remove + expiry/limit); card keeps only eye/copy/delete icons. |
+| v019 sync log dialog width | done | The sync task details dialog widened to 1100px with a 1000px log table for better readability. |
+| v019 folder batch operations | done | Folder rows support multi-select and batch deletion with confirmation. |

@@ -4,6 +4,21 @@ Stage 2 release notes
 
 [中文](RELEASE_NOTES.md)
 
+## v0.2.0-v019 (user-feedback fix batch)
+
+Seven user-reported fixes (4 defects + 3 polish items):
+
+**Defect fixes**
+- Log time-range popover gained Confirm/Clear buttons
+- Logs (67 rows) and Files pages now show pagination (template ref-unwrap bug fixed)
+- Entering a folder no longer reports "invalid directory" (navigation normalization)
+- Aggregate-share card icons simplified (eye/copy/delete); editing merged into the eye dialog
+
+**Polish**
+- Sync task log dialog widened to 1100px for better readability
+- Folder rows support multi-select and batch deletion
+- Pagination controls (page size / jump) display correctly on all four list pages
+
 ## v0.2.0-v018 (8 new requirements) release notes
 
 v018 implements 8 new requirements raised by the user. Codex implemented them in small batches (all backend tasks by codex; a few frontend micro-edits were applied directly by the batch lead with identical specifications after codex processes kept terminating without writing); all passed full builds and tests.
