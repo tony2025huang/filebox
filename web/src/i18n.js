@@ -216,6 +216,10 @@ Object.assign(en, {
   'logs.shareGroupExtend': 'Aggregate share extended', 'logs.shareGroupIncrease': 'Aggregate share limit increased'
 })
 
+Object.assign(zhCN, { 'logs.startTime': '开始时间', 'logs.endTime': '结束时间' })
+Object.assign(zhTW, { 'logs.startTime': '開始時間', 'logs.endTime': '結束時間' })
+Object.assign(en, { 'logs.startTime': 'Start time', 'logs.endTime': 'End time' })
+
 export const dictionaries = { 'zh-CN': zhCN, 'zh-TW': zhTW, en }
 export const currentLocale = ref('zh-CN')
 export const systemLocale = ref('zh-CN')
