@@ -356,6 +356,44 @@ func (s *Server) loadSyncSystem(r *http.Request) (store.RemoteSystem, error) {
 	return s.store.GetRemoteSystem(r.Context(), id, user.ID, user.Role == "admin")
 }
 
+func (s *Server) getSyncSystemSecret(w http.ResponseWriter, r *http.Request) {
+	item, err := s.loadSyncSystem(r)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "目标系统不存在")
+		return
+	}
+	if err != nil {
+		log.Printf("get sync remote system secret: %v", err)
+		writeError(w, http.StatusInternalServerError, "读取凭据失败")
+		return
+	}
+
+	secret := ""
+	if item.AuthSecret != "" {
+		secret, err = s.decryptSyncSecret(item.AuthSecret)
+		if err != nil {
+			log.Printf("decrypt sync remote system secret id=%d: %v", item.ID, err)
+			s.serviceEvent(r, "sync_system_secret_view", currentUser(r.Context()).Username, "target=%d result=failure reason=decrypt", item.ID)
+			writeError(w, http.StatusInternalServerError, "读取凭据失败")
+			return
+		}
+	}
+	passphrase := ""
+	if item.AuthPassphrase != "" {
+		passphrase, err = s.decryptSyncSecret(item.AuthPassphrase)
+		if err != nil {
+			log.Printf("decrypt sync remote system passphrase id=%d: %v", item.ID, err)
+			s.serviceEvent(r, "sync_system_secret_view", currentUser(r.Context()).Username, "target=%d result=failure reason=decrypt", item.ID)
+			writeError(w, http.StatusInternalServerError, "读取凭据失败")
+			return
+		}
+	}
+
+	user := currentUser(r.Context())
+	s.serviceEvent(r, "sync_system_secret_view", user.Username, "target=%d result=success", item.ID)
+	writeData(w, http.StatusOK, "读取凭据成功", map[string]string{"secret": secret, "authPassphrase": passphrase})
+}
+
 // browseSyncSystem 列出远端直接子项；includeFiles=true 时同时返回文件（源端选择用）。
 // browseSyncSystem lists direct children of a remote path; includeFiles=true also returns files (for source picking).
 func (s *Server) browseSyncSystem(w http.ResponseWriter, r *http.Request) {

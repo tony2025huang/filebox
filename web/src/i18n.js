@@ -216,9 +216,9 @@ Object.assign(en, {
   'logs.shareGroupExtend': 'Aggregate share extended', 'logs.shareGroupIncrease': 'Aggregate share limit increased'
 })
 
-Object.assign(zhCN, { 'logs.startTime': '开始时间', 'logs.endTime': '结束时间' })
-Object.assign(zhTW, { 'logs.startTime': '開始時間', 'logs.endTime': '結束時間' })
-Object.assign(en, { 'logs.startTime': 'Start time', 'logs.endTime': 'End time' })
+Object.assign(zhCN, { 'logs.fromTime': '开始时间', 'logs.toTime': '结束时间' })
+Object.assign(zhTW, { 'logs.fromTime': '開始時間', 'logs.toTime': '結束時間' })
+Object.assign(en, { 'logs.fromTime': 'Start time', 'logs.toTime': 'End time' })
 
 export const dictionaries = { 'zh-CN': zhCN, 'zh-TW': zhTW, en }
 export const currentLocale = ref('zh-CN')
@@ -271,3 +271,13 @@ export async function loadLocale(defaultLang = '') {
   if (!userLanguage) localStorage.removeItem('filebox_locale')
   return currentLocale.value
 }
+
+Object.assign(zhCN, {
+  'sync.viewSecret': '查看已保存的密码', 'sync.hideSecret': '隐藏', 'sync.secretError': '读取已保存凭据失败', 'sync.savedSecretPlaceholder': '已保存，点击眼睛查看', 'sync.startTime': '开始时间', 'sync.endTime': '结束时间'
+})
+Object.assign(zhTW, {
+  'sync.viewSecret': '查看已儲存的密碼', 'sync.hideSecret': '隱藏', 'sync.secretError': '讀取已儲存驗證資料失敗', 'sync.savedSecretPlaceholder': '已儲存，點擊眼睛查看', 'sync.startTime': '開始時間', 'sync.endTime': '結束時間'
+})
+Object.assign(en, {
+  'sync.viewSecret': 'View saved password', 'sync.hideSecret': 'Hide', 'sync.secretError': 'Could not read saved credentials', 'sync.savedSecretPlaceholder': 'Saved; click the eye to view', 'sync.startTime': 'Start time', 'sync.endTime': 'End time'
+})

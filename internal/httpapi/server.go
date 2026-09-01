@@ -402,6 +402,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/sync/systems", s.requireAuth(s.createSyncSystem))
 	mux.HandleFunc("PUT /api/sync/systems/{id}", s.requireAuth(s.updateSyncSystem))
 	mux.HandleFunc("DELETE /api/sync/systems/{id}", s.requireAuth(s.deleteSyncSystem))
+	mux.HandleFunc("GET /api/sync/systems/{id}/secret", s.requireAuth(s.getSyncSystemSecret))
 	mux.HandleFunc("GET /api/sync/systems/{id}/browse", s.requireAuth(s.browseSyncSystem))
 	mux.HandleFunc("POST /api/sync/systems/{id}/test", s.requireAuth(s.testSyncSystem))
 	mux.HandleFunc("POST /api/sync/systems/{id}/mkdir", s.requireAuth(s.mkdirSyncSystem))

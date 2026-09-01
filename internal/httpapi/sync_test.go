@@ -267,6 +267,36 @@ func TestSyncSystemTaskOwnershipEncryptionAndDeleteProtection(t *testing.T) {
 	}
 }
 
+func TestSyncSystemSecretEndpoint(t *testing.T) {
+	_, handler := newTestServer(t)
+	adminToken := testAdminToken(t, handler)
+	created := testJSONRequest(t, handler, http.MethodPost, "/api/sync/systems", adminToken, `{"name":"secret-view","host":"sftp.example","port":22,"username":"backup-user","authType":"password","authSecret":"original-secret"}`)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create sync system = %d: %s", created.Code, created.Body.String())
+	}
+	systemID := int64(responseData(t, created)["id"].(float64))
+	secretPath := "/api/sync/systems/" + strconv.FormatInt(systemID, 10) + "/secret"
+	secretResponse := testJSONRequest(t, handler, http.MethodGet, secretPath, adminToken, "")
+	if secretResponse.Code != http.StatusOK {
+		t.Fatalf("get sync system secret = %d: %s", secretResponse.Code, secretResponse.Body.String())
+	}
+	secretData := responseData(t, secretResponse)
+	if secretData["secret"] != "original-secret" || secretData["authPassphrase"] != "" {
+		t.Fatalf("sync system secret data = %#v", secretData)
+	}
+
+	createdOther := testJSONRequest(t, handler, http.MethodPost, "/api/admin/users", adminToken, `{"username":"sync-secret-other","password":"SyncSecretOther123!","role":"user","quotaBytes":1048576}`)
+	if createdOther.Code != http.StatusCreated {
+		t.Fatalf("create other user = %d: %s", createdOther.Code, createdOther.Body.String())
+	}
+	otherLogin := testJSONRequest(t, handler, http.MethodPost, "/api/auth/login", "", `{"username":"sync-secret-other","password":"SyncSecretOther123!"}`)
+	otherToken := responseData(t, otherLogin)["token"].(string)
+	unauthorized := testJSONRequest(t, handler, http.MethodGet, secretPath, otherToken, "")
+	if unauthorized.Code != http.StatusNotFound {
+		t.Fatalf("cross-user get sync system secret = %d: %s", unauthorized.Code, unauthorized.Body.String())
+	}
+}
+
 func TestSyncTaskValidationAndLogRetention(t *testing.T) {
 	db, handler := newTestServer(t)
 	token := testAdminToken(t, handler)
