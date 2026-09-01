@@ -1,6 +1,19 @@
 # FileBox Requirement State
 
-Updated: 2026-09-01 (v016：38 项检视修复全部交付)
+Updated: 2026-09-01 (v017：10 项新需求全部交付)
+
+| Requirement | State | Notes |
+|---|---|---|
+| v017 file library drops the embedded collections block | done | FilesView no longer renders the collections section/entry/modals or collection state; the standalone /collections page (CollectionsView) remains the single entry. |
+| v017 per-tab admin console descriptions | done | AdminView page heading copy switches with the active tab (overview/users/security/brand/locks/system) with dedicated trilingual texts. |
+| v017 navigation order and naming | done | Topbar order: My files → My collections → My shares → Sync tasks → Logs → System settings; `nav.shares` is "My shares", admin is "System settings" (nav.system), trilingual. |
+| v017 audit log time-range filter | done | `GET /api/logs` accepts from/to (RFC3339, invalid → 400); `ListAuditLogs` adds created_at >= / <= (boundary-inclusive); LogsView adds start/end datetime-local inputs; store + httpapi tests added. |
+| v017 sync credentials saved & viewable | done | Credentials stay AES-GCM encrypted with blank-edit keeping existing; new `GET /api/sync/systems/{id}/secret` returns decrypted secret/passphrase once for the owner/admin with audit; SyncView shows a saved-password placeholder with an eye toggle; endpoint test added. |
+| v017 sync execution history | done | Task detail logs show start time, end time (when finishedAt exists), and running/success/failure state; compatible with the new sync_logs schema. |
+| v017 sync path picker enhancements | done | Picker filters the current directory list by name (local & remote) and accepts a manually entered full path with confirmation (remote paths validated via browse). |
+| v017 sync task list target host | done | Task rows show the target host:port for SFTP or the URL host for FileBox, with graceful fallback. |
+| v017 sync log real-time status | done | sync_logs gains finished_at (table rebuilt without the result CHECK); execution writes a running row first and updates it on completion (`UpdateSyncLogResult`); failure paths never leave running rows; store + httpapi tests added. |
+| v017 change-password modal | done | The topbar change-password entry opens a centered modal (old/new/confirm → POST /api/auth/change-password → session refresh); forced change-password still redirects to the standalone page. |
 
 | Requirement | State | Notes |
 |---|---|---|

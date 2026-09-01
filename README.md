@@ -2,7 +2,7 @@
 
 [English](README.en.md)
 
-FileBox 是一个可自托管的文件传输与管理系统，使用单个 Go 二进制文件跨 Windows/Linux 部署。阶段一提供多用户隔离、JWT 登录、单文件上传、Range 下载、双哈希校验、配额、磁盘保护、审计日志、品牌定制和多语言界面；阶段二（v0.2.0）在此基础上加入分片断点续传、秒传、文件夹上传、分享链接、在线预览、上传限速、开放注册开关和系统统计补全；v012 批次进一步提供批量操作、外部用户上传收集、用户只读时段、分享管理、SFTP 双向同步等能力；v016 完成 codex + DSH 双路检视的 38 项安全与逻辑修复。
+FileBox 是一个可自托管的文件传输与管理系统，使用单个 Go 二进制文件跨 Windows/Linux 部署。阶段一提供多用户隔离、JWT 登录、单文件上传、Range 下载、双哈希校验、配额、磁盘保护、审计日志、品牌定制和多语言界面；阶段二（v0.2.0）在此基础上加入分片断点续传、秒传、文件夹上传、分享链接、在线预览、上传限速、开放注册开关和系统统计补全；v012 批次进一步提供批量操作、外部用户上传收集、用户只读时段、分享管理、SFTP 双向同步等能力；v016 完成 codex + DSH 双路检视的 38 项安全与逻辑修复；v017 完成 10 项新需求（收集区块独立化、管理后台页签文案、导航顺序、日志时间筛选、同步密码查看、执行历史、目录选择增强、目标显示、实时状态、改密弹窗）。
 
 ## 功能清单
 
@@ -32,6 +32,7 @@ FileBox 是一个可自托管的文件传输与管理系统，使用单个 Go �
 - 批量分享（v012）：`POST /api/files/batch-share` 一次为多个选中文件创建独立分享链接（整批校验归属，任一越权整体拒绝），前端弹窗展示逐文件链接并可复制。
 - 下载详细进度（v012）：单文件与批量 zip 下载均流式读取，传输面板显示已下载字节/总字节/百分比与实时速率（B/KB/MB/GB/s），支持取消。
 - 同步功能（v012）：按用户配置「目标系统」（SFTP 主机，密码/密钥含 passphrase，凭据 AES-GCM 加密存储）与「同步任务」——push（FileBox→SFTP）与 pull（SFTP→FileBox）双向，自动创建目标目录，冲突策略覆盖/跳过/重命名，一次性或 cron 周期执行（服务端调度，同任务互斥防重叠），每次执行记录详细日志（文件数/字节/错误，默认保留 30 天）。
+- v017 功能增强：文件库移除内嵌收集区块（统一走「我的收集」独立页）；管理后台六页签各有专属说明文案（三语）；顶栏导航调整为 我的文件 → 我的收集 → 我的分享 → 同步任务 → 日志 → 系统设置（"分享管理"更名"我的分享"、"管理后台"更名"系统设置"）；操作日志页新增开始/结束时间筛选（`GET /api/logs?from=&to=`，RFC3339）；同步目标系统密码可点击眼睛查看（`GET /api/sync/systems/{id}/secret` 单次解密 + 审计）；同步任务详情展示执行历史（开始/结束时间、进行中状态）；同步目录选择支持当前目录过滤与手动输入全路径；任务列表"源 → 目标"显示目标主机（SFTP host:port / FileBox URL host）；同步执行开始即写 running 行、完成原地更新（sync_logs 自动迁移新增 finished_at）；顶栏"修改密码"改为居中弹窗（强制改密仍走独立页）。
 - v016 安全与逻辑检视修复：运行中 backup 自动 checkpoint WAL 且 restore 拒绝空库；收集 init/chunk 接入 `DISK_FULL` 磁盘保护；秒传限定目标目录；分享 Range 60 秒窗口去重与 preview 字节上限；新增 `DELETE /api/upload-tasks/{taskID}` 取消并释放配额；只读写入口全覆盖；logout 通过 `last_logout_at` 撤销旧 JWT；ZIP/同步/审计/恢复/管理员守卫和 `x/crypto` 安全版本同步加固。
 - 废弃上传任务定时清理（v012 补充批次）：后台每小时清理超过 24 小时未完成的 pending 上传任务及其分片/tmp 目录（事务删除，防清理竞态）。
 - 服务端主动推送上传进度（v012 补充批次）：`GET /api/files/progress/stream` SSE 端点每秒推送当前用户所有进行中任务进度；前端用带 Bearer 认证且可取消的流式 fetch 订阅，刷新/多标签页同步恢复。
@@ -234,7 +235,7 @@ systemd、Windows NSSM/sc 和 Nginx 反向代理的完整示例与安全说明�
 
 ## API 摘要
 
-JSON 响应格式为 `{ "code": number, "message": string, "data": any }`；受保护接口需要 `Authorization: Bearer <token>`。主要路径包括：认证 `/api/auth/login`、`/api/auth/register`、`/api/auth/totp`、`/api/auth/totp-qrcode`、`/api/auth/change-password`、`/api/auth/logout`、`/api/auth/me`、`/api/auth/language`；公开品牌 `/api/brand` 和 `/brand/{asset}`；文件 `/api/files`、`/api/files/upload-init`、`/api/files/check`、`/api/files/{taskID}/chunks/{index}`、`/api/files/{taskID}/status`、`/api/files/{taskID}/complete`、`/api/upload-tasks/{taskID}`、`/api/files/{id}/download`、`/api/files/batch-download`、`/api/files/batch-delete`、`/api/files/batch-share`、`/api/files/{id}/preview`、`/api/files/{id}/share`、`/api/files/{id}/shares`、`/api/files/shared/{token}/meta`、`/api/files/shared/{token}/download`、`/api/files/progress/stream`、`/api/files/{id}`；分享管理 `/api/shares`、`/api/shares/{token}`、`/api/shares/{token}/extend|increase|logs`；外部上传收集 `/api/collections`、`/api/collections/{id}`、`/api/collections/{token}/meta|upload-init|upload-chunk|upload-complete`；同步 `/api/sync/systems[/{id}]`、`/api/sync/systems/{id}/browse|mkdir`、`/api/sync/tasks[/{id}]`、`/api/sync/tasks/{id}/run|logs`；日志 `/api/logs`、`/api/logs/actions`；管理员 `/api/admin/users[/{id}]`、`/api/admin/users/{id}/totp`、`/api/admin/users/{id}/ip-acl`、`/api/admin/users/{id}/read-only`、`/api/admin/stats`、`/api/admin/settings`、`/api/admin/brand`、`/api/admin/locks`。
+JSON 响应格式为 `{ "code": number, "message": string, "data": any }`；受保护接口需要 `Authorization: Bearer <token>`。主要路径包括：认证 `/api/auth/login`、`/api/auth/register`、`/api/auth/totp`、`/api/auth/totp-qrcode`、`/api/auth/change-password`、`/api/auth/logout`、`/api/auth/me`、`/api/auth/language`；公开品牌 `/api/brand` 和 `/brand/{asset}`；文件 `/api/files`、`/api/files/upload-init`、`/api/files/check`、`/api/files/{taskID}/chunks/{index}`、`/api/files/{taskID}/status`、`/api/files/{taskID}/complete`、`/api/upload-tasks/{taskID}`、`/api/files/{id}/download`、`/api/files/batch-download`、`/api/files/batch-delete`、`/api/files/batch-share`、`/api/files/{id}/preview`、`/api/files/{id}/share`、`/api/files/{id}/shares`、`/api/files/shared/{token}/meta`、`/api/files/shared/{token}/download`、`/api/files/progress/stream`、`/api/files/{id}`；分享管理 `/api/shares`、`/api/shares/{token}`、`/api/shares/{token}/extend|increase|logs`；外部上传收集 `/api/collections`、`/api/collections/{id}`、`/api/collections/{token}/meta|upload-init|upload-chunk|upload-complete`；同步 `/api/sync/systems[/{id}]`、`/api/sync/systems/{id}/browse|mkdir|test|secret`、`/api/sync/tasks[/{id}]`、`/api/sync/tasks/{id}/run|logs`；日志 `/api/logs`（支持 `from`/`to` 时间范围）、`/api/logs/actions`；管理员 `/api/admin/users[/{id}]`、`/api/admin/users/{id}/totp`、`/api/admin/users/{id}/ip-acl`、`/api/admin/users/{id}/read-only`、`/api/admin/stats`、`/api/admin/settings`、`/api/admin/brand`、`/api/admin/locks`。
 
 文件列表、用户列表和日志列表默认 `pageSize=20`，服务端最大 100。管理员可查看全部文件和日志，普通用户按账户隔离。下载支持 Range；logout 会通过 `last_logout_at` 撤销此前签发的 JWT。
 

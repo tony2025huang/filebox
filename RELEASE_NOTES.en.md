@@ -4,6 +4,28 @@ Stage 2 release notes
 
 [中文](RELEASE_NOTES.md)
 
+## v0.2.0-v017 (10 new requirements) release notes
+
+v017 implements 10 new requirements raised by the user. Codex implemented them in small batches (1-2 items per batch, each committed and pushed separately); all passed full builds and tests.
+
+### New features and improvements
+
+- **#1 File library drops the embedded collections block**: the file library page no longer shows the "My collections" section or its create entry; collection management now lives solely on the standalone "My collections" page (/collections).
+- **#2 Per-tab admin console descriptions**: the Overview / Users / Security / Branding / Locks / System tabs each show their own description text (trilingual) matching the tab's actual function.
+- **#3 Navigation order and naming**: topbar order is now My files → My collections → My shares → Sync tasks → Logs → System settings; "Share management" was renamed "My shares" and "Admin" renamed "System settings" (trilingual).
+- **#4 Audit log time-range filter**: the log page adds start/end time inputs; `GET /api/logs` accepts from/to (RFC3339), boundary-inclusive filtering, invalid times return 400; store and httpapi tests added.
+- **#5 Sync credentials saved and viewable**: remote-system passwords stay AES-GCM encrypted with blank-edit keeping existing credentials; new `GET /api/sync/systems/{id}/secret` returns the decrypted secret once for the owner/admin with audit logging; the edit dialog shows a "saved" placeholder with an eye toggle to view/hide.
+- **#6 Sync execution history**: task details show start time, end time, and the result (success/failure/running) for every execution.
+- **#7 Sync path picker enhancements**: the directory browser filters the current directory by name and accepts a manually entered full path with confirmation (remote paths validated via browse).
+- **#8 Sync task target host display**: task rows now show the target host (SFTP host:port or FileBox URL host) in the source → target column.
+- **#9 Real-time sync log status**: execution writes a `running` row at start and updates it in place with the end time and result on completion; in-flight runs are visible in lists/details (sync_logs migration adds finished_at with automatic table rebuild).
+- **#10 Change-password modal**: the topbar "Change password" entry opens a centered modal (submits POST /api/auth/change-password); forced password change (must_change_password) still redirects to the standalone page.
+
+### Data and deployment notes
+
+- sync_logs migration: on first startup the table is rebuilt automatically (adds `finished_at`, removes the result CHECK constraint), preserving foreign keys, indexes, and historical data; no manual steps.
+- New endpoint: `GET /api/sync/systems/{id}/secret` (owner or admin only; returns decrypted credentials once and records an audit event).
+
 ## v0.2.0-v016 (security and logic review fixes) release notes
 
 v016 was reviewed independently by codex and DSH. All 38 identified issues were fixed, followed by reversal tests and regression checks.

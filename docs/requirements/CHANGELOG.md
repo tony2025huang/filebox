@@ -1,5 +1,20 @@
 # Requirement Change Log
 
+## 2026-09-01 - v017（10 项新需求批次）
+
+任务书：`docs/CODEX_TASK_v017.md`；codex 分批实施（每批 1-2 项，每批独立提交推送）；前端纯改 5 批 + 前后端混合 1 批。
+
+- **#1 文件库移除收集区块**：FilesView.vue 删除 `collection-section` 区块、"我的收集"入口按钮、两个收集弹窗及全部收集状态/函数（收集已由独立页 CollectionsView + /collections 路由承载）；提交 `3945fba`。
+- **#2 管理后台各页签说明文案**：AdminView 页面顶部说明改为按 activeTab 动态取键（admin.copyOverview/Users/Security/Brand/Locks/System），三语与各页签实际功能匹配；提交 `3ad7e51`。
+- **#3 导航顺序调整**：顶栏顺序改为 我的文件 → 我的收集 → 我的分享 → 同步任务 → 日志 → 系统设置；`nav.shares`/`page.shares`/`shares.heading` 改「我的分享」，`nav.admin` 改「系统设置」（nav.system 键）；提交 `8ddd6f5`。
+- **#4 操作日志时间范围筛选**：GET /api/logs 支持 from/to（RFC3339 校验，非法 400），store `ListAuditLogs` 增加 created_at >= / <= 范围条件（含边界）；LogsView 增加开始/结束 datetime-local 输入，空值不传参；补 store/httpapi 两层单测（`TestAuditLogsTimeRangeFilter`/`TestLogsEndpointTimeRangeFilter`）；提交 `c0b7814`/`540aeac`/`aff8d04`。
+- **#5 同步任务密码入库+可查看**：凭据 AES-GCM 加密入库与编辑留空保留（`__keep__`）为既有能力；新增 `GET /api/sync/systems/{id}/secret`（仅属主/admin，解密返回 secret/authPassphrase 一次，审计 sync_system_secret_view）；SyncView 密码框显示"已保存"占位 + 眼睛图标查看/隐藏；补 `TestSyncSystemSecretEndpoint`；提交 `9598687`。
+- **#6 同步任务执行历史**：任务详情弹窗日志条目展示开始时间/结束时间（finishedAt 存在时）/结果（running/success/failure）；与 #9 的 sync_logs 结构协同；提交 `9598687`。
+- **#7 同步目录选择增强**：picker 增加当前目录名称过滤（本地/远端）；手动输入完整路径 + 确认（远端路径 browse 校验，失败留在弹窗提示）；三语 `sync.filterPlaceholder`/`enterPath`/`confirmPath`/`invalidRemotePath`；提交 `1a51521`。
+- **#8 同步任务列表显示目标**：任务行目标侧显示 SFTP `host:port` 或 FileBox URL host（解析失败回退原始 url），无数据时系统名兜底；提交 `1a51521`。
+- **#9 同步任务日志实时状态**：sync_logs 迁移新增 `finished_at` 列（重建表去掉 result CHECK，保留外键/索引/数据）；executeSyncTask 执行开始写 `running` 行、完成 UPDATE 同一条（`UpdateSyncLogResult`）；失败分支（owner 不可用/只读）直接写 failure 行不遗留 running；publicSyncLog 返回 finishedAt；补 `TestSyncLogRunningResultUpdate`/`TestSyncTaskExecutionCompletesLog`；提交 `05f045e`。
+- **#10 修改密码弹窗化**：顶栏"修改密码"改为居中 modal（AuthenticatedTopbar 内实现，复用 modal-backdrop；旧密码/新密码/确认，提交 POST /api/auth/change-password，成功 saveSession + 提示）；强制改密（must_change_password）仍由路由守卫跳 /change-password 独立页；提交 `05f045e`。
+
 ## 2026-09-01 - v016 深入检视修复批次（38 项）
 
 ### 批次 1（严重）
