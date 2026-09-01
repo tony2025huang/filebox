@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -923,6 +924,37 @@ func TestSharingLifecycleAndAtomicDownloadLimit(t *testing.T) {
 	}
 }
 
+// TestCheckInstantUploadReturns500WhenConflictLookupFails verifies conflict lookup errors do not permit instant upload.
+// TestCheckInstantUploadReturns500WhenConflictLookupFails 验证冲突查询失败时不会放行秒传。
+func TestCheckInstantUploadReturns500WhenConflictLookupFails(t *testing.T) {
+	db, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.EnsureAdmin("admin", "admin123", 32*1024*1024); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.DB.Exec("UPDATE users SET must_change_password = 0 WHERE username = 'admin'"); err != nil {
+		t.Fatal(err)
+	}
+	server := NewServer(db, Config{DataDir: db.DataDir, MaxFileSize: 32 * 1024 * 1024, JWTSecret: []byte("test-secret")})
+	handler := server.Handler()
+	token := testAdminToken(t, handler)
+	file := uploadTestFile(t, handler, token, "instant-error.txt", "text/plain", []byte("instant content"))
+	server.findUploadConflict = func(context.Context, int64, string, string) (store.File, error) {
+		return store.File{}, errors.New("injected conflict lookup failure")
+	}
+	body, err := json.Marshal(map[string]any{"sha256": file["sha256"], "size": file["size"], "name": "different-target.txt"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	check := testJSONRequest(t, handler, http.MethodPost, "/api/files/check", token, string(body))
+	if check.Code != http.StatusInternalServerError {
+		t.Fatalf("instant check with conflict lookup error = %d: %s", check.Code, check.Body.String())
+	}
+}
+
 func TestSharePreviewLimitsLargeTextAndRange(t *testing.T) {
 	_, handler := newTestServer(t)
 	token := testAdminToken(t, handler)
@@ -1191,7 +1223,7 @@ func TestShareManagementAndOwnerDownloadLogs(t *testing.T) {
 	if meta := testJSONRequest(t, handler, http.MethodGet, "/api/files/shared/"+shareToken+"/meta", "", ""); meta.Code != http.StatusNotFound {
 		t.Fatalf("revoked meta = %d: %s", meta.Code, meta.Body.String())
 	}
-	if down := testBinaryRequest(t, handler, http.MethodGet, "/api/files/shared/"+shareToken+"/download", "", nil); down.Code != http.StatusForbidden {
+	if down := testBinaryRequest(t, handler, http.MethodGet, "/api/files/shared/"+shareToken+"/download", "", nil); down.Code != http.StatusNotFound {
 		t.Fatalf("revoked download = %d: %s", down.Code, down.Body.String())
 	}
 	var revokedReason string

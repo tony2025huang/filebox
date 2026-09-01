@@ -9,6 +9,8 @@ import (
 	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -66,6 +68,36 @@ func TestFileBoxRemoteClientRejectsMalformedBrowseEntry(t *testing.T) {
 	client := &fileBoxRemoteClient{baseURL: remote.URL, http: remote.Client()}
 	if _, err := client.findFile(context.Background(), "", "bad.txt"); err == nil {
 		t.Fatal("malformed browse entry unexpectedly succeeded")
+	}
+}
+
+// TestFileBoxDownloadUsesDataDirectoryTemp verifies FileBox pull staging stays on the data volume.
+// TestFileBoxDownloadUsesDataDirectoryTemp 验证 FileBox 拉取暂存文件位于数据目录所在卷。
+func TestFileBoxDownloadUsesDataDirectoryTemp(t *testing.T) {
+	dataDir := t.TempDir()
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/files/1/download" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = w.Write([]byte("downloaded"))
+	}))
+	defer remote.Close()
+	client := &fileBoxRemoteClient{baseURL: remote.URL, http: remote.Client()}
+	tempPath, size, err := client.downloadFile(context.Background(), 1, dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(tempPath)
+	if size != int64(len("downloaded")) || filepath.Dir(filepath.Dir(tempPath)) != dataDir || filepath.Base(filepath.Dir(tempPath)) != "tmp" {
+		t.Fatalf("download temp path = %q, size = %d; want under %s\\tmp with size %d", tempPath, size, dataDir, len("downloaded"))
+	}
+	content, err := os.ReadFile(tempPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != "downloaded" {
+		t.Fatalf("downloaded content = %q", content)
 	}
 }
 

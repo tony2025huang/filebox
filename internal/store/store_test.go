@@ -564,6 +564,63 @@ func TestPruneAuditLogsRemovesExpiredRecords(t *testing.T) {
 	}
 }
 
+// TestAddAuditLogOnlyInsertsWithoutPruning verifies audit writes do not delete retained records.
+// TestAddAuditLogOnlyInsertsWithoutPruning 验证审计写入只插入记录，不清理已有记录。
+func TestAddAuditLogOnlyInsertsWithoutPruning(t *testing.T) {
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	old := time.Now().UTC().Add(-31 * 24 * time.Hour).Format(time.RFC3339)
+	if _, err := db.DB.Exec("INSERT INTO audit_logs(user_id, username, action, target, ip, result, reason, created_at) VALUES(NULL, ?, ?, ?, ?, ?, ?, ?)", "audit-user", "old", "", "-", "success", "", old); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	for _, action := range []string{"first", "second"} {
+		if err := db.AddAuditLog(ctx, nil, "audit-user", action, "", "-", "success", ""); err != nil {
+			t.Fatalf("AddAuditLog(%q) = %v", action, err)
+		}
+	}
+	var count int
+	if err := db.DB.QueryRow("SELECT COUNT(id) FROM audit_logs").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 3 {
+		t.Fatalf("audit log count after writes = %d, want 3", count)
+	}
+}
+
+// TestConsumeTOTPRejectsReplayedAndOlderCounters verifies monotonic replay protection across time windows.
+// TestConsumeTOTPRejectsReplayedAndOlderCounters 验证跨时间窗口拒绝相同及更旧的动态码计数器。
+func TestConsumeTOTPRejectsReplayedAndOlderCounters(t *testing.T) {
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.EnsureAdmin("admin", "admin123", 1024); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	firstAt := time.Date(2026, time.August, 31, 12, 0, 0, 0, time.UTC)
+	if accepted, err := db.ConsumeTOTP(ctx, 1, 100, firstAt); err != nil || !accepted {
+		t.Fatalf("first TOTP consumption = %t, %v; want true, nil", accepted, err)
+	}
+	if accepted, err := db.ConsumeTOTP(ctx, 1, 100, firstAt.Add(2*time.Hour)); err != nil || accepted {
+		t.Fatalf("same-counter TOTP replay = %t, %v; want false, nil", accepted, err)
+	}
+	if accepted, err := db.ConsumeTOTP(ctx, 1, 99, firstAt.Add(2*time.Hour)); err != nil || accepted {
+		t.Fatalf("older-counter TOTP replay = %t, %v; want false, nil", accepted, err)
+	}
+	if accepted, err := db.ConsumeTOTP(ctx, 1, 101, firstAt.Add(2*time.Hour)); err != nil || !accepted {
+		t.Fatalf("newer TOTP counter = %t, %v; want true, nil", accepted, err)
+	}
+	if accepted, err := db.ConsumeTOTP(ctx, 1, 100, firstAt.Add(4*time.Hour)); err != nil || accepted {
+		t.Fatalf("counter below maximum replay = %t, %v; want false, nil", accepted, err)
+	}
+}
+
 func TestShareManagementPreservesRevocationAndOwnership(t *testing.T) {
 	db, err := Open(t.TempDir())
 	if err != nil {

@@ -978,8 +978,8 @@ func (s *Store) ActivateTOTP(ctx context.Context, id int64) error {
 	return nil
 }
 
-// ConsumeTOTP atomically rejects replayed counters for sixty seconds.
-// ConsumeTOTP 原子记录动态码计数器并在 60 秒内拒绝重放。
+// ConsumeTOTP atomically records the highest used counter and rejects older counters.
+// ConsumeTOTP 原子记录已使用的最大动态码计数器，并拒绝更旧或相同的计数器。
 func (s *Store) ConsumeTOTP(ctx context.Context, id int64, counter int64, now time.Time) (bool, error) {
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
@@ -990,8 +990,8 @@ func (s *Store) ConsumeTOTP(ctx context.Context, id int64, counter int64, now ti
 		tx.Rollback()
 		return false, err
 	}
-	if parts := strings.SplitN(previous, "|", 2); len(parts) == 2 && parts[0] == strconv.FormatInt(counter, 10) {
-		if timestamp, parseErr := strconv.ParseInt(parts[1], 10, 64); parseErr == nil && now.Unix()-timestamp < 60 {
+	if parts := strings.SplitN(previous, "|", 2); len(parts) > 0 {
+		if lastUsedCounter, parseErr := strconv.ParseInt(parts[0], 10, 64); parseErr == nil && counter <= lastUsedCounter {
 			tx.Rollback()
 			return false, nil
 		}
@@ -2969,6 +2969,8 @@ func normalizeThemeColor(value string) string {
 	return value
 }
 
+// AddAuditLog records one audit event without pruning existing records.
+// AddAuditLog 写入一条审计事件，不在写入路径清理已有记录。
 func (s *Store) AddAuditLog(ctx context.Context, userID *int64, username, action, target, ip, result, reason string) error {
 	return s.AddAuditLogWithShareOwner(ctx, userID, nil, username, action, target, ip, result, reason)
 }
@@ -2976,27 +2978,9 @@ func (s *Store) AddAuditLog(ctx context.Context, userID *int64, username, action
 // AddAuditLogWithShareOwner records an audit event and links anonymous share activity to its creator.
 // AddAuditLogWithShareOwner 写入审计事件，并将匿名分享活动关联到分享创建者。
 func (s *Store) AddAuditLogWithShareOwner(ctx context.Context, userID, shareOwnerID *int64, username, action, target, ip, result, reason string) error {
-	// AddAuditLog 在写入新记录前按留存天数惰性清理旧记录，并与写入保持同一事务。
-	// AddAuditLog lazily prunes old records by retention days before inserting, in the same transaction.
-	settings, err := s.GetLogSettings(ctx)
-	if err != nil {
-		return err
-	}
-	tx, err := s.DB.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	cutoff := time.Now().UTC().Add(-time.Duration(settings.LogRetentionDays) * 24 * time.Hour).Format(time.RFC3339)
-	if _, err := tx.ExecContext(ctx, "DELETE FROM audit_logs WHERE created_at < ?", cutoff); err != nil {
-		tx.Rollback()
-		return err
-	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	if _, err := tx.ExecContext(ctx, "INSERT INTO audit_logs(user_id, share_owner_id, username, action, target, ip, result, reason, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)", userID, shareOwnerID, username, action, target, ip, result, nullableString(reason), now); err != nil {
-		tx.Rollback()
-		return err
-	}
-	return tx.Commit()
+	_, err := s.DB.ExecContext(ctx, "INSERT INTO audit_logs(user_id, share_owner_id, username, action, target, ip, result, reason, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)", userID, shareOwnerID, username, action, target, ip, result, nullableString(reason), now)
+	return err
 }
 
 func (s *Store) ListAuditLogs(ctx context.Context, userID *int64, action, result, keyword string, page, pageSize int) ([]AuditLog, int, error) {

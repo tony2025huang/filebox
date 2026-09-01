@@ -366,8 +366,12 @@ func (c *fileBoxRemoteClient) pushFile(ctx context.Context, localPath, name, dir
 
 // downloadFile 将远端文件流式下载到本地临时文件，返回临时路径与大小。
 // downloadFile streams a remote file into a local temp file and returns its path and size.
-func (c *fileBoxRemoteClient) downloadFile(ctx context.Context, fileID int64) (string, int64, error) {
-	temp, err := os.CreateTemp("", "sync-filebox-download-*")
+func (c *fileBoxRemoteClient) downloadFile(ctx context.Context, fileID int64, dataDir string) (string, int64, error) {
+	tempDir := filepath.Join(dataDir, "tmp")
+	if err := os.MkdirAll(tempDir, 0o755); err != nil {
+		return "", 0, err
+	}
+	temp, err := os.CreateTemp(tempDir, "sync-filebox-download-*")
 	if err != nil {
 		return "", 0, err
 	}
@@ -540,7 +544,7 @@ func (s *Server) executeSyncPullFileBox(ctx context.Context, task store.SyncTask
 				return conflictErr
 			}
 		}
-		tempPath, size, downloadErr := client.downloadFile(ctx, entry.ID)
+		tempPath, size, downloadErr := client.downloadFile(ctx, entry.ID, s.config.DataDir)
 		if downloadErr != nil {
 			return downloadErr
 		}

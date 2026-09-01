@@ -65,11 +65,12 @@ type Config struct {
 // Server 组合持久化存储与 HTTP API 配置。
 // Server combines the persistent store with the HTTP API configuration.
 type Server struct {
-	store       *store.Store
-	config      Config
-	rateLimiter rateLimiter
-	syncMu      sync.Mutex
-	syncLocks   map[int64]*sync.Mutex
+	store              *store.Store
+	config             Config
+	rateLimiter        rateLimiter
+	findUploadConflict func(context.Context, int64, string, string) (store.File, error)
+	syncMu             sync.Mutex
+	syncLocks          map[int64]*sync.Mutex
 }
 
 const uploadChunkIdleTimeout = 30 * time.Second
@@ -321,7 +322,7 @@ func NewServer(db *store.Store, config Config) *Server {
 	if config.JWTExpiry <= 0 {
 		config.JWTExpiry = 7 * 24 * time.Hour
 	}
-	return &Server{store: db, config: config, rateLimiter: rateLimiter{buckets: make(map[int64]*rate.Limiter), lastSeen: make(map[int64]time.Time), publicBuckets: make(map[string]*rate.Limiter), publicLastSeen: make(map[string]time.Time)}, syncLocks: make(map[int64]*sync.Mutex)}
+	return &Server{store: db, config: config, rateLimiter: rateLimiter{buckets: make(map[int64]*rate.Limiter), lastSeen: make(map[int64]time.Time), publicBuckets: make(map[string]*rate.Limiter), publicLastSeen: make(map[string]time.Time)}, findUploadConflict: db.FindUploadConflict, syncLocks: make(map[int64]*sync.Mutex)}
 }
 
 func (s *Server) Handler() http.Handler {
@@ -1089,11 +1090,14 @@ func (s *Server) recordIPFailure(r *http.Request, settings store.LogSettings) {
 // changePassword verifies the old credential, enforces the current policy, and rotates the JWT.
 // changePassword 校验旧密码、执行当前策略并重新签发 JWT。
 func (s *Server) changePassword(w http.ResponseWriter, r *http.Request) {
+	user := currentUser(r.Context())
+	if s.rejectReadOnly(w, r, user, "password_change", user.Username) {
+		return
+	}
 	var input changePasswordRequest
 	if !decodeJSON(w, r, &input) {
 		return
 	}
-	user := currentUser(r.Context())
 	if bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(input.OldPassword)) != nil {
 		writeError(w, http.StatusBadRequest, "旧密码错误")
 		return
@@ -1380,6 +1384,10 @@ func (s *Server) me(w http.ResponseWriter, r *http.Request) {
 // updateLanguage validates and persists the authenticated user's language preference.
 // updateLanguage 校验并保存已登录用户的语言偏好。
 func (s *Server) updateLanguage(w http.ResponseWriter, r *http.Request) {
+	user := currentUser(r.Context())
+	if s.rejectReadOnly(w, r, user, "language_update", user.Username) {
+		return
+	}
 	var input languageRequest
 	if !decodeJSON(w, r, &input) {
 		return
@@ -1388,7 +1396,7 @@ func (s *Server) updateLanguage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "语言设置无效")
 		return
 	}
-	user, err := s.store.UpdateUserLanguage(r.Context(), currentUser(r.Context()).ID, input.Language)
+	user, err := s.store.UpdateUserLanguage(r.Context(), user.ID, input.Language)
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusUnauthorized, "请先登录")
 		return
@@ -2001,7 +2009,7 @@ func (s *Server) checkInstantUpload(w http.ResponseWriter, r *http.Request) {
 		writeData(w, http.StatusOK, "检查完成", map[string]any{"instant": true, "file": publicFile(file)})
 		return
 	}
-	conflict, conflictErr := s.store.FindUploadConflict(r.Context(), user.ID, relativeDir, name)
+	conflict, conflictErr := s.findUploadConflict(r.Context(), user.ID, relativeDir, name)
 	// 目录内存在同名 ready 文件即应触发冲突流程（覆盖/重命名），即使内容相同。
 	// 秒传只应在"目录内无同名文件"时命中——否则用户重复上传同名文件永远静默秒传、
 	// 从不弹冲突窗（问题 2）。FindUploadConflict 查的是目标目录内的同名文件。
@@ -2015,6 +2023,8 @@ func (s *Server) checkInstantUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	if !errors.Is(conflictErr, store.ErrNotFound) {
 		log.Printf("find upload conflict during instant check: %v", conflictErr)
+		writeError(w, http.StatusInternalServerError, "检查文件冲突失败")
+		return
 	}
 	// 秒传命中：记录审计（此前无任何日志，问题 9）；target 用本次上传名。
 	// Instant-upload hit: record an audit row (previously nothing was logged); the target is the submitted name.
@@ -2931,7 +2941,7 @@ func (s *Server) shareDownload(w http.ResponseWriter, r *http.Request) {
 		if revoked, revokedErr := s.store.GetShareByTokenIncludingRevoked(r.Context(), token); revokedErr == nil && revoked.RevokedAt != "" {
 			shareOwnerID = &revoked.CreatedBy
 			reason = "share_revoked"
-			writeError(w, http.StatusForbidden, "分享已撤销")
+			writeError(w, http.StatusNotFound, "分享不存在")
 			return
 		}
 		writeError(w, http.StatusNotFound, "分享不存在")
@@ -3017,7 +3027,7 @@ func (s *Server) sharePreview(w http.ResponseWriter, r *http.Request) {
 		if revoked, revokedErr := s.store.GetShareByTokenIncludingRevoked(r.Context(), token); revokedErr == nil && revoked.RevokedAt != "" {
 			shareOwnerID = &revoked.CreatedBy
 			reason = "share_revoked"
-			writeError(w, http.StatusForbidden, "分享已撤销")
+			writeError(w, http.StatusNotFound, "分享不存在")
 			return
 		}
 		writeError(w, http.StatusNotFound, "分享不存在")
@@ -3968,8 +3978,8 @@ func validThemeColor(value string) bool {
 }
 
 func (s *Server) recordAudit(r *http.Request, userID *int64, username, action, target, result, reason string) {
-	// recordAudit 统一写入来源 IP 和业务结果；清理由存储层按留存设置惰性执行。
-	// recordAudit centralizes source-IP and outcome recording; the store lazily prunes records by retention settings.
+	// recordAudit 统一写入来源 IP 和业务结果；审计清理由后台定时任务执行。
+	// recordAudit centralizes source-IP and outcome recording; audit retention is handled by scheduled cleanup.
 	if err := s.store.AddAuditLog(r.Context(), userID, username, action, target, s.requestIP(r), result, reason); err != nil {
 		log.Printf("write audit log: %v", err)
 	}
@@ -4075,7 +4085,7 @@ func (s *Server) authenticate(r *http.Request) (store.User, error) {
 	}
 	if user.LastLogoutAt != "" {
 		lastLogout, parseErr := time.Parse(time.RFC3339, user.LastLogoutAt)
-		if parseErr == nil && issuedAt.Time.Before(lastLogout) {
+		if parseErr == nil && !issuedAt.Time.After(lastLogout) {
 			return store.User{}, errors.New("invalid token")
 		}
 	}

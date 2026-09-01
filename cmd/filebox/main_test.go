@@ -301,6 +301,16 @@ func TestJWTSecretValidation(t *testing.T) {
 	if _, _, err := resolveJWTSecret(emptyDir, false, false, "", true); err == nil {
 		t.Fatal("resolveJWTSecret accepted an empty secrets.json JWT secret")
 	}
+	shortDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(shortDir, "config"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeSecretsFile(filepath.Join(shortDir, "config", "secrets.json"), secretsFilePayload{JWTSecret: "short"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := resolveJWTSecret(shortDir, false, false, "", true); err == nil || !strings.Contains(err.Error(), "regenerate or fix") {
+		t.Fatalf("resolveJWTSecret accepted short secrets.json JWT secret or omitted repair guidance: %v", err)
+	}
 }
 
 // buildTestArchive 构造一个含指定条目（name/size/内容）的 tar.gz 归档，用于恢复限额测试。

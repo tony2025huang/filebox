@@ -61,6 +61,8 @@ func TestReadOnlyWindowControlsWritesAndExposesState(t *testing.T) {
 	}{
 		{name: "upload init", got: testJSONRequest(t, handler, http.MethodPost, "/api/files/upload-init", userToken, `{"name":"blocked.txt","size":1}`)},
 		{name: "instant upload", got: testJSONRequest(t, handler, http.MethodPost, "/api/files/check", userToken, `{"sha256":"deadbeef","size":1,"name":"blocked.txt"}`)},
+		{name: "change password", got: testJSONRequest(t, handler, http.MethodPost, "/api/auth/change-password", userToken, `{"oldPassword":"Readonly123!","newPassword":"Readonly456!"}`)},
+		{name: "update language", got: testJSONRequest(t, handler, http.MethodPut, "/api/auth/language", userToken, `{"language":"en"}`)},
 		{name: "upload chunk", got: testBinaryRequest(t, handler, http.MethodPut, "/api/files/"+pendingTaskID+"/chunks/0", userToken, []byte("x"))},
 		{name: "upload complete", got: testJSONRequest(t, handler, http.MethodPost, "/api/files/"+pendingTaskID+"/complete", userToken, `{}`)},
 		{name: "file delete", got: testJSONRequest(t, handler, http.MethodDelete, "/api/files/"+formatID(fileID), userToken, "")},

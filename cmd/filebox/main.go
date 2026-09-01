@@ -531,8 +531,8 @@ func resolveJWTSecret(dataDir string, flagSet, envSet bool, explicitValue string
 	secretFile := filepath.Join(dataDir, "config", "secrets.json")
 	payload, readErr := readSecretsFile(secretFile)
 	if readErr == nil {
-		if payload.JWTSecret == "" {
-			return "", "", fmt.Errorf("JWT secret in %s is empty: re-run with --jwt-secret or recreate the file", secretFile)
+		if err := validateJWTSecret(payload.JWTSecret); err != nil {
+			return "", "", fmt.Errorf("invalid JWT secret in %s: %v; regenerate or fix the file, or re-run with --jwt-secret", secretFile, err)
 		}
 		return payload.JWTSecret, "secrets.json", nil
 	}
