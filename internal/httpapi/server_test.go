@@ -1373,6 +1373,43 @@ func TestShareManagementAndOwnerDownloadLogs(t *testing.T) {
 	}
 }
 
+func TestLogsEndpointTimeRangeFilter(t *testing.T) {
+	db, handler := newTestServer(t)
+	token := testAdminToken(t, handler)
+	admin, err := db.GetUserByUsername("admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 管理员登录已写入一条审计日志（created_at=当前时间）。
+	base := time.Now().UTC()
+	from := base.Add(-24 * time.Hour).Format(time.RFC3339)
+	to := base.Add(24 * time.Hour).Format(time.RFC3339)
+	_ = admin
+	ranged := testJSONRequest(t, handler, http.MethodGet, "/api/logs?from="+url.QueryEscape(from)+"&to="+url.QueryEscape(to), token, "")
+	if ranged.Code != http.StatusOK {
+		t.Fatalf("ranged logs = %d: %s", ranged.Code, ranged.Body.String())
+	}
+	total := responseData(t, ranged)["total"].(float64)
+	if total < 1 {
+		t.Fatalf("ranged logs total = %v, want >= 1 (login audit within window)", total)
+	}
+	// 未来区间：不应命中当前日志。
+	future := testJSONRequest(t, handler, http.MethodGet, "/api/logs?from="+url.QueryEscape(base.Add(48*time.Hour).Format(time.RFC3339)), token, "")
+	if future.Code != http.StatusOK || responseData(t, future)["total"] != float64(0) {
+		t.Fatalf("future-window logs = %d: %s", future.Code, future.Body.String())
+	}
+	// 非法 from：400。
+	invalid := testJSONRequest(t, handler, http.MethodGet, "/api/logs?from=not-a-time", token, "")
+	if invalid.Code != http.StatusBadRequest {
+		t.Fatalf("invalid from status = %d, want 400", invalid.Code)
+	}
+	// 非法 to：400。
+	invalidTo := testJSONRequest(t, handler, http.MethodGet, "/api/logs?to=2026-99-99T00:00:00Z", token, "")
+	if invalidTo.Code != http.StatusBadRequest {
+		t.Fatalf("invalid to status = %d, want 400", invalidTo.Code)
+	}
+}
+
 func TestBatchDeleteFilesEndpointDeletesAtomically(t *testing.T) {
 	db, handler := newTestServer(t)
 	token := testAdminToken(t, handler)

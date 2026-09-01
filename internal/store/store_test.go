@@ -701,6 +701,57 @@ func TestConsumeTOTPRejectsReplayedAndOlderCounters(t *testing.T) {
 	}
 }
 
+func TestAuditLogsTimeRangeFilter(t *testing.T) {
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.EnsureAdmin("admin", "admin123", 1024*1024); err != nil {
+		t.Fatal(err)
+	}
+	user, err := db.GetUserByUsername("admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	base := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	// 直接写入三条不同时间点的审计日志（created_at 为 RFC3339 文本）。
+	// Insert three audit entries at distinct timestamps (created_at is RFC3339 text).
+	for i, offset := range []time.Duration{-48 * time.Hour, 0, 48 * time.Hour} {
+		at := base.Add(offset).Format(time.RFC3339)
+		if _, err := db.DB.ExecContext(ctx, "INSERT INTO audit_logs(user_id, share_owner_id, username, action, target, ip, result, reason, created_at) VALUES(?, NULL, ?, 'login', 'time-range', '127.0.0.1', 'success', NULL, ?)", user.ID, user.Username, at); err != nil {
+			t.Fatalf("insert audit log %d: %v", i, err)
+		}
+	}
+	// 空 from/to：返回全部三条。
+	all, total, err := db.ListAuditLogs(ctx, &user.ID, "", "", "", "", "", 1, 20)
+	if err != nil || total != 3 || len(all) != 3 {
+		t.Fatalf("no-range logs = %d, total=%d, err=%v", len(all), total, err)
+	}
+	// 仅 from：包含边界当天（>= 基准时间）→ 应命中 3 条中的 2 条（当天与未来）。
+	fromOnly, totalFrom, err := db.ListAuditLogs(ctx, &user.ID, "", "", "", base.Format(time.RFC3339), "", 1, 20)
+	if err != nil || totalFrom != 2 || len(fromOnly) != 2 {
+		t.Fatalf("from-only logs = %d, total=%d, err=%v", len(fromOnly), totalFrom, err)
+	}
+	// 仅 to：<= 基准时间 → 2 条（过去与当天，含边界）。
+	toOnly, totalTo, err := db.ListAuditLogs(ctx, &user.ID, "", "", "", "", base.Format(time.RFC3339), 1, 20)
+	if err != nil || totalTo != 2 || len(toOnly) != 2 {
+		t.Fatalf("to-only logs = %d, total=%d, err=%v", len(toOnly), totalTo, err)
+	}
+	// from+to 同时给出：过去 24h 内 → 1 条。
+	both, totalBoth, err := db.ListAuditLogs(ctx, &user.ID, "", "", "", base.Add(-24*time.Hour).Format(time.RFC3339), base.Add(24*time.Hour).Format(time.RFC3339), 1, 20)
+	if err != nil || totalBoth != 1 || len(both) != 1 || both[0].CreatedAt == "" {
+		_ = both
+		t.Fatalf("both-range logs = total=%d, err=%v", totalBoth, err)
+	}
+	// 完全未来区间：0 条。
+	future, totalFuture, err := db.ListAuditLogs(ctx, &user.ID, "", "", "", base.Add(96*time.Hour).Format(time.RFC3339), base.Add(120*time.Hour).Format(time.RFC3339), 1, 20)
+	if err != nil || totalFuture != 0 || len(future) != 0 {
+		t.Fatalf("future-range logs = %d, total=%d, err=%v", len(future), totalFuture, err)
+	}
+}
+
 func TestShareManagementPreservesRevocationAndOwnership(t *testing.T) {
 	db, err := Open(t.TempDir())
 	if err != nil {
