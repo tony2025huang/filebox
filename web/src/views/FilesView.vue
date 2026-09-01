@@ -38,16 +38,16 @@
 </template>
 
 <script setup>
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import { api, clearSession, computeFileSHA256, localizeError } from '../api'
 import AuthenticatedTopbar from '../components/AuthenticatedTopbar.vue'
 import BrandFooter from '../components/BrandFooter.vue'
 import { brand } from '../brand'
 import { currentLocale, t } from '../i18n'
-import { Archive, CheckCircle2, ChevronLeft, ChevronRight, Copy, Download, ExternalLink, Eye, File, FileArchive, FileCode, FileEdit, FileImage, FileJson, FileSpreadsheet, FileText, FileType, FileUp, FileVideo, Folder, FolderOpen, FolderPlus, FolderUp, Gauge, Image, LoaderCircle, Music, Pause, Pencil, Play, RefreshCw, Replace, Save, Search, Share2, Table, Trash2, Upload, UploadCloud, Video, X, ArrowLeftRight } from 'lucide-vue-next'
+import { Archive, CheckCircle2, ChevronLeft, ChevronRight, Copy, Download, ExternalLink, Eye, File, FileArchive, FileCode, FileEdit, FileJson, FileSpreadsheet, FileText, FileType, FileUp, Folder, FolderOpen, FolderPlus, FolderUp, Gauge, Image, LoaderCircle, Music, Pause, Pencil, Play, RefreshCw, Replace, Save, Search, Share2, Trash2, Upload, UploadCloud, Video, X, ArrowLeftRight } from 'lucide-vue-next'
 
-const router = useRouter(); const route = useRoute(); const user = ref(JSON.parse(localStorage.getItem('filebox_user') || '{}')); const files = ref([]); const total = ref(0); const page = ref(1); const pageSize = 20; const keyword = ref(''); const searchInput = ref(''); const loading = ref(false); const error = ref(''); const notice = ref(''); const dragging = ref(false); const uploads = ref([]); const downloads = ref([]); const transfersOpen = ref(false); const showMd5 = ref(localStorage.getItem('filebox_show_md5') !== '0'); const fileInput = ref(null); const folderInput = ref(null); const conflictQueue = ref([]); const currentDir = ref(''); const folders = ref([]); const folderPrompt = ref(null); const folderSaving = ref(false); const folderError = ref('')
+const router = useRouter(); const user = ref(JSON.parse(localStorage.getItem('filebox_user') || '{}')); const files = ref([]); const total = ref(0); const page = ref(1); const pageSize = 20; const keyword = ref(''); const searchInput = ref(''); const loading = ref(false); const error = ref(''); const notice = ref(''); const dragging = ref(false); const uploads = ref([]); const downloads = ref([]); const transfersOpen = ref(false); const showMd5 = ref(localStorage.getItem('filebox_show_md5') !== '0'); const fileInput = ref(null); const folderInput = ref(null); const conflictQueue = ref([]); const currentDir = ref(''); const folders = ref([]); const folderPrompt = ref(null); const folderSaving = ref(false); const folderError = ref('')
 const shareFile = ref(null); const shareForm = ref({ expiresInHours: 24, maxDownloads: 0 }); const shareResult = ref(null); const shareLoading = ref(false); const shareError = ref(''); const shareNotice = ref(''); const previewFile = ref(null); const previewLoading = ref(false); const previewError = ref(''); const previewUrl = ref(''); const previewText = ref(''); const previewKind = ref(''); const sharedIds = new Set(JSON.parse(localStorage.getItem('filebox_shared_ids') || '[]')); const chunkQueue = []; let activeWorkers = 0; let workerWake = null
 // 多选聚合下载状态：selectedIds 为当前选中文件集合，翻页/搜索时保留已选项。
 // Batch-download selection: selectedIds holds the chosen file ids and survives page/search changes.

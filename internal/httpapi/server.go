@@ -3842,7 +3842,23 @@ func (s *Server) listLogs(w http.ResponseWriter, r *http.Request) {
 		userID = &id
 	}
 	page, pageSize := pagination(r)
-	logs, total, err := s.store.ListAuditLogs(r.Context(), userID, strings.TrimSpace(r.URL.Query().Get("action")), strings.TrimSpace(r.URL.Query().Get("result")), strings.TrimSpace(r.URL.Query().Get("keyword")), page, pageSize)
+	// 时间范围筛选：from/to 接受 RFC3339/ISO8601 字符串，按 audit_logs.created_at（TEXT）比较。
+	// Time-range filter: from/to accept RFC3339/ISO8601 strings compared against audit_logs.created_at (TEXT).
+	from := strings.TrimSpace(r.URL.Query().Get("from"))
+	to := strings.TrimSpace(r.URL.Query().Get("to"))
+	if from != "" {
+		if _, err := time.Parse(time.RFC3339, from); err != nil {
+			writeError(w, http.StatusBadRequest, "开始时间格式无效")
+			return
+		}
+	}
+	if to != "" {
+		if _, err := time.Parse(time.RFC3339, to); err != nil {
+			writeError(w, http.StatusBadRequest, "结束时间格式无效")
+			return
+		}
+	}
+	logs, total, err := s.store.ListAuditLogs(r.Context(), userID, strings.TrimSpace(r.URL.Query().Get("action")), strings.TrimSpace(r.URL.Query().Get("result")), strings.TrimSpace(r.URL.Query().Get("keyword")), from, to, page, pageSize)
 	if err != nil {
 		log.Printf("list audit logs: %v", err)
 		writeError(w, http.StatusInternalServerError, "获取日志失败")

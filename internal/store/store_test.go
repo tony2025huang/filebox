@@ -726,7 +726,7 @@ func TestShareManagementPreservesRevocationAndOwnership(t *testing.T) {
 	if err := db.AddAuditLogWithShareOwner(ctx, nil, &user.ID, "anonymous", "share_download", "managed-token", "127.0.0.1", "failure", "share_limit"); err != nil {
 		t.Fatal(err)
 	}
-	ownerLogs, total, err := db.ListAuditLogs(ctx, &user.ID, "share_download", "", "", 1, 20)
+	ownerLogs, total, err := db.ListAuditLogs(ctx, &user.ID, "share_download", "", "", "", "", 1, 20)
 	if err != nil || total != 1 || len(ownerLogs) != 1 || ownerLogs[0].Reason != "share_limit" {
 		t.Fatalf("owner-visible share logs = %+v, total=%d, err=%v", ownerLogs, total, err)
 	}

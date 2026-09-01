@@ -3036,9 +3036,9 @@ func (s *Store) AddAuditLogWithShareOwner(ctx context.Context, userID, shareOwne
 	return err
 }
 
-func (s *Store) ListAuditLogs(ctx context.Context, userID *int64, action, result, keyword string, page, pageSize int) ([]AuditLog, int, error) {
-	// ListAuditLogs 支持按用户、操作、结果和关键字筛选审计记录并分页返回。
-	// ListAuditLogs filters audit records by user, action, result, and keyword, then returns a page.
+func (s *Store) ListAuditLogs(ctx context.Context, userID *int64, action, result, keyword, from, to string, page, pageSize int) ([]AuditLog, int, error) {
+	// ListAuditLogs 支持按用户、操作、结果、关键字和时间范围筛选审计记录并分页返回。
+	// ListAuditLogs filters audit records by user, action, result, keyword, and time range, then returns a page.
 	where := []string{"1 = 1"}
 	args := []any{}
 	if userID != nil {
@@ -3057,6 +3057,14 @@ func (s *Store) ListAuditLogs(ctx context.Context, userID *int64, action, result
 		where = append(where, "(username LIKE ? OR target LIKE ? OR ip LIKE ? OR reason LIKE ?)")
 		pattern := "%" + keyword + "%"
 		args = append(args, pattern, pattern, pattern, pattern)
+	}
+	if from != "" {
+		where = append(where, "created_at >= ?")
+		args = append(args, from)
+	}
+	if to != "" {
+		where = append(where, "created_at <= ?")
+		args = append(args, to)
 	}
 	condition := strings.Join(where, " AND ")
 	var total int

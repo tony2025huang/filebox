@@ -1411,7 +1411,7 @@ func TestBatchDeleteFilesEndpointDeletesAtomically(t *testing.T) {
 			t.Fatalf("physical file %q still exists, stat error = %v", file.StoragePath, err)
 		}
 	}
-	logs, _, err := db.ListAuditLogs(context.Background(), &admin.ID, "delete", "", "", 1, 20)
+	logs, _, err := db.ListAuditLogs(context.Background(), &admin.ID, "delete", "", "", "", "", 1, 20)
 	if err != nil || len(logs) == 0 || logs[0].Reason != "batch" || logs[0].Result != "success" {
 		t.Fatalf("batch delete audit logs = %+v, %v", logs, err)
 	}
