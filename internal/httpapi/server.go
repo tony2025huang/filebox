@@ -72,6 +72,62 @@ type Server struct {
 	syncLocks   map[int64]*sync.Mutex
 }
 
+const uploadChunkIdleTimeout = 30 * time.Second
+
+// requestBodyWithIdleTimeout closes a stalled upload body and resets the timer after each read.
+// requestBodyWithIdleTimeout 在每次读到数据后重置计时，长时间无数据时关闭上传请求体。
+type requestBodyWithIdleTimeout struct {
+	io.ReadCloser
+	reset chan<- struct{}
+}
+
+func (r *requestBodyWithIdleTimeout) Read(p []byte) (int, error) {
+	n, err := r.ReadCloser.Read(p)
+	if n > 0 {
+		select {
+		case r.reset <- struct{}{}:
+		default:
+		}
+	}
+	return n, err
+}
+
+// copyRequestBodyWithIdleTimeout streams a bounded request body while aborting an idle client.
+// copyRequestBodyWithIdleTimeout 流式读取有大小上限的请求体，并中止空闲客户端。
+func copyRequestBodyWithIdleTimeout(ctx context.Context, dst io.Writer, src io.ReadCloser, maxBytes int64) (int64, error) {
+	reset := make(chan struct{}, 1)
+	done := make(chan struct{})
+	var closeOnce sync.Once
+	closeBody := func() { closeOnce.Do(func() { _ = src.Close() }) }
+	go func() {
+		timer := time.NewTimer(uploadChunkIdleTimeout)
+		defer timer.Stop()
+		for {
+			select {
+			case <-timer.C:
+				closeBody()
+				return
+			case <-reset:
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				timer.Reset(uploadChunkIdleTimeout)
+			case <-ctx.Done():
+				closeBody()
+				return
+			case <-done:
+				return
+			}
+		}
+	}()
+	defer close(done)
+	reader := &requestBodyWithIdleTimeout{ReadCloser: src, reset: reset}
+	return io.Copy(dst, io.LimitReader(reader, maxBytes))
+}
+
 // diskUsageFunc is replaceable in package tests so disk-full behavior can be
 // exercised without depending on the host filesystem's actual free space.
 // diskUsageFunc 可在包内测试中替换，以便不依赖测试机真实磁盘空间验证磁盘保护。
@@ -946,6 +1002,11 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 	result, reason := "failure", "invalid_request"
 	defer func() { s.serviceEvent(r, "register", operator, "result=%s reason=%s", result, reason) }()
 	defer func() { s.recordAudit(r, nil, operator, "register", strings.TrimSpace(input.Username), result, reason) }()
+	if !s.rateLimiter.allowPublicRequest(s.requestIP(r), 5, 5) {
+		reason = "rate_limited"
+		writeError(w, http.StatusTooManyRequests, "请求过于频繁，请稍后重试")
+		return
+	}
 	settings, err := s.store.GetLogSettings(r.Context())
 	if err != nil {
 		reason = "settings_unavailable"
@@ -1301,6 +1362,12 @@ func totpCode(secret string, counter int64) string {
 
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 	user := currentUser(r.Context())
+	if err := s.store.RevokeUserTokens(r.Context(), user.ID); err != nil {
+		log.Printf("revoke user tokens: %v", err)
+		s.serviceEvent(r, "logout", user.Username, "result=failure")
+		writeError(w, http.StatusInternalServerError, "退出登录失败")
+		return
+	}
 	s.serviceEvent(r, "logout", user.Username, "result=success")
 	writeData(w, http.StatusOK, "已退出登录", nil)
 }
@@ -1597,8 +1664,7 @@ func (s *Server) uploadChunk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	hash := sha256.New()
-	limited := io.LimitReader(r.Body, expectedSize+1)
-	written, copyErr := io.Copy(io.MultiWriter(file, hash), limited)
+	written, copyErr := copyRequestBodyWithIdleTimeout(r.Context(), io.MultiWriter(file, hash), r.Body, expectedSize+1)
 	closeErr := file.Close()
 	if copyErr != nil || closeErr != nil {
 		_ = os.Remove(path)
@@ -2323,6 +2389,17 @@ func (s *Server) batchShare(w http.ResponseWriter, r *http.Request) {
 		s.recordAudit(r, &user.ID, user.Username, "batch_share", target, result, reason)
 		s.serviceEvent(r, "batch_share", user.Username, "target=%s result=%s reason=%s", target, result, reason)
 	}()
+	createdTokens := make([]string, 0)
+	defer func() {
+		if result == "success" {
+			return
+		}
+		for _, token := range createdTokens {
+			if err := s.store.DeleteShareByToken(r.Context(), token, user.ID); err != nil {
+				log.Printf("rollback batch share %s: %v", token, err)
+			}
+		}
+	}()
 	var input struct {
 		FileIDs        []int64 `json:"fileIds"`
 		ExpiresInHours int     `json:"expiresInHours"`
@@ -2389,6 +2466,7 @@ func (s *Server) batchShare(w http.ResponseWriter, r *http.Request) {
 				writeError(w, http.StatusInternalServerError, "创建分享链接失败")
 				return
 			}
+			createdTokens = append(createdTokens, token)
 			share, err = s.store.GetShareByToken(r.Context(), token)
 			if err != nil {
 				log.Printf("load batch share: %v", err)
@@ -3992,6 +4070,12 @@ func (s *Server) authenticate(r *http.Request) (store.User, error) {
 		// A 1µs tolerance absorbs the float64 round-trip error of the JWT iat claim (≈±0.5µs); without it a
 		// token issued within a microsecond of a password change could be wrongly rejected as pre-change.
 		if parseErr == nil && issuedAt.Time.Add(time.Microsecond).Before(lastChange) {
+			return store.User{}, errors.New("invalid token")
+		}
+	}
+	if user.LastLogoutAt != "" {
+		lastLogout, parseErr := time.Parse(time.RFC3339, user.LastLogoutAt)
+		if parseErr == nil && issuedAt.Time.Before(lastLogout) {
 			return store.User{}, errors.New("invalid token")
 		}
 	}

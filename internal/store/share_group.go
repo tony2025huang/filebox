@@ -142,7 +142,7 @@ VALUES(?, ?, ?, 0, ?, ?)`, token, createdBy, expiresAt, maxDownloads, now)
 // GetShareGroupByToken loads a non-revoked aggregate share by token.
 func (s *Store) GetShareGroupByToken(ctx context.Context, token string) (ShareGroup, error) {
 	return scanShareGroup(s.DB.QueryRowContext(ctx, `SELECT sg.id, sg.token, sg.created_by, sg.expires_at, sg.download_count, sg.max_downloads, COALESCE(sg.revoked_at, ''), sg.created_at,
-(SELECT COUNT(*) FROM share_group_files WHERE group_id = sg.id)
+(SELECT COUNT(*) FROM share_group_files sgf WHERE sgf.group_id = sg.id AND EXISTS (SELECT 1 FROM files f WHERE f.id = sgf.file_id AND f.status = 'ready'))
 FROM share_groups sg WHERE sg.token = ? AND sg.revoked_at IS NULL`, token))
 }
 
@@ -150,7 +150,7 @@ FROM share_groups sg WHERE sg.token = ? AND sg.revoked_at IS NULL`, token))
 // GetShareGroupByTokenIncludingRevoked includes revoked records for management and error classification.
 func (s *Store) GetShareGroupByTokenIncludingRevoked(ctx context.Context, token string) (ShareGroup, error) {
 	return scanShareGroup(s.DB.QueryRowContext(ctx, `SELECT sg.id, sg.token, sg.created_by, sg.expires_at, sg.download_count, sg.max_downloads, COALESCE(sg.revoked_at, ''), sg.created_at,
-(SELECT COUNT(*) FROM share_group_files WHERE group_id = sg.id)
+(SELECT COUNT(*) FROM share_group_files sgf WHERE sgf.group_id = sg.id AND EXISTS (SELECT 1 FROM files f WHERE f.id = sgf.file_id AND f.status = 'ready'))
 FROM share_groups sg WHERE sg.token = ?`, token))
 }
 
@@ -158,7 +158,7 @@ FROM share_groups sg WHERE sg.token = ?`, token))
 // ListShareGroupsByOwner lists aggregate shares owned by a user (admins may list all).
 func (s *Store) ListShareGroupsByOwner(ctx context.Context, userID int64, admin bool) ([]ShareGroup, error) {
 	query := `SELECT sg.id, sg.token, sg.created_by, sg.expires_at, sg.download_count, sg.max_downloads, COALESCE(sg.revoked_at, ''), sg.created_at,
-(SELECT COUNT(*) FROM share_group_files WHERE group_id = sg.id)
+(SELECT COUNT(*) FROM share_group_files sgf WHERE sgf.group_id = sg.id AND EXISTS (SELECT 1 FROM files f WHERE f.id = sgf.file_id AND f.status = 'ready'))
 FROM share_groups sg`
 	args := []any{}
 	if !admin {

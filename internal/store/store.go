@@ -95,6 +95,7 @@ type User struct {
 	Username           string `json:"username"`
 	PasswordHash       string `json:"-"`
 	LastPasswordChange string `json:"-"`
+	LastLogoutAt       string `json:"-"`
 	Role               string `json:"role"`
 	Language           string `json:"language"`
 	QuotaBytes         int64  `json:"quotaBytes"`
@@ -566,6 +567,7 @@ func (s *Store) migrateUsersSchema() error {
 	}
 	for _, definition := range []struct{ name, sql string }{
 		{"last_password_change", "ALTER TABLE users ADD COLUMN last_password_change TEXT NOT NULL DEFAULT ''"},
+		{"last_logout_at", "ALTER TABLE users ADD COLUMN last_logout_at TEXT NOT NULL DEFAULT ''"},
 		{"must_change_password", "ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0"},
 		{"totp_secret", "ALTER TABLE users ADD COLUMN totp_secret TEXT"},
 		{"totp_enabled", "ALTER TABLE users ADD COLUMN totp_enabled INTEGER NOT NULL DEFAULT 0"},
@@ -787,6 +789,24 @@ func (s *Store) ResetPassword(username, newHash string) (int64, error) {
 	return count, nil
 }
 
+// RevokeUserTokens marks the current time so all tokens issued earlier are rejected.
+// RevokeUserTokens 记录当前时间，使此前签发的全部令牌失效。
+func (s *Store) RevokeUserTokens(ctx context.Context, id int64) error {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	result, err := s.DB.ExecContext(ctx, "UPDATE users SET last_logout_at = ?, updated_at = ? WHERE id = ?", now, now, id)
+	if err != nil {
+		return err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if count == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // ClearIPACL 禁用指定用户的来源 IP 白名单并清空白名单内容。
 // ClearIPACL disables a user's source-IP allowlist and clears its entries.
 func (s *Store) ClearIPACL(username string) (bool, error) {
@@ -801,19 +821,19 @@ func (s *Store) ClearIPACL(username string) (bool, error) {
 func (s *Store) GetUserByUsername(username string) (User, error) {
 	// GetUserByUsername 按唯一用户名读取账户及其登录锁定状态。
 	// GetUserByUsername loads an account and its login-lock state by unique username.
-	return scanUser(s.DB.QueryRow("SELECT id, username, password_hash, COALESCE(last_password_change, ''), role, language, quota_bytes, used_bytes, disabled, failed_attempts, COALESCE(locked_until, ''), COALESCE(must_change_password, 0), COALESCE(totp_secret, ''), COALESCE(totp_enabled, 0), COALESCE(last_used_totp, ''), COALESCE(ip_acl_enabled, 0), COALESCE(ip_whitelist, ''), COALESCE(read_only_from, ''), COALESCE(read_only_until, ''), created_at, updated_at FROM users WHERE username = ?", username))
+	return scanUser(s.DB.QueryRow("SELECT id, username, password_hash, COALESCE(last_password_change, ''), COALESCE(last_logout_at, ''), role, language, quota_bytes, used_bytes, disabled, failed_attempts, COALESCE(locked_until, ''), COALESCE(must_change_password, 0), COALESCE(totp_secret, ''), COALESCE(totp_enabled, 0), COALESCE(last_used_totp, ''), COALESCE(ip_acl_enabled, 0), COALESCE(ip_whitelist, ''), COALESCE(read_only_from, ''), COALESCE(read_only_until, ''), created_at, updated_at FROM users WHERE username = ?", username))
 }
 
 func (s *Store) GetUser(id int64) (User, error) {
 	// GetUser 按账户 ID 读取用户记录。
 	// GetUser loads a user record by account ID.
-	return scanUser(s.DB.QueryRow("SELECT id, username, password_hash, COALESCE(last_password_change, ''), role, language, quota_bytes, used_bytes, disabled, failed_attempts, COALESCE(locked_until, ''), COALESCE(must_change_password, 0), COALESCE(totp_secret, ''), COALESCE(totp_enabled, 0), COALESCE(last_used_totp, ''), COALESCE(ip_acl_enabled, 0), COALESCE(ip_whitelist, ''), COALESCE(read_only_from, ''), COALESCE(read_only_until, ''), created_at, updated_at FROM users WHERE id = ?", id))
+	return scanUser(s.DB.QueryRow("SELECT id, username, password_hash, COALESCE(last_password_change, ''), COALESCE(last_logout_at, ''), role, language, quota_bytes, used_bytes, disabled, failed_attempts, COALESCE(locked_until, ''), COALESCE(must_change_password, 0), COALESCE(totp_secret, ''), COALESCE(totp_enabled, 0), COALESCE(last_used_totp, ''), COALESCE(ip_acl_enabled, 0), COALESCE(ip_whitelist, ''), COALESCE(read_only_from, ''), COALESCE(read_only_until, ''), created_at, updated_at FROM users WHERE id = ?", id))
 }
 
 func scanUser(row *sql.Row) (User, error) {
 	var user User
 	var disabled, mustChange, totpEnabled, ipACLEnabled int
-	err := row.Scan(&user.ID, &user.Username, &user.PasswordHash, &user.LastPasswordChange, &user.Role, &user.Language, &user.QuotaBytes, &user.UsedBytes, &disabled, &user.FailedAttempts, &user.LockedUntil, &mustChange, &user.TOTPSecret, &totpEnabled, &user.LastUsedTOTP, &ipACLEnabled, &user.IPWhitelist, &user.ReadOnlyFrom, &user.ReadOnlyUntil, &user.CreatedAt, &user.UpdatedAt)
+	err := row.Scan(&user.ID, &user.Username, &user.PasswordHash, &user.LastPasswordChange, &user.LastLogoutAt, &user.Role, &user.Language, &user.QuotaBytes, &user.UsedBytes, &disabled, &user.FailedAttempts, &user.LockedUntil, &mustChange, &user.TOTPSecret, &totpEnabled, &user.LastUsedTOTP, &ipACLEnabled, &user.IPWhitelist, &user.ReadOnlyFrom, &user.ReadOnlyUntil, &user.CreatedAt, &user.UpdatedAt)
 	user.Disabled = disabled != 0
 	user.MustChangePassword = mustChange != 0
 	user.TOTPEnabled = totpEnabled != 0
@@ -2017,8 +2037,19 @@ func (s *Store) PruneShares(ctx context.Context, retentionDays int) (int64, erro
 		retentionDays = 0
 	}
 	cutoff := time.Now().UTC().Add(-time.Duration(retentionDays) * 24 * time.Hour).Format(time.RFC3339)
-	result, err := s.DB.ExecContext(ctx, `DELETE FROM shares WHERE (revoked_at IS NOT NULL AND revoked_at < ?) OR (revoked_at IS NULL AND expires_at < ?)`, cutoff, cutoff)
+	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `DELETE FROM shares WHERE (revoked_at IS NOT NULL AND revoked_at < ?) OR (revoked_at IS NULL AND expires_at < ?)`, cutoff, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM share_groups WHERE (revoked_at IS NOT NULL AND revoked_at < ?) OR (revoked_at IS NULL AND expires_at < ?)`, cutoff, cutoff); err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
 	return result.RowsAffected()

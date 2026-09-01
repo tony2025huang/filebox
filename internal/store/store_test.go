@@ -479,7 +479,20 @@ func TestPruneSharesRemovesRevokedAndExpired(t *testing.T) {
 		t.Fatal(err)
 	}
 	old := time.Now().UTC().Add(-30 * 24 * time.Hour).Format(time.RFC3339)
+	groupExpiry := time.Now().UTC().Add(24 * time.Hour).Format(time.RFC3339)
+	if _, _, err := db.CreateShareGroup(ctx, user.ID, "prune-group-revoked", []int64{fileID}, groupExpiry, 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := db.CreateShareGroup(ctx, user.ID, "prune-group-expired", []int64{fileID}, old, 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := db.CreateShareGroup(ctx, user.ID, "prune-group-active", []int64{fileID}, groupExpiry, 0); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := db.DB.Exec("UPDATE shares SET revoked_at = ? WHERE token = ?", old, "prune-revoked"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.DB.Exec("UPDATE share_groups SET revoked_at = ? WHERE token = ?", old, "prune-group-revoked"); err != nil {
 		t.Fatal(err)
 	}
 	removed, err := db.PruneShares(ctx, 7)
@@ -495,6 +508,16 @@ func TestPruneSharesRemovesRevokedAndExpired(t *testing.T) {
 	}
 	if remaining != 1 {
 		t.Fatalf("shares remaining = %d, want 1", remaining)
+	}
+	var remainingGroups, remainingGroupFiles int
+	if err := db.DB.QueryRow("SELECT COUNT(id) FROM share_groups").Scan(&remainingGroups); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.DB.QueryRow("SELECT COUNT(id) FROM share_group_files").Scan(&remainingGroupFiles); err != nil {
+		t.Fatal(err)
+	}
+	if remainingGroups != 1 || remainingGroupFiles != 1 {
+		t.Fatalf("share groups remaining = %d, files = %d; want 1, 1", remainingGroups, remainingGroupFiles)
 	}
 	// 最近撤销（未超过留存期）不删除
 	if _, err := db.DB.Exec("UPDATE shares SET revoked_at = ? WHERE token = ?", time.Now().UTC().Format(time.RFC3339), "prune-active"); err != nil {

@@ -611,7 +611,7 @@ func (s *Server) collectionUploadChunk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	hash := sha256.New()
-	written, copyErr := io.Copy(io.MultiWriter(file, hash), io.LimitReader(r.Body, expectedSize+1))
+	written, copyErr := copyRequestBodyWithIdleTimeout(r.Context(), io.MultiWriter(file, hash), r.Body, expectedSize+1)
 	closeErr := file.Close()
 	if copyErr != nil || closeErr != nil {
 		_ = os.Remove(path)

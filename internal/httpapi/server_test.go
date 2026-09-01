@@ -1305,6 +1305,71 @@ func TestRateLimiterRebuildsWhenRateChanges(t *testing.T) {
 	}
 }
 
+// TestLogoutRevokesJWT ensures a token cannot authenticate after logout.
+// TestLogoutRevokesJWT 确保令牌登出后不能继续通过认证。
+func TestLogoutRevokesJWT(t *testing.T) {
+	_, handler := newTestServer(t)
+	token := testAdminToken(t, handler)
+	logout := testJSONRequest(t, handler, http.MethodPost, "/api/auth/logout", token, "")
+	if logout.Code != http.StatusOK {
+		t.Fatalf("logout status = %d: %s", logout.Code, logout.Body.String())
+	}
+	me := testJSONRequest(t, handler, http.MethodGet, "/api/auth/me", token, "")
+	if me.Code != http.StatusUnauthorized {
+		t.Fatalf("request with logged-out token = %d: %s", me.Code, me.Body.String())
+	}
+}
+
+// TestBatchShareRollsBackCreatedShares ensures a later create failure leaves no active links.
+// TestBatchShareRollsBackCreatedShares 确保后续创建失败时不留下有效分享链接。
+func TestBatchShareRollsBackCreatedShares(t *testing.T) {
+	db, handler := newTestServer(t)
+	token := testAdminToken(t, handler)
+	first := uploadTestFile(t, handler, token, "rollback-first.txt", "text/plain", []byte("first"))
+	second := uploadTestFile(t, handler, token, "rollback-second.txt", "text/plain", []byte("second"))
+	firstID := int64(first["id"].(float64))
+	secondID := int64(second["id"].(float64))
+	trigger := "CREATE TRIGGER fail_batch_share_second BEFORE INSERT ON shares WHEN NEW.file_id = " + strconv.FormatInt(secondID, 10) + " BEGIN SELECT RAISE(ABORT, 'forced batch share failure'); END"
+	if _, err := db.DB.Exec(trigger); err != nil {
+		t.Fatal(err)
+	}
+	created := testJSONRequest(t, handler, http.MethodPost, "/api/files/batch-share", token, `{"fileIds":[`+strconv.FormatInt(firstID, 10)+`,`+strconv.FormatInt(secondID, 10)+`],"expiresInHours":24}`)
+	if created.Code != http.StatusInternalServerError {
+		t.Fatalf("failed batch share status = %d: %s", created.Code, created.Body.String())
+	}
+	var active, total int
+	if err := db.DB.QueryRow("SELECT COUNT(id) FROM shares WHERE revoked_at IS NULL").Scan(&active); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.DB.QueryRow("SELECT COUNT(id) FROM shares").Scan(&total); err != nil {
+		t.Fatal(err)
+	}
+	if active != 0 || total != 1 {
+		t.Fatalf("shares after rollback = active %d, total %d; want 0, 1 revoked record", active, total)
+	}
+}
+
+// TestRegistrationRateLimit rejects the sixth registration request from one IP in a minute.
+// TestRegistrationRateLimit 限制同一 IP 每分钟最多发起五次注册请求。
+func TestRegistrationRateLimit(t *testing.T) {
+	_, handler := newTestServer(t)
+	adminToken := testAdminToken(t, handler)
+	settings := testJSONRequest(t, handler, http.MethodPut, "/api/admin/settings", adminToken, `{"registerEnabled":true}`)
+	if settings.Code != http.StatusOK {
+		t.Fatalf("enable registration status = %d: %s", settings.Code, settings.Body.String())
+	}
+	for index := 0; index < 5; index++ {
+		request := testJSONRequest(t, handler, http.MethodPost, "/api/auth/register", "", `{}`)
+		if request.Code == http.StatusTooManyRequests {
+			t.Fatalf("registration request %d was rate limited too early", index+1)
+		}
+	}
+	limited := testJSONRequest(t, handler, http.MethodPost, "/api/auth/register", "", `{}`)
+	if limited.Code != http.StatusTooManyRequests {
+		t.Fatalf("sixth registration status = %d: %s", limited.Code, limited.Body.String())
+	}
+}
+
 // TestReuploadAfterDeleteReusesStoragePath 覆盖删除后重传同名文件不再触发 storage_path 唯一约束（回归 D-FIX）。
 // TestReuploadAfterDeleteReusesStoragePath covers re-uploading a deleted name without hitting the storage_path UNIQUE constraint.
 func TestReuploadAfterDeleteReusesStoragePath(t *testing.T) {

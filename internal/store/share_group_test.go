@@ -90,3 +90,54 @@ func TestShareGroupExtendAndIncreaseLimits(t *testing.T) {
 		t.Fatalf("expiry on revoked group error = %v", err)
 	}
 }
+
+// TestShareGroupFileCountMatchesReadyMembers ensures metadata matches the public file list.
+// TestShareGroupFileCountMatchesReadyMembers 确保元数据计数与公开文件列表只统计 ready 成员。
+func TestShareGroupFileCountMatchesReadyMembers(t *testing.T) {
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.EnsureAdmin("admin", "admin123", 1024*1024); err != nil {
+		t.Fatal(err)
+	}
+	user, err := db.GetUserByUsername("admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	fileIDs := make([]int64, 0, 3)
+	for index := 0; index < 3; index++ {
+		result, err := db.DB.Exec("INSERT INTO files(user_id, name, stored_name, size, mime, sha256, md5, status, storage_path, created_at) VALUES(?, ?, ?, 1, 'text/plain', 'sha', 'md5', 'ready', ?, ?)", user.ID, "count-"+strconv.Itoa(index), "count-"+strconv.Itoa(index), "files/"+strconv.FormatInt(user.ID, 10)+"/count-"+strconv.Itoa(index), now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fileID, err := result.LastInsertId()
+		if err != nil {
+			t.Fatal(err)
+		}
+		fileIDs = append(fileIDs, fileID)
+	}
+	if _, _, err := db.CreateShareGroup(context.Background(), user.ID, "ready-count-group", fileIDs, time.Now().UTC().Add(time.Hour).Format(time.RFC3339), 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.DB.Exec("UPDATE files SET status = 'deleted', deleted_at = ? WHERE id = ?", now, fileIDs[0]); err != nil {
+		t.Fatal(err)
+	}
+	group, err := db.GetShareGroupByToken(context.Background(), "ready-count-group")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if group.FileCount != 2 {
+		t.Fatalf("group file count = %d, want 2", group.FileCount)
+	}
+	groups, err := db.ListShareGroupsByOwner(context.Background(), user.ID, false)
+	if err != nil || len(groups) != 1 || groups[0].FileCount != 2 {
+		t.Fatalf("owner group list = %+v, %v", groups, err)
+	}
+	files, err := db.ListShareGroupFiles(context.Background(), group.ID)
+	if err != nil || len(files) != 2 {
+		t.Fatalf("group files = %d, %v", len(files), err)
+	}
+}
