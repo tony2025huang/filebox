@@ -4,6 +4,28 @@ Stage 2 release notes
 
 [中文](RELEASE_NOTES.md)
 
+## v0.2.0-v018 (8 new requirements) release notes
+
+v018 implements 8 new requirements raised by the user. Codex implemented them in small batches (all backend tasks by codex; a few frontend micro-edits were applied directly by the batch lead with identical specifications after codex processes kept terminating without writing); all passed full builds and tests.
+
+### New features and improvements
+
+- **#1 Topbar "System settings" label fix**: after v017 renamed the i18n key `nav.admin` to `nav.system`, the topbar section name looked up the missing key and fell back to the literal text; a section→key mapping (admin→nav.system, sync→nav.syncTasks) restores correct trilingual labels.
+- **#2 Aggregate-share editing**: aggregate share cards gain an eye icon (member-file list dialog) and an edit dialog — add/remove member files (`GET/POST/DELETE /api/shared-groups/{token}/files`) and edit expiry and download limit (`PUT /api/shared-groups/{token}`; expiry must be in the future, the limit cannot be lower than the used count).
+- **#3 Collections buttons on one row**: "Copy link" and "View received files" are grouped on the same row; the link spans the full width.
+- **#4 Sync transfer progress**: in-flight sync tasks show the current file, files done, bytes transferred, and rate (2-second polling of `GET /api/sync/tasks/{id}/progress` with a progress bar).
+- **#5 Sync log columns**: the log area is a table — start time / end time / status (running/ended) / next run (periodic tasks, cron-derived) / files / bytes / detail (expandable per-file lines).
+- **#6 Log time-range UI**: the two datetime-local fields became one "Time range" button with a dropdown panel; either bound is optional.
+- **#7 Pagination enhancements**: the My files / My shares (incl. aggregate shares) / My collections / Logs pages gain per-page-size selectors (10/20/50/100, remembered) and page-number jumping when more than 7 pages; the three list APIs now return page/pageSize/total (cap 100).
+- **#8 Merged folder/file listing**: folders and files share one table (folders first, Folder icon + "Folder" type column, click to enter; rename/delete kept, no checkbox/file actions on folder rows).
+
+### Data and deployment notes
+
+- No database schema changes in this batch (sync_logs schema from v017 is unchanged).
+- New APIs: `GET/POST /api/shared-groups/{token}/files`, `DELETE /api/shared-groups/{token}/files/{fileID}`, `PUT /api/shared-groups/{token}`, `GET /api/sync/tasks/{id}/progress`; `/api/shares`, `/api/collections`, `/api/shares/groups` now return `page/pageSize/total`.
+- Sync progress is in-process state only (not persisted): after a restart an in-flight run reports no progress until the next run, and final results remain authoritative in sync_logs.
+- Verification: `go build ./...` + `go test ./...` all green; 4 new tests (member add/remove & attribute edit, pageSize cap, next-run calculation); `npm run build` + webassets sync passed.
+
 ## v0.2.0-v017 (10 new requirements) release notes
 
 v017 implements 10 new requirements raised by the user. Codex implemented them in small batches (1-2 items per batch, each committed and pushed separately); all passed full builds and tests.

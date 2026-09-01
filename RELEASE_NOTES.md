@@ -4,6 +4,28 @@
 
 [English](RELEASE_NOTES.en.md)
 
+## v0.2.0-v018（8 项新需求批次）发布说明
+
+v018 由用户提出 8 项新需求，codex 分批实施（后端任务全部由 codex 完成，前端小改动因 codex 进程中断由批次负责人按同规格直接应用），全部完成并通过全量构建与测试。
+
+### 新功能与改进
+
+- **#1 顶栏「系统设置」中文修复**：v017 把 i18n 键 `nav.admin` 改名 `nav.system` 后顶栏 section-name 取键失败显示 `nav.admin` 原文；新增 section→键映射（admin→nav.system、sync→nav.syncTasks），三语均正常。
+- **#2 聚合分享编辑增强**：聚合分享卡片新增眼睛图标（查看成员文件列表弹窗）与编辑弹窗——可增删成员文件（`GET/POST/DELETE /api/shared-groups/{token}/files`）、修改到期时间与下载上限（`PUT /api/shared-groups/{token}`，到期须晚于当前、上限不得低于已用次数）。
+- **#3 我的收集按钮同行**：「复制链接」与「查看已收文件」按钮排在同一行，链接整行显示。
+- **#4 同步任务传输进度展示**：执行中同步任务实时显示当前文件、已传文件数、已传字节与速率（`GET /api/sync/tasks/{id}/progress` 每 2 秒轮询，进度条展示）。
+- **#5 同步日志列增强**：日志区改为表格列——开始时间/结束时间/状态（进行中/已结束）/下次执行（周期任务按 cron 计算）/文件数/大小/同步详情（点击展开逐文件明细）。
+- **#6 日志时间筛选 UI**：开始/结束两个 datetime-local 合并为一个「时间范围」按钮 + 下拉面板，任一端留空即不限。
+- **#7 分页增强**：我的文件/我的分享（含聚合分享）/我的收集/日志四页支持每页条数选择（10/20/50/100，记忆化）与页数过多时输入页码跳转；三个列表接口补齐分页返回（上限 100）。
+- **#8 我的文件目录与文件合并展示**：目录与文件同一表格（目录在前，Folder 图标 + 「目录」类型列，点击目录行进入下一级；重命名/删除保留）。
+
+### 数据与部署注意
+
+- 本次无数据库结构变更（sync_logs 结构沿用 v017）。
+- 新 API：`GET/POST /api/shared-groups/{token}/files`、`DELETE /api/shared-groups/{token}/files/{fileID}`、`PUT /api/shared-groups/{token}`、`GET /api/sync/tasks/{id}/progress`；`/api/shares`、`/api/collections`、`/api/shares/groups` 返回新增 `page/pageSize/total`。
+- 同步执行进度为进程内状态（不落库），服务重启后进行中任务进度归零，最终结果仍以 sync_logs 为准。
+- 验证：`go build ./...` + `go test ./...` 全绿；新增 4 个测试（成员增删/属性编辑、pageSize 上限、nextRun 计算）；`npm run build` + webassets 同步通过。
+
 ## v0.2.0-v017（10 项新需求批次）发布说明
 
 v017 由用户提出 10 项新需求，codex 分批实施（每批 1-2 项、逐批提交推送），全部完成并通过全量构建与测试。

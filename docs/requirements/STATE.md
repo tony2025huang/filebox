@@ -1,6 +1,18 @@
 # FileBox Requirement State
 
-Updated: 2026-09-01 (v017：10 项新需求全部交付)
+Updated: 2026-09-01 (v018：8 项新需求全部交付)
+
+| Requirement | State | Notes |
+|---|---|---|
+| v018 nav.admin Chinese label fix | done | `SECTION_NAV_KEYS` maps admin→nav.system (and sync→nav.syncTasks); the topbar section name no longer falls back to the literal key; commits `b9f98f3`/`3e78698`. |
+| v018 aggregate-share editing | done | Member files can be listed/added/removed (`GET/POST /api/shared-groups/{token}/files`, `DELETE .../files/{fileID}`) and attributes edited (`PUT /api/shared-groups/{token}`: future expiry, limit ≥ used); SharesView adds an eye (file-scope dialog) and an edit dialog; `share_group_update` audit; commit `a6d3ef5`. |
+| v018 collections copy/view buttons on one row | done | "Copy link" and "View received files" buttons are grouped on the same row; the link spans the full width; commit `b4b04c2`. |
+| v018 sync transfer progress | done | In-process `syncProgress` registry updated by all four push/pull paths (SFTP + FileBox); `GET /api/sync/tasks/{id}/progress` polls current file / done files / bytes / rate; SyncView renders a live progress row; commit `fde3c24`. |
+| v018 sync log columns | done | `publicSyncTask` exposes `nextRunAt` (cron-derived); the details dialog log area is a table (start/end/status/next-run-for-periodic/files/bytes/expandable detail); commit `fde3c24`. |
+| v018 log time-range UI | done | The two datetime-local fields became one "Time range" button with a dropdown panel (either bound optional); trilingual `logs.timeRange`; commit `b4b04c2`. |
+| v018 pagination enhancements | done | listShares/listCollections/listShareGroups return page/pageSize/total (cap 100); the four list pages gain pageSize selectors (10/20/50/100, localStorage) and page-number jumping when > 7 pages; commits `4186425`/`7e23a4d`. |
+| v018 merged folder/file listing | done | FilesView merges folders into the file table (folders first, Folder icon + 目录 type column, click-to-enter, rename/delete kept; no checkbox/file actions on folder rows); commit `47d1b73`. |
+| v018 tests | done | Member add/remove/attribute-edit tests (httpapi + store, including a store guard fix for past expiries), pagination pageSize cap, and nextSyncRunTime; commit `e14881c`. |
 
 | Requirement | State | Notes |
 |---|---|---|

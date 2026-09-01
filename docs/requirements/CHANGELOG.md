@@ -1,5 +1,19 @@
 # Requirement Change Log
 
+## 2026-09-01 - v018（8 项新需求批次）
+
+任务书：`docs/CODEX_TASK_v018.md`；codex 分批实施（后端任务全部由 codex 完成，前端精确替换批次部分由批次负责人按同规格直接应用——codex 对前端小改动连续 3 次进程中断未落盘后回退）；每批独立提交推送；全量 go test + npm build + webassets 同步通过。
+
+- **#1 nav.admin 中文修复**：根因 v017 将 i18n 键 `nav.admin` 改名 `nav.system`，而 AuthenticatedTopbar 用 `t(\`nav.${section}\`)`、AdminView 传 `section="admin"` → 键不存在回退原文。修复：新增 `SECTION_NAV_KEYS` 映射（admin→nav.system、sync→nav.syncTasks，其余直连），模板改用 `t(sectionKey)`；提交 `b9f98f3`/`3e78698`。
+- **#2 聚合分享编辑增强**：管理端成员文件增删（`GET/POST /api/shared-groups/{token}/files`、`DELETE .../files/{fileID}`）+ 属性编辑（`PUT /api/shared-groups/{token}`：绝对到期时间须晚于当前、上限不得低于已用次数）；store 新增 `AddShareGroupFiles`（事务校验归属/ready/去重/上限 500）/`RemoveShareGroupFile`/`UpdateShareGroupAttributes`；SharesView 聚合分享卡片加眼睛（成员文件列表弹窗）与编辑弹窗（增删成员 + 改有效期/上限）；日志动作 `share_group_update`；提交 `a6d3ef5`。
+- **#3 我的收集按钮同行**：CollectionsView 收集项「查看已收文件」与「复制链接」包入 `.collection-row-actions` 同一行，链接整行显示；提交 `b4b04c2`。
+- **#4 同步任务传输进度展示**：Server 进程内 `syncProgress` 注册表（mutex 保护，任务开始注册/结束清理），SFTP 与 FileBox 的 push/pull 四路径更新 totalFiles/doneFiles/currentFile/transferredBytes；新增 `GET /api/sync/tasks/{id}/progress`；SyncView 详情弹窗每 2s 轮询，进度条 + 当前文件 + 文件数 + 字节 + 速率（两次采样差值计算）；提交 `fde3c24`。
+- **#5 同步日志列增强**：`publicSyncTask` 增加 `nextRunAt`（周期任务按 cron 计算下次执行时间）；SyncView 日志区改为表格列：开始时间/结束时间/状态（进行中/已结束）/下次执行（仅周期）/文件数/大小/详情（点击展开逐文件明细）；提交 `fde3c24`。
+- **#6 日志时间筛选 UI**：两个独立 datetime-local 标签改为一个「时间范围」按钮 + 下拉面板（开始/结束两个 datetime-local，留空端不限），三语 `logs.timeRange`；提交 `b4b04c2`。
+- **#7 分页增强**：后端 listShares/listCollections/listShareGroups 内存分页（page/pageSize/total，pageSize 上限 100）；前端我的文件/我的分享（含聚合分享两表）/我的收集/日志四页 pageSize 选择器（10/20/50/100，localStorage 记忆）+ 页数过多（>7）时页码输入跳转；提交 `4186425`/`7e23a4d`。
+- **#8 我的文件目录与文件合并展示**：删除独立 folder-list 区块，目录行并入文件表格（目录在前，Folder 图标 + 「目录」类型列 + 名称点击进入下一级，重命名/删除按钮保留，checkbox 与文件操作对目录隐藏）；提交 `47d1b73`。
+- 补测试：`TestShareGroupMemberManagementAndEdit`（httpapi 成员增删/编辑/越权 404/过去时间 400）、`TestShareGroupMemberCRUDAndAttributeEdit`（store，含修复属性编辑过去时间守卫）、`TestPaginationCapsPageSize`、`TestNextSyncRunTime`；提交 `e14881c`。
+
 ## 2026-09-01 - v017（10 项新需求批次）
 
 任务书：`docs/CODEX_TASK_v017.md`；codex 分批实施（每批 1-2 项，每批独立提交推送）；前端纯改 5 批 + 前后端混合 1 批。
