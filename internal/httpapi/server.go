@@ -2713,7 +2713,18 @@ func (s *Server) listShares(w http.ResponseWriter, r *http.Request) {
 	for _, share := range shares {
 		items = append(items, managedShareData(share))
 	}
-	writeData(w, http.StatusOK, "获取成功", map[string]any{"items": items})
+	page, pageSize := pagination(r)
+	total := len(items)
+	start := (page - 1) * pageSize
+	if start >= total {
+		start = total
+	}
+	end := start + pageSize
+	if end > total {
+		end = total
+	}
+	items = items[start:end]
+	writeData(w, http.StatusOK, "获取成功", map[string]any{"items": items, "page": page, "pageSize": pageSize, "total": total})
 }
 
 // listFileShares lists links attached to one owned file and keeps cross-user access at 404.

@@ -109,7 +109,18 @@ func (s *Server) listCollections(w http.ResponseWriter, r *http.Request) {
 		value["url"] = "/u/" + item.Token
 		result = append(result, value)
 	}
-	writeData(w, http.StatusOK, "读取成功", map[string]any{"items": result})
+	page, pageSize := pagination(r)
+	total := len(result)
+	start := (page - 1) * pageSize
+	if start >= total {
+		start = total
+	}
+	end := start + pageSize
+	if end > total {
+		end = total
+	}
+	result = result[start:end]
+	writeData(w, http.StatusOK, "读取成功", map[string]any{"items": result, "page": page, "pageSize": pageSize, "total": total})
 }
 
 // getCollection returns owner-scoped collection details and received-file records.
