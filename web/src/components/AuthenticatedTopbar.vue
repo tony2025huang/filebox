@@ -37,7 +37,7 @@ const props = defineProps({
 })
 const SECTION_NAV_KEYS = {
   admin: 'nav.system',
-  sync: 'nav.sync',
+  sync: 'nav.syncTasks',
   files: 'nav.files',
   logs: 'nav.logs',
   collections: 'nav.collections',
