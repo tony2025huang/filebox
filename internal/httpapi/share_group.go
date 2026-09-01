@@ -536,3 +536,146 @@ func (s *Server) revokeShareGroup(w http.ResponseWriter, r *http.Request) {
 	s.recordAudit(r, &user.ID, user.Username, "share", token, "success", "revoke_group")
 	writeData(w, http.StatusOK, "分享已撤销", map[string]any{"token": token})
 }
+
+// listShareGroupFiles 返回聚合分享的成员文件列表（创建者或管理员）。
+// listShareGroupFiles lists the member files of an aggregate share (owner or admin).
+func (s *Server) listShareGroupFiles(w http.ResponseWriter, r *http.Request) {
+	group, err := s.managedShareGroup(r)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "分享不存在")
+		return
+	}
+	files, err := s.store.ListShareGroupFiles(r.Context(), group.ID)
+	if err != nil {
+		log.Printf("list share group files: %v", err)
+		writeError(w, http.StatusInternalServerError, "读取分享文件失败")
+		return
+	}
+	items := make([]map[string]any, 0, len(files))
+	for _, item := range files {
+		items = append(items, map[string]any{"fileId": item.FileID, "fileName": item.File.Name, "size": item.File.Size, "mime": item.File.Mime, "createdAt": item.File.CreatedAt})
+	}
+	writeData(w, http.StatusOK, "获取成功", map[string]any{"items": items})
+}
+
+// addShareGroupFiles 向聚合分享追加成员文件（创建者或管理员）。
+// addShareGroupFiles appends member files to an aggregate share (owner or admin).
+func (s *Server) addShareGroupFiles(w http.ResponseWriter, r *http.Request) {
+	user := currentUser(r.Context())
+	group, err := s.managedShareGroup(r)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "分享不存在")
+		return
+	}
+	if s.rejectReadOnly(w, r, user, "share", group.Token) {
+		return
+	}
+	var input struct {
+		FileIDs []int64 `json:"fileIds"`
+	}
+	if !decodeJSON(w, r, &input) || len(input.FileIDs) == 0 {
+		writeError(w, http.StatusBadRequest, "请选择要添加的文件")
+		return
+	}
+	if len(input.FileIDs) > 500 {
+		writeError(w, http.StatusBadRequest, "批量操作数量超出上限（最多 500 个）")
+		return
+	}
+	added, err := s.store.AddShareGroupFiles(r.Context(), group.ID, input.FileIDs)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "文件不存在")
+		return
+	}
+	if errors.Is(err, store.ErrConflict) {
+		writeError(w, http.StatusBadRequest, "所选文件均已在分享中")
+		return
+	}
+	if err != nil {
+		log.Printf("add share group files: %v", err)
+		writeError(w, http.StatusInternalServerError, "添加分享文件失败")
+		return
+	}
+	s.recordAudit(r, &user.ID, user.Username, "share_group_update", group.Token, "success", "add_files")
+	s.serviceEvent(r, "share_group_update", user.Username, "target=%s add=%d result=success", group.Token, len(added))
+	items := make([]map[string]any, 0, len(added))
+	for _, item := range added {
+		items = append(items, map[string]any{"fileId": item.FileID})
+	}
+	writeData(w, http.StatusOK, "已添加分享文件", map[string]any{"items": items})
+}
+
+// removeShareGroupFile 从聚合分享移除一个成员文件（创建者或管理员）。
+// removeShareGroupFile removes one member file from an aggregate share (owner or admin).
+func (s *Server) removeShareGroupFile(w http.ResponseWriter, r *http.Request) {
+	user := currentUser(r.Context())
+	group, err := s.managedShareGroup(r)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "分享不存在")
+		return
+	}
+	if s.rejectReadOnly(w, r, user, "share", group.Token) {
+		return
+	}
+	fileID, err := strconv.ParseInt(r.PathValue("fileID"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "文件不存在")
+		return
+	}
+	if err := s.store.RemoveShareGroupFile(r.Context(), group.ID, fileID); errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "文件不在分享中")
+		return
+	} else if err != nil {
+		log.Printf("remove share group file: %v", err)
+		writeError(w, http.StatusInternalServerError, "移除分享文件失败")
+		return
+	}
+	s.recordAudit(r, &user.ID, user.Username, "share_group_update", group.Token, "success", "remove_file")
+	s.serviceEvent(r, "share_group_update", user.Username, "target=%s remove=%d result=success", group.Token, fileID)
+	writeData(w, http.StatusOK, "已移除分享文件", map[string]any{"fileId": fileID})
+}
+
+// updateShareGroup 编辑聚合分享属性（到期时间 + 下载上限，创建者或管理员）。
+// updateShareGroup edits an aggregate share's expiry and download limit (owner or admin).
+func (s *Server) updateShareGroup(w http.ResponseWriter, r *http.Request) {
+	user := currentUser(r.Context())
+	group, err := s.managedShareGroup(r)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "分享不存在")
+		return
+	}
+	if s.rejectReadOnly(w, r, user, "share", group.Token) {
+		return
+	}
+	var input struct {
+		ExpiresAt    string `json:"expiresAt"`
+		MaxDownloads int    `json:"maxDownloads"`
+	}
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	expiresAt := strings.TrimSpace(input.ExpiresAt)
+	deadline, err := time.Parse(time.RFC3339, expiresAt)
+	if err != nil || !time.Now().UTC().Before(deadline) {
+		writeError(w, http.StatusBadRequest, "分享有效期无效")
+		return
+	}
+	if input.MaxDownloads < 0 || input.MaxDownloads > 100000 {
+		writeError(w, http.StatusBadRequest, "分享次数限制无效")
+		return
+	}
+	if err := s.store.UpdateShareGroupAttributes(r.Context(), group.Token, group.CreatedBy, expiresAt, input.MaxDownloads); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "分享不存在")
+		} else if errors.Is(err, store.ErrConflict) {
+			writeError(w, http.StatusBadRequest, "分享次数限制无效")
+		} else {
+			log.Printf("update share group: %v", err)
+			writeError(w, http.StatusInternalServerError, "编辑分享失败")
+		}
+		return
+	}
+	updated, _ := s.store.GetShareGroupByTokenIncludingRevoked(r.Context(), group.Token)
+	s.recordAudit(r, &user.ID, user.Username, "share_group_update", group.Token, "success", "update_attributes")
+	s.serviceEvent(r, "share_group_update", user.Username, "target=%s expires=%s max=%d result=success", group.Token, expiresAt, input.MaxDownloads)
+	writeData(w, http.StatusOK, "分享已更新", publicShareGroup(updated))
+}

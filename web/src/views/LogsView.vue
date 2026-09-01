@@ -51,7 +51,7 @@ function jumpPage() { const target = Number(pageInput.value); if (!target || tar
 function actionLabel(value) {
   const labels = {
     login: t('logs.login'), register: t('logs.register'), upload: t('logs.upload'), upload_init: t('logs.uploadInit'), upload_chunk: t('logs.uploadChunk'), download: t('logs.download'),
-     share: t('logs.share'), share_view: t('logs.shareView'), share_download: t('logs.shareDownload'), share_extend: t('logs.shareExtend'), share_increase: t('logs.shareIncrease'), share_revoke: t('logs.shareRevoke'), batch_share: t('logs.batchShare'), share_group_extend: t('logs.shareGroupExtend'), share_group_increase: t('logs.shareGroupIncrease'),
+     share: t('logs.share'), share_view: t('logs.shareView'), share_download: t('logs.shareDownload'), share_extend: t('logs.shareExtend'), share_increase: t('logs.shareIncrease'), share_revoke: t('logs.shareRevoke'), batch_share: t('logs.batchShare'), share_group_extend: t('logs.shareGroupExtend'), share_group_increase: t('logs.shareGroupIncrease'), share_group_update: t('logs.shareGroupUpdate'),
     settings_update: t('logs.settingsUpdate'), brand_update: t('logs.brandUpdate'), language_update: t('logs.languageUpdate'),
     password_change: t('logs.passwordChange'), password_reset: t('logs.passwordReset'), user_create: t('logs.userCreate'),
     user_update: t('logs.userUpdate'), user_disabled: t('logs.userDisabled'), totp_update: t('logs.totpUpdate'),
@@ -64,7 +64,7 @@ function actionLabel(value) {
 // actionGroups 把动作分为业务与"系统配置"两组，供筛选下拉分组展示。
 // actionGroups splits actions into business and "system configuration" groups for grouped filter options.
 const actionGroups = computed(() => {
-  const business = new Set(['login', 'register', 'upload', 'upload_init', 'upload_chunk', 'upload_collect', 'upload_collect_fail', 'download', 'delete', 'share', 'share_view', 'share_download', 'share_extend', 'share_increase', 'share_revoke', 'batch_share', 'share_group_extend', 'share_group_increase', 'collection_update'])
+  const business = new Set(['login', 'register', 'upload', 'upload_init', 'upload_chunk', 'upload_collect', 'upload_collect_fail', 'download', 'delete', 'share', 'share_view', 'share_download', 'share_extend', 'share_increase', 'share_revoke', 'batch_share', 'share_group_extend', 'share_group_increase', 'share_group_update', 'collection_update'])
   const businessActions = actions.value.filter(action => business.has(action))
   const systemActions = actions.value.filter(action => !business.has(action))
   return { businessActions, systemActions }

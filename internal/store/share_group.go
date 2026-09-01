@@ -309,3 +309,112 @@ WHERE token = ? AND created_by = ? AND revoked_at IS NULL AND max_downloads >= 0
 	}
 	return nil
 }
+
+// AddShareGroupFiles 向聚合分享追加成员文件（校验归属与 ready，整体去重，总数上限 500）。
+// AddShareGroupFiles appends member files to an aggregate share (ownership + ready checked, deduped, cap 500).
+func (s *Store) AddShareGroupFiles(ctx context.Context, groupID int64, fileIDs []int64) ([]ShareGroupFile, error) {
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	var current int64
+	if err := tx.QueryRowContext(ctx, "SELECT COUNT(id) FROM share_group_files WHERE group_id = ?", groupID).Scan(&current); err != nil {
+		return nil, err
+	}
+	if current >= 500 {
+		return nil, fmt.Errorf("share group too large")
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	seen := make(map[int64]bool, len(fileIDs))
+	added := make([]ShareGroupFile, 0, len(fileIDs))
+	nextOrder := current
+	for _, id := range fileIDs {
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		var exists int
+		if err := tx.QueryRowContext(ctx, "SELECT COUNT(id) FROM share_group_files WHERE group_id = ? AND file_id = ?", groupID, id).Scan(&exists); err != nil {
+			return nil, err
+		}
+		if exists > 0 {
+			continue
+		}
+		var owner int64
+		if err := tx.QueryRowContext(ctx, "SELECT user_id FROM files WHERE id = ? AND status = 'ready'", id).Scan(&owner); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return nil, ErrNotFound
+			}
+			return nil, err
+		}
+		var groupOwner int64
+		if err := tx.QueryRowContext(ctx, "SELECT created_by FROM share_groups WHERE id = ?", groupID).Scan(&groupOwner); err != nil {
+			return nil, err
+		}
+		if owner != groupOwner {
+			return nil, ErrNotFound
+		}
+		if current+int64(len(added)) >= 500 {
+			return nil, fmt.Errorf("share group too large")
+		}
+		result, err := tx.ExecContext(ctx, "INSERT INTO share_group_files(group_id, file_id, display_order, created_at) VALUES(?, ?, ?, ?)", groupID, id, nextOrder+int64(len(added)), now)
+		if err != nil {
+			return nil, err
+		}
+		rowID, err := result.LastInsertId()
+		if err != nil {
+			return nil, err
+		}
+		added = append(added, ShareGroupFile{ID: rowID, GroupID: groupID, FileID: id, DisplayOrder: int(nextOrder + int64(len(added)) - 1), CreatedAt: now})
+	}
+	if len(added) == 0 {
+		return nil, ErrConflict
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return added, nil
+}
+
+// RemoveShareGroupFile 从聚合分享移除一个成员文件。
+// RemoveShareGroupFile removes one member file from an aggregate share.
+func (s *Store) RemoveShareGroupFile(ctx context.Context, groupID, fileID int64) error {
+	result, err := s.DB.ExecContext(ctx, "DELETE FROM share_group_files WHERE group_id = ? AND file_id = ?", groupID, fileID)
+	if err != nil {
+		return err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if count != 1 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// UpdateShareGroupAttributes 编辑聚合分享的到期时间与下载上限（到期须晚于当前时间，上限不得低于已用次数）。
+// UpdateShareGroupAttributes edits an aggregate share's expiry and download limit (expiry must be in the future,
+// the limit cannot be lower than the current download count).
+func (s *Store) UpdateShareGroupAttributes(ctx context.Context, token string, ownerID int64, expiresAt string, maxDownloads int) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	result, err := s.DB.ExecContext(ctx, `UPDATE share_groups SET expires_at = ?, max_downloads = ?
+WHERE token = ? AND created_by = ? AND revoked_at IS NULL AND expires_at > ? AND (? = 0 OR ? >= download_count)`,
+		expiresAt, maxDownloads, token, ownerID, now, maxDownloads, maxDownloads)
+	if err != nil {
+		return err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if count != 1 {
+		current, lookupErr := s.GetShareGroupByTokenIncludingRevoked(ctx, token)
+		if lookupErr != nil || current.CreatedBy != ownerID || current.RevokedAt != "" {
+			return ErrNotFound
+		}
+		return ErrConflict
+	}
+	return nil
+}
