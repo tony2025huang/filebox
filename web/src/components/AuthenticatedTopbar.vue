@@ -1,6 +1,6 @@
 <template>
   <header class="topbar">
-    <div class="topbar-brand"><BrandLogo variant="main" compact link /><span class="slash">/</span><span class="section-name">{{ t(`nav.${section}`) }}</span></div>
+    <div class="topbar-brand"><BrandLogo variant="main" compact link /><span class="slash">/</span><span class="section-name">{{ t(sectionKey) }}</span></div>
     <div class="topbar-actions">
       <slot name="actions" />
       <LanguageSelect :user="user" />
@@ -19,7 +19,7 @@
 </template>
 
 <script setup>
-import { reactive, ref } from 'vue'
+import { computed, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { api, clearSession, saveSession } from '../api'
 import BrandLogo from './BrandLogo.vue'
@@ -34,6 +34,17 @@ import { FolderOpen, KeyRound, LoaderCircle, LogOut, RefreshCw, ScrollText, Shar
 const props = defineProps({
   user: { type: Object, default: () => ({}) },
   section: { type: String, default: 'files' }
+})
+const SECTION_NAV_KEYS = {
+  admin: 'nav.system',
+  sync: 'nav.sync',
+  files: 'nav.files',
+  logs: 'nav.logs',
+  collections: 'nav.collections',
+  shares: 'nav.shares'
+}
+const sectionKey = computed(() => {
+  return SECTION_NAV_KEYS[props.section] || `nav.${props.section}`
 })
 const router = useRouter()
 const changePasswordOpen = ref(false)
