@@ -77,6 +77,14 @@ type Server struct {
 // diskUsageFunc 可在包内测试中替换，以便不依赖测试机真实磁盘空间验证磁盘保护。
 var diskUsageFunc = diskusage.DiskUsage
 
+// batchDownloadMaxBytes 限制单次批量 ZIP 下载的原始文件总大小，避免临时归档耗尽磁盘。
+// batchDownloadMaxBytes caps the raw total size of one batch ZIP download so its temporary archive cannot exhaust disk space.
+const batchDownloadMaxBytes int64 = 2 << 30
+
+// batchDownloadMaxFiles 限制单次批量 ZIP 下载的文件数量。
+// batchDownloadMaxFiles caps the number of files in one batch ZIP download.
+const batchDownloadMaxFiles = 500
+
 // rateLimiter keeps one token bucket per authenticated user and evicts idle buckets.
 // rateLimiter 按用户维护令牌桶，并清理长期未访问的桶。
 type rateLimiter struct {
@@ -278,6 +286,7 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("GET /api/files", s.requireAuth(s.listFiles))
 	mux.HandleFunc("POST /api/files/upload-init", s.requireAuth(s.uploadInit))
+	mux.HandleFunc("DELETE /api/upload-tasks/{taskID}", s.requireAuth(s.deleteUploadTask))
 	mux.HandleFunc("POST /api/files/check", s.requireAuth(s.checkInstantUpload))
 	mux.HandleFunc("PUT /api/files/{taskID}/chunks/{index}", s.requireAuth(s.uploadChunk))
 	mux.HandleFunc("GET /api/files/{taskID}/status", s.requireAuth(s.uploadStatus))
@@ -361,7 +370,18 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/admin/locks/ip/{ip}", s.requireAdmin(s.deleteIPLock))
 	mux.HandleFunc("DELETE /api/admin/locks/user/{id}", s.requireAdmin(s.deleteUserLock))
 
-	return s.securityHeaders(s.spa(mux))
+	api := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The compatibility path cannot be registered directly because it overlaps
+		// DELETE /api/files/{id}/shares in net/http's ServeMux pattern set.
+		if r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/api/files/tasks/") {
+			taskID := strings.TrimPrefix(r.URL.Path, "/api/files/tasks/")
+			if taskID != "" && !strings.Contains(taskID, "/") {
+				r.URL.Path = "/api/upload-tasks/" + taskID
+			}
+		}
+		mux.ServeHTTP(w, r)
+	})
+	return s.securityHeaders(s.spa(api))
 }
 
 func (s *Server) securityHeaders(next http.Handler) http.Handler {
@@ -1481,6 +1501,32 @@ func (s *Server) uploadInit(w http.ResponseWriter, r *http.Request) {
 	writeData(w, http.StatusOK, "上传任务已创建", map[string]any{"taskId": task.ID, "chunkSize": task.ChunkSize, "totalChunks": task.TotalChunks, "uploadedChunks": []int{}})
 }
 
+// deleteUploadTask 删除当前用户拥有的待上传任务，管理员可删除任意用户的任务并清理临时分片。
+// deleteUploadTask deletes an owner's pending upload task; admins may delete any task and its temporary chunks.
+func (s *Server) deleteUploadTask(w http.ResponseWriter, r *http.Request) {
+	user := currentUser(r.Context())
+	taskID := r.PathValue("taskID")
+	task, err := s.store.GetUploadTask(r.Context(), taskID)
+	if errors.Is(err, store.ErrNotFound) || err != nil || (task.UserID != user.ID && user.Role != "admin") || task.Status != "pending" {
+		writeErrorData(w, http.StatusNotFound, "上传任务不存在", map[string]string{"code": "task_not_found"})
+		return
+	}
+	if err := s.store.DeleteUploadTask(r.Context(), taskID); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeErrorData(w, http.StatusNotFound, "上传任务不存在", map[string]string{"code": "task_not_found"})
+			return
+		}
+		log.Printf("delete upload task %s: %v", taskID, err)
+		writeError(w, http.StatusInternalServerError, "删除上传任务失败")
+		return
+	}
+	if err := os.RemoveAll(filepath.Join(s.config.DataDir, "tmp", taskID)); err != nil {
+		log.Printf("remove upload task temporary directory %s: %v", taskID, err)
+	}
+	s.serviceEvent(r, "upload_cancel", user.Username, "task=%s result=success", taskID)
+	writeData(w, http.StatusOK, "上传任务已删除", nil)
+}
+
 func (s *Server) uploadChunk(w http.ResponseWriter, r *http.Request) {
 	// uploadChunk 按任务声明的精确大小流式写入单个分片并记录哈希。
 	// uploadChunk streams one exact-sized chunk to disk and records its hash.
@@ -2139,7 +2185,7 @@ func (s *Server) batchDownload(w http.ResponseWriter, r *http.Request) {
 	}
 	// 限制批量操作数量，避免单次请求消耗过多资源。
 	// Cap batch size to avoid excessive resource use from a single request.
-	if len(input.IDs) > 500 {
+	if len(input.IDs) > batchDownloadMaxFiles {
 		writeError(w, http.StatusBadRequest, "批量操作数量超出上限（最多 500 个）")
 		return
 	}
@@ -2158,6 +2204,22 @@ func (s *Server) batchDownload(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		files = append(files, file)
+	}
+	var totalBytes int64
+	for _, file := range files {
+		if file.Size < 0 || file.Size > batchDownloadMaxBytes-totalBytes {
+			writeErrorData(w, http.StatusRequestEntityTooLarge, "批量下载文件总大小超过 2 GiB 上限", map[string]string{"code": "BATCH_TOO_LARGE"})
+			return
+		}
+		totalBytes += file.Size
+	}
+	if hasSpace, diskErr := s.batchDownloadDiskAvailable(totalBytes); diskErr != nil {
+		log.Printf("check batch download disk usage: %v", diskErr)
+		writeError(w, http.StatusInternalServerError, "无法检查系统存储空间")
+		return
+	} else if !hasSpace {
+		writeErrorData(w, http.StatusServiceUnavailable, "系统存储空间不足，暂时禁止批量下载", map[string]string{"code": "DISK_FULL"})
+		return
 	}
 	// Build the archive before writing headers so the client receives a reliable Content-Length.
 	// 先生成临时 ZIP 再写响应头，确保客户端能拿到可靠的 Content-Length。
@@ -2233,6 +2295,19 @@ func (s *Server) batchDownload(w http.ResponseWriter, r *http.Request) {
 	}
 	s.recordAudit(r, &user.ID, user.Username, "download", strings.Join(names, ","), "success", "batch")
 	s.serviceEvent(r, "download", user.Username, "name=%s count=%d result=success reason=batch", strings.Join(names, ","), len(names))
+}
+
+// batchDownloadDiskAvailable 检查临时 ZIP 占用后是否仍保留配置的最小可用空间。
+// batchDownloadDiskAvailable checks that the raw batch size can be written while preserving the configured free-space floor.
+func (s *Server) batchDownloadDiskAvailable(totalBytes int64) (bool, error) {
+	_, free, _, err := diskUsageFunc(s.config.DataDir)
+	if err != nil {
+		return false, err
+	}
+	if free < totalBytes {
+		return false, nil
+	}
+	return free-totalBytes >= s.config.MinFreeSpace, nil
 }
 
 // batchShare creates one independent share link per selected file after validating the whole batch.

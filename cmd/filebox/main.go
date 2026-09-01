@@ -571,6 +571,25 @@ func sha256Hex(content []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// hashBackupFile 流式计算备份文件的 SHA-256，避免将完整文件载入内存。
+// hashBackupFile computes a backup file's SHA-256 as a stream without buffering the full file.
+func hashBackupFile(path string) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	hash := sha256.New()
+	_, copyErr := io.Copy(hash, file)
+	closeErr := file.Close()
+	if copyErr != nil {
+		return "", copyErr
+	}
+	if closeErr != nil {
+		return "", closeErr
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
+}
+
 // encryptSecret 用口令经 PBKDF2 派生密钥，以 AES-256-GCM 加密 jwtSecret。
 // encryptSecret derives a key from the passphrase with PBKDF2 and seals jwtSecret with AES-256-GCM.
 func encryptSecret(secret, passphrase string) (encoded, saltB64 string, err error) {
@@ -858,22 +877,15 @@ func buildBackupArchive(dataDir, outPath, secret, passphrase string) (backupMani
 		}
 		entries = append(entries, collected...)
 	}
-	type stagedFile struct {
-		name    string
-		content []byte
-	}
-	staged := make([]stagedFile, 0, len(entries)+1)
 	for _, entry := range entries {
-		content, err := os.ReadFile(entry.diskPath)
+		content, err := hashBackupFile(entry.diskPath)
 		if err != nil {
 			return manifest, fmt.Errorf("read %s: %w", entry.diskPath, err)
 		}
-		manifest.SHA256[entry.name] = sha256Hex(content)
-		staged = append(staged, stagedFile{name: entry.name, content: content})
+		manifest.SHA256[entry.name] = content
 	}
 	manifest.SHA256["keys.json"] = sha256Hex(keysJSON)
-	staged = append(staged, stagedFile{name: "keys.json", content: keysJSON})
-	manifest.FileCount = len(staged)
+	manifest.FileCount = len(entries) + 1
 	manifestJSON, err := json.MarshalIndent(manifest, "", "  ")
 	if err != nil {
 		return manifest, err
@@ -900,7 +912,7 @@ func buildBackupArchive(dataDir, outPath, secret, passphrase string) (backupMani
 	}()
 	gz := gzip.NewWriter(file)
 	tw := tar.NewWriter(gz)
-	writeStaged := func(name string, content []byte) error {
+	writeBytes := func(name string, content []byte) error {
 		header := &tar.Header{Name: name, Mode: 0o600, Size: int64(len(content)), ModTime: time.Now()}
 		if err := tw.WriteHeader(header); err != nil {
 			return err
@@ -908,12 +920,43 @@ func buildBackupArchive(dataDir, outPath, secret, passphrase string) (backupMani
 		_, err := tw.Write(content)
 		return err
 	}
-	for _, item := range staged {
-		if err := writeStaged(item.name, item.content); err != nil {
+	writeFile := func(entry archiveEntry) error {
+		info, err := os.Stat(entry.diskPath)
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("%s is not a regular file", entry.diskPath)
+		}
+		if err := tw.WriteHeader(&tar.Header{Name: entry.name, Mode: 0o600, Size: info.Size(), ModTime: time.Now()}); err != nil {
+			return err
+		}
+		file, err := os.Open(entry.diskPath)
+		if err != nil {
+			return err
+		}
+		written, copyErr := io.Copy(tw, file)
+		closeErr := file.Close()
+		if copyErr != nil {
+			return copyErr
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+		if written != info.Size() {
+			return fmt.Errorf("%s changed while backing up", entry.diskPath)
+		}
+		return nil
+	}
+	for _, entry := range entries {
+		if err := writeFile(entry); err != nil {
 			return manifest, err
 		}
 	}
-	if err := writeStaged("manifest.json", manifestJSON); err != nil {
+	if err := writeBytes("keys.json", keysJSON); err != nil {
+		return manifest, err
+	}
+	if err := writeBytes("manifest.json", manifestJSON); err != nil {
 		return manifest, err
 	}
 	if err := tw.Close(); err != nil {
@@ -1007,6 +1050,7 @@ func runAdminRestore(args []string) int {
 	defer gz.Close()
 	tr := tar.NewReader(gz)
 	extracted := map[string]bool{}
+	extractedSHA256 := map[string]string{}
 	var extractedCount, extractedBytes int64
 	for {
 		header, err := tr.Next()
@@ -1057,7 +1101,8 @@ func runAdminRestore(args []string) int {
 			fmt.Fprintf(os.Stderr, "extract %q: %v\n", name, err)
 			return 1
 		}
-		written, copyErr := io.Copy(out, tr)
+		hash := sha256.New()
+		written, copyErr := io.Copy(io.MultiWriter(out, hash), tr)
 		if copyErr != nil {
 			out.Close()
 			fmt.Fprintf(os.Stderr, "extract %q: %v\n", name, copyErr)
@@ -1072,6 +1117,7 @@ func runAdminRestore(args []string) int {
 			return 1
 		}
 		extracted[name] = true
+		extractedSHA256[name] = hex.EncodeToString(hash.Sum(nil))
 		extractedCount++
 		extractedBytes += header.Size
 	}
@@ -1098,12 +1144,7 @@ func runAdminRestore(args []string) int {
 			fmt.Fprintf(os.Stderr, "archive file %q is missing from manifest\n", name)
 			return 1
 		}
-		content, err := os.ReadFile(filepath.Join(staging, filepath.FromSlash(name)))
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "read extracted %q: %v\n", name, err)
-			return 1
-		}
-		if sha256Hex(content) != want {
+		if extractedSHA256[name] != want {
 			fmt.Fprintf(os.Stderr, "checksum mismatch for %q\n", name)
 			return 1
 		}

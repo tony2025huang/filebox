@@ -186,6 +186,61 @@ func TestBackupRestoreRoundTrip(t *testing.T) {
 	}
 }
 
+// TestBackupRestoreLargeFileStreams verifies a large file survives backup and restore without ReadFile buffering.
+// TestBackupRestoreLargeFileStreams 验证大文件备份与恢复路径使用流式读写且内容完整。
+func TestBackupRestoreLargeFileStreams(t *testing.T) {
+	dataDir := t.TempDir()
+	db, err := store.Open(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.EnsureAdmin("admin", "admin123", 1024); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	largePath := filepath.Join(dataDir, "files", "1", "large.bin")
+	if err := os.MkdirAll(filepath.Dir(largePath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.Create(largePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	block := bytes.Repeat([]byte("x"), 1024*1024)
+	for index := 0; index < 32; index++ {
+		if _, err := file.Write(block); err != nil {
+			file.Close()
+			t.Fatal(err)
+		}
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	secret := "large-file-backup-secret-0123456789"
+	out := filepath.Join(t.TempDir(), "large-backup.tar.gz")
+	manifest, err := buildBackupArchive(dataDir, out, secret, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manifest.FileCount < 2 || manifest.SHA256["files/1/large.bin"] == "" {
+		t.Fatalf("large file missing from manifest: %+v", manifest)
+	}
+	restoreDir := t.TempDir()
+	if code := run([]string{"admin", "restore", "--data", restoreDir, "--in", out}); code != 0 {
+		t.Fatalf("restore large backup exit code = %d, want 0", code)
+	}
+	info, err := os.Stat(filepath.Join(restoreDir, "files", "1", "large.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() != 32*1024*1024 {
+		t.Fatalf("restored large file size = %d, want %d", info.Size(), 32*1024*1024)
+	}
+}
+
 // TestBackupRequiresJWTSecret 验证缺失密钥时 backup 报错而不是回退开发密钥。
 // TestBackupRequiresJWTSecret verifies backup fails when no JWT secret is available instead of falling back.
 func TestBackupRequiresJWTSecret(t *testing.T) {

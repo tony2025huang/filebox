@@ -365,6 +365,74 @@ func TestBatchShareGroupLifecycle(t *testing.T) {
 	}
 }
 
+// TestBatchDownloadsRejectOversizedArchives verifies both authenticated and anonymous ZIP paths reject oversized raw totals.
+// TestBatchDownloadsRejectOversizedArchives 验证登录与匿名 ZIP 入口均拒绝超过原始字节上限的归档。
+func TestBatchDownloadsRejectOversizedArchives(t *testing.T) {
+	db, handler := newTestServer(t)
+	token := testAdminToken(t, handler)
+	createdAt := time.Now().UTC().Format(time.RFC3339)
+	result, err := db.DB.Exec(`INSERT INTO files(user_id, name, stored_name, size, mime, sha256, md5, status, storage_path, created_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?, 'ready', ?, ?)`, 1, "oversized.bin", "oversized.bin", batchDownloadMaxBytes+1, "application/octet-stream", "", "", "files/1/oversized.bin", createdAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fileID, err := result.LastInsertId()
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertBatchTooLarge := func(t *testing.T, recorder *httptest.ResponseRecorder) {
+		t.Helper()
+		if recorder.Code != http.StatusRequestEntityTooLarge || responseData(t, recorder)["code"] != "BATCH_TOO_LARGE" {
+			t.Fatalf("oversized batch response = %d: %s", recorder.Code, recorder.Body.String())
+		}
+	}
+	assertBatchTooLarge(t, testJSONRequest(t, handler, http.MethodPost, "/api/files/batch-download", token, `{"ids":[`+strconv.FormatInt(fileID, 10)+`]}`))
+	group := testJSONRequest(t, handler, http.MethodPost, "/api/files/batch-share-group", token, `{"fileIds":[`+strconv.FormatInt(fileID, 10)+`],"expiresInHours":1}`)
+	if group.Code != http.StatusCreated {
+		t.Fatalf("create oversized share group = %d: %s", group.Code, group.Body.String())
+	}
+	groupToken := responseData(t, group)["token"].(string)
+	assertBatchTooLarge(t, testJSONRequest(t, handler, http.MethodPost, "/api/shared-groups/"+groupToken+"/batch-download", "", `{"ids":[`+strconv.FormatInt(fileID, 10)+`]}`))
+}
+
+// TestDeleteUploadTaskReleasesQuotaAndTemporaryChunks verifies cancellation removes the pending reservation and tmp directory.
+// TestDeleteUploadTaskReleasesQuotaAndTemporaryChunks 验证取消任务会释放 pending 配额并清理临时目录。
+func TestDeleteUploadTaskReleasesQuotaAndTemporaryChunks(t *testing.T) {
+	db, handler := newTestServer(t)
+	token := testAdminToken(t, handler)
+	if _, err := db.DB.Exec("UPDATE users SET quota_bytes = 10 WHERE id = 1"); err != nil {
+		t.Fatal(err)
+	}
+	initData := initUpload(t, handler, token, "cancel.bin", 8, 8, "")
+	taskID := initData["taskId"].(string)
+	tmpDir := filepath.Join(db.DataDir, "tmp", taskID)
+	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	tmpFile, err := os.Create(filepath.Join(tmpDir, "0"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var pending int64
+	if err := db.DB.QueryRow("SELECT COALESCE(SUM(size), 0) FROM upload_tasks WHERE user_id = 1 AND status = 'pending'").Scan(&pending); err != nil || pending != 8 {
+		t.Fatalf("pending quota before delete = %d, %v", pending, err)
+	}
+	deleted := testJSONRequest(t, handler, http.MethodDelete, "/api/files/tasks/"+taskID, token, "")
+	if deleted.Code != http.StatusOK {
+		t.Fatalf("delete upload task = %d: %s", deleted.Code, deleted.Body.String())
+	}
+	if _, err := os.Stat(tmpDir); !os.IsNotExist(err) {
+		t.Fatalf("temporary task directory still exists: %v", err)
+	}
+	if err := db.DB.QueryRow("SELECT COALESCE(SUM(size), 0) FROM upload_tasks WHERE user_id = 1 AND status = 'pending'").Scan(&pending); err != nil || pending != 0 {
+		t.Fatalf("pending quota after delete = %d, %v", pending, err)
+	}
+	initUpload(t, handler, token, "after-cancel.bin", 10, 10, "")
+}
+
 func testBinaryRequest(t *testing.T, handler http.Handler, method, path, token string, body []byte) *httptest.ResponseRecorder {
 	t.Helper()
 	request := httptest.NewRequest(method, path, bytes.NewReader(body))

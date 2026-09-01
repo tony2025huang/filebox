@@ -304,6 +304,10 @@ func (s *Server) shareGroupBatchDownload(w http.ResponseWriter, r *http.Request)
 			continue
 		}
 		seen[id] = true
+		if len(seen) > batchDownloadMaxFiles {
+			writeErrorData(w, http.StatusRequestEntityTooLarge, "批量下载文件数量超过上限", map[string]string{"code": "BATCH_TOO_LARGE"})
+			return
+		}
 		item, ok := filesByID[id]
 		if !ok {
 			reason = "share_denied"
@@ -314,6 +318,22 @@ func (s *Server) shareGroupBatchDownload(w http.ResponseWriter, r *http.Request)
 	}
 	if len(selected) == 0 {
 		writeError(w, http.StatusBadRequest, "请选择要下载的文件")
+		return
+	}
+	var totalBytes int64
+	for _, item := range selected {
+		if item.File.Size < 0 || item.File.Size > batchDownloadMaxBytes-totalBytes {
+			writeErrorData(w, http.StatusRequestEntityTooLarge, "批量下载文件总大小超过 2 GiB 上限", map[string]string{"code": "BATCH_TOO_LARGE"})
+			return
+		}
+		totalBytes += item.File.Size
+	}
+	if hasSpace, diskErr := s.batchDownloadDiskAvailable(totalBytes); diskErr != nil {
+		log.Printf("check share-group batch download disk usage: %v", diskErr)
+		writeError(w, http.StatusInternalServerError, "无法检查系统存储空间")
+		return
+	} else if !hasSpace {
+		writeErrorData(w, http.StatusServiceUnavailable, "系统存储空间不足，暂时禁止批量下载", map[string]string{"code": "DISK_FULL"})
 		return
 	}
 	allowed, err := s.store.IncrementShareGroupDownloads(r.Context(), token, group.MaxDownloads)

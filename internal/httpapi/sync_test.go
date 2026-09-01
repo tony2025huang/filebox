@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"net/http"
+	"net/http/httptest"
 	"strconv"
 	"strings"
 	"testing"
@@ -37,6 +38,34 @@ func TestLatestCronOccurrenceReturnsMostRecentMissedRun(t *testing.T) {
 	}
 	if _, ok := latestCronOccurrence(schedule, now, now); ok {
 		t.Fatal("cron occurrence found when baseline was not before now")
+	}
+}
+
+// TestFileBoxRemoteClientRejectsMalformedBrowseEntry verifies malformed remote field types return an error instead of panicking.
+// TestFileBoxRemoteClientRejectsMalformedBrowseEntry 验证远端 browse 字段类型错误时返回错误而不是 panic。
+func TestFileBoxRemoteClientRejectsMalformedBrowseEntry(t *testing.T) {
+	details := []string{}
+	processed := false
+	if err := walkFileBoxEntries([]map[string]any{
+		{"name": 123, "isDir": false},
+		{"name": "bad.txt", "isDir": "no"},
+	}, "", func(remoteBrowseEntry, string) error {
+		processed = true
+		return nil
+	}, func(string, string) error { return nil }, &details); err != nil {
+		t.Fatal(err)
+	}
+	if processed || len(details) != 2 {
+		t.Fatalf("malformed map handling processed=%t details=%v", processed, details)
+	}
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"items":[{"name":"bad.txt","path":"bad.txt","isDir":"no","kind":"file","size":1,"id":1}]}}`))
+	}))
+	defer remote.Close()
+	client := &fileBoxRemoteClient{baseURL: remote.URL, http: remote.Client()}
+	if _, err := client.findFile(context.Background(), "", "bad.txt"); err == nil {
+		t.Fatal("malformed browse entry unexpectedly succeeded")
 	}
 }
 

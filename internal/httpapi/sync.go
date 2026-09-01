@@ -988,6 +988,11 @@ func (s *Server) scheduleSyncTasks(ctx context.Context) {
 		}
 		go func(task store.SyncTask, taskLock *sync.Mutex) {
 			defer taskLock.Unlock()
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					log.Printf("scheduled sync task %d panicked: %v", task.ID, recovered)
+				}
+			}()
 			s.executeSyncTask(ctx, task)
 		}(item, lock)
 	}
@@ -1573,6 +1578,9 @@ func (s *Server) executeSyncPull(ctx context.Context, task store.SyncTask, syste
 			// Overwrite sync atomically replaces the target so interrupted transfers cannot corrupt it.
 			return os.Rename(tempPath, finalPath)
 		}); completeErr != nil {
+			if deleteErr := s.store.DeleteUploadTask(ctx, uploadTask.ID); deleteErr != nil {
+				log.Printf("rollback sync upload task %s after complete failure: %v", uploadTask.ID, deleteErr)
+			}
 			return completeErr
 		}
 		cleanup = false

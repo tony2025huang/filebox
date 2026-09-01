@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"mime"
 	"net/http"
 	"net/url"
@@ -237,13 +238,66 @@ func (c *fileBoxRemoteClient) findFile(ctx context.Context, dir, name string) (*
 		return nil, err
 	}
 	for _, entry := range entries {
-		if !entry["isDir"].(bool) && entry["name"] == name {
-			id, _ := entry["id"].(int64)
-			size, _ := entry["size"].(int64)
-			return &remoteBrowseEntry{Name: name, Path: entry["path"].(string), IsDir: false, Kind: "file", Size: size, ID: id}, nil
+		isDir, ok := entry["isDir"].(bool)
+		if !ok {
+			continue
 		}
+		entryName, ok := entry["name"].(string)
+		if !ok || isDir || entryName != name {
+			continue
+		}
+		id, _ := entry["id"].(int64)
+		size, _ := entry["size"].(int64)
+		entryPath, ok := entry["path"].(string)
+		if !ok {
+			continue
+		}
+		return &remoteBrowseEntry{Name: name, Path: entryPath, IsDir: false, Kind: "file", Size: size, ID: id}, nil
 	}
 	return nil, nil
+}
+
+// walkFileBoxEntries 解析远端目录条目并跳过字段类型错误的响应。
+// walkFileBoxEntries parses remote directory entries and skips responses with invalid field types.
+func walkFileBoxEntries(entries []map[string]any, relative string, process func(remoteBrowseEntry, string) error, descend func(string, string) error, detail *[]string) error {
+	for _, entry := range entries {
+		name, ok := entry["name"].(string)
+		if !ok {
+			*detail = append(*detail, "remote entry skipped: invalid name")
+			continue
+		}
+		childRelative := pathpkg.Join(relative, name)
+		isDir, ok := entry["isDir"].(bool)
+		if !ok {
+			*detail = append(*detail, childRelative+": remote entry has invalid isDir")
+			continue
+		}
+		if isDir {
+			entryPath, ok := entry["path"].(string)
+			if !ok {
+				*detail = append(*detail, childRelative+": remote entry has invalid path")
+				continue
+			}
+			if err := descend(entryPath, childRelative); err != nil {
+				return err
+			}
+			continue
+		}
+		id, ok := entry["id"].(int64)
+		if !ok {
+			*detail = append(*detail, childRelative+": remote entry has invalid id")
+			continue
+		}
+		size, ok := entry["size"].(int64)
+		if !ok {
+			*detail = append(*detail, childRelative+": remote entry has invalid size")
+			continue
+		}
+		if err := process(remoteBrowseEntry{ID: id, Name: name, Size: size}, childRelative); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // pushFile 将本地文件推送到远端 FileBox（秒传/冲突策略由远端校验），返回是否成功及错误详情。
@@ -532,6 +586,9 @@ func (s *Server) executeSyncPullFileBox(ctx context.Context, task store.SyncTask
 			}
 			return os.Rename(tempPath, finalPath)
 		}); completeErr != nil {
+			if deleteErr := s.store.DeleteUploadTask(ctx, uploadTask.ID); deleteErr != nil {
+				log.Printf("rollback filebox sync upload task %s after complete failure: %v", uploadTask.ID, deleteErr)
+			}
 			return completeErr
 		}
 		cleanup = false
@@ -548,22 +605,7 @@ func (s *Server) executeSyncPullFileBox(ctx context.Context, task store.SyncTask
 		if err != nil {
 			return err
 		}
-		for _, entry := range entries {
-			name := entry["name"].(string)
-			childRelative := pathpkg.Join(relative, name)
-			if entry["isDir"].(bool) {
-				if err := walk(entry["path"].(string), childRelative); err != nil {
-					return err
-				}
-				continue
-			}
-			id, _ := entry["id"].(int64)
-			size, _ := entry["size"].(int64)
-			if err := process(remoteBrowseEntry{ID: id, Name: name, Size: size}, childRelative); err != nil {
-				return err
-			}
-		}
-		return nil
+		return walkFileBoxEntries(entries, relative, process, walk, &result.detail)
 	}
 	if err := walk(task.SourcePath, ""); err != nil {
 		result.message = "拉取远端文件失败"
