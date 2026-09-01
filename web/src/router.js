@@ -45,19 +45,16 @@ router.beforeEach(async (to) => {
   }
   try {
     const result = await fetch('/api/auth/me', { headers: { Authorization: `Bearer ${token}` } })
-    const body = await result.json()
-    if (!result.ok) {
+    if (result.status === 401) {
       localStorage.removeItem('filebox_token')
       localStorage.removeItem('filebox_user')
       return '/login'
     }
+    if (!result.ok) return true
+    const body = await result.json()
     if (body.data?.mustChangePassword && to.path !== '/change-password') return '/change-password'
     if (to.meta.admin && body.data?.role !== 'admin') return '/'
-  } catch {
-    localStorage.removeItem('filebox_token')
-    localStorage.removeItem('filebox_user')
-    return '/login'
-  }
+  } catch { return true }
   return true
 })
 

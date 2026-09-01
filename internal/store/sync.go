@@ -545,6 +545,12 @@ func (s *Store) PruneSyncLogs(ctx context.Context, retentionDays int) (int64, er
 	if retentionDays < 0 {
 		return 0, fmt.Errorf("invalid sync log retention")
 	}
+	if retentionDays == 0 {
+		return 0, nil
+	}
+	if retentionDays > constMaxRetentionDays {
+		return 0, fmt.Errorf("sync log retention exceeds maximum")
+	}
 	cutoff := time.Now().UTC().Add(-time.Duration(retentionDays) * 24 * time.Hour).Format(time.RFC3339)
 	result, err := s.DB.ExecContext(ctx, "DELETE FROM sync_logs WHERE run_at < ?", cutoff)
 	if err != nil {
@@ -557,7 +563,7 @@ func (s *Store) PruneSyncLogs(ctx context.Context, retentionDays int) (int64, er
 // ListReadyFilesUnder lists ready files below a user's directory or one file path.
 func (s *Store) ListReadyFilesUnder(ctx context.Context, userID int64, sourcePath string) ([]File, error) {
 	rows, err := s.DB.QueryContext(ctx, `SELECT id, user_id, name, stored_name, size, mime, sha256, md5, status, storage_path, created_at, COALESCE(deleted_at, '')
-FROM files WHERE user_id = ? AND status = 'ready' ORDER BY storage_path`, userID)
+FROM files WHERE user_id = ? AND status = 'ready' ORDER BY storage_path LIMIT ?`, userID, 10000)
 	if err != nil {
 		return nil, err
 	}

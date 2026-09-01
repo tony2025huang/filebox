@@ -534,3 +534,20 @@ func TestValidateRestoredDatabaseRejectsEmptyDatabase(t *testing.T) {
 		t.Fatal("empty restored database was accepted")
 	}
 }
+
+// TestRestoreRejectsArchiveWithoutDatabase 验证归档不能省略必需的数据库条目。
+// TestRestoreRejectsArchiveWithoutDatabase verifies the required database entry cannot be omitted.
+func TestRestoreRejectsArchiveWithoutDatabase(t *testing.T) {
+	archiveData := buildTestArchive(t, []struct {
+		name    string
+		size    int64
+		content []byte
+	}{{name: "manifest.json", size: 2, content: []byte("{}")}})
+	archive := filepath.Join(t.TempDir(), "missing-db.tar.gz")
+	if err := os.WriteFile(archive, archiveData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code := run([]string{"admin", "restore", "--data", t.TempDir(), "--in", archive}); code != 1 {
+		t.Fatalf("restore without filebox.db = %d, want 1", code)
+	}
+}

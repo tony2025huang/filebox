@@ -548,7 +548,11 @@ func TestPruneAuditLogsRemovesExpiredRecords(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	removed, err := db.PruneAuditLogs(ctx, 7)
+	removed, err := db.PruneAuditLogs(ctx, 0)
+	if err != nil || removed != 0 {
+		t.Fatalf("PruneAuditLogs(0) = %d, %v; want 0, nil", removed, err)
+	}
+	removed, err = db.PruneAuditLogs(ctx, 7)
 	if err != nil || removed != 1 {
 		t.Fatalf("PruneAuditLogs() = %d, %v; want 1, nil", removed, err)
 	}
@@ -678,6 +682,40 @@ func TestShareManagementPreservesRevocationAndOwnership(t *testing.T) {
 	revoked, err := db.GetShareByTokenIncludingRevoked(ctx, "managed-token")
 	if err != nil || revoked.RevokedAt == "" {
 		t.Fatalf("revoked share lookup = %+v, %v", revoked, err)
+	}
+}
+
+// TestAdminListFilesDirUsesStoragePrefix 验证管理员目录过滤不绑定管理员 uid。
+// TestAdminListFilesDirUsesStoragePrefix verifies admin directory filters are not tied to the admin uid.
+func TestAdminListFilesDirUsesStoragePrefix(t *testing.T) {
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.EnsureAdmin("admin", "admin123", 1024); err != nil {
+		t.Fatal(err)
+	}
+	admin, err := db.GetUserByUsername("admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreateUser(context.Background(), "dir-user", "hash", "user", 1024); err != nil {
+		t.Fatal(err)
+	}
+	other, err := db.GetUserByUsername("dir-user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	dir := filepath.Join(strconv.FormatInt(other.ID, 10), "docs")
+	storagePath := filepath.Join("files", dir, "remote.txt")
+	if _, err := db.DB.Exec("INSERT INTO files(user_id, name, stored_name, size, mime, sha256, md5, status, storage_path, created_at) VALUES(?, ?, ?, 1, 'text/plain', 'sha', 'md5', 'ready', ?, ?)", other.ID, "remote.txt", "remote.txt", storagePath, now); err != nil {
+		t.Fatal(err)
+	}
+	files, total, err := db.ListFiles(context.Background(), admin.ID, true, "", dir, 1, 20)
+	if err != nil || total != 1 || len(files) != 1 || files[0].UserID != other.ID {
+		t.Fatalf("admin directory list = %+v, total=%d, err=%v", files, total, err)
 	}
 }
 

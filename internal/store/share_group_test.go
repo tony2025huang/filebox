@@ -82,6 +82,13 @@ func TestShareGroupExtendAndIncreaseLimits(t *testing.T) {
 	if err != nil || final.MaxDownloads != 0 {
 		t.Fatalf("final group = %+v, %v", final, err)
 	}
+	if err := db.UpdateShareGroupMaxDownloads(ctx, "group-token", 5, user.ID); err != nil {
+		t.Fatalf("unlimited group should become finite: %v", err)
+	}
+	final, err = db.GetShareGroupByToken(ctx, "group-token")
+	if err != nil || final.MaxDownloads != 5 {
+		t.Fatalf("finite group after unlimited = %+v, %v", final, err)
+	}
 	// 已撤销聚合分享不能编辑。
 	if err := db.RevokeShareGroup(ctx, "group-token", user.ID, false); err != nil {
 		t.Fatal(err)

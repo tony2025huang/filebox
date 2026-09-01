@@ -75,6 +75,9 @@ const (
 	DefaultThemeColor = "#1b998b"
 )
 
+// constMaxRetentionDays caps retention settings; zero means retain everything.
+const constMaxRetentionDays = 3650
+
 var themeColorPattern = regexp.MustCompile(`^#[0-9a-fA-F]{3}([0-9a-fA-F]{3})?$`)
 
 // Store 管理 SQLite 连接、数据目录以及文件元数据的持久化操作。
@@ -1464,6 +1467,8 @@ func (s *Store) CreateUploadTask(ctx context.Context, task UploadTask) error {
 	if task.Resolve == "overwrite" {
 		_ = tx.QueryRowContext(ctx, "SELECT size FROM files WHERE user_id = ? AND status = 'ready' AND storage_path = ?", task.UserID, filepath.Join(task.StorageDir, task.Name)).Scan(&replacingSize)
 	}
+	// The quota reservation is logical; physical peak usage may temporarily include the old file,
+	// pending chunks, and the merged replacement until complete succeeds.
 	if used-replacingSize+pending+task.Size > quota {
 		tx.Rollback()
 		return &QuotaError{UsedBytes: used, QuotaBytes: quota, FileSize: task.Size}
@@ -1982,7 +1987,7 @@ WHERE token = ? AND created_by = ? AND revoked_at IS NULL`, value, value, token,
 // UpdateShareMaxDownloads 原子提高分享次数上限，并拒绝降低上限。
 func (s *Store) UpdateShareMaxDownloads(ctx context.Context, token string, newMax int, ownerID int64) error {
 	result, err := s.DB.ExecContext(ctx, `UPDATE shares SET max_downloads = ?
-WHERE token = ? AND created_by = ? AND revoked_at IS NULL AND max_downloads > 0 AND (? = 0 OR ? > max_downloads)`, newMax, token, ownerID, newMax, newMax)
+WHERE token = ? AND created_by = ? AND revoked_at IS NULL AND max_downloads >= 0 AND (? = 0 OR ? > max_downloads)`, newMax, token, ownerID, newMax, newMax)
 	if err != nil {
 		return err
 	}
@@ -2034,7 +2039,13 @@ WHERE token = ? AND revoked_at IS NULL AND expires_at > ? AND (max_downloads = 0
 // PruneShares 物理删除超过留存期的失效分享（已撤销或已过期），返回删除条数。
 func (s *Store) PruneShares(ctx context.Context, retentionDays int) (int64, error) {
 	if retentionDays < 0 {
-		retentionDays = 0
+		return 0, fmt.Errorf("invalid share retention")
+	}
+	if retentionDays == 0 {
+		return 0, nil
+	}
+	if retentionDays > constMaxRetentionDays {
+		return 0, fmt.Errorf("share retention exceeds maximum")
 	}
 	cutoff := time.Now().UTC().Add(-time.Duration(retentionDays) * 24 * time.Hour).Format(time.RFC3339)
 	tx, err := s.DB.BeginTx(ctx, nil)
@@ -2060,6 +2071,12 @@ func (s *Store) PruneShares(ctx context.Context, retentionDays int) (int64, erro
 func (s *Store) PruneAuditLogs(ctx context.Context, retentionDays int) (int64, error) {
 	if retentionDays < 0 {
 		return 0, fmt.Errorf("invalid audit log retention")
+	}
+	if retentionDays == 0 {
+		return 0, nil
+	}
+	if retentionDays > constMaxRetentionDays {
+		return 0, fmt.Errorf("audit log retention exceeds maximum")
 	}
 	cutoff := time.Now().UTC().Add(-time.Duration(retentionDays) * 24 * time.Hour).Format(time.RFC3339)
 	result, err := s.DB.ExecContext(ctx, "DELETE FROM audit_logs WHERE created_at < ?", cutoff)
@@ -2748,9 +2765,23 @@ func (s *Store) ListFiles(ctx context.Context, userID int64, admin bool, keyword
 		args = append(args, userID)
 	}
 	if dir != "" {
-		prefix := filepath.Join("files", strconv.FormatInt(userID, 10), dir) + string(filepath.Separator)
-		where += " AND substr(storage_path, 1, length(?)) = ?"
-		args = append(args, prefix, prefix)
+		if admin {
+			// Admin directory queries accept either a full storage prefix (files/<uid>/...) or
+			// a relative directory, which is matched below any user's files/<uid>/ root.
+			normalizedDir := filepath.ToSlash(dir)
+			fullPrefix := normalizedDir
+			if fullPrefix != "files" && !strings.HasPrefix(fullPrefix, "files/") {
+				fullPrefix = filepath.ToSlash(filepath.Join("files", dir))
+			}
+			fullPrefix += "/"
+			where += " AND (REPLACE(storage_path, '\\', '/') LIKE ? ESCAPE '\\' OR REPLACE(storage_path, '\\', '/') LIKE ? ESCAPE '\\')"
+			relativePattern := escapeLike("files/") + "%" + escapeLike("/"+normalizedDir+"/") + "%"
+			args = append(args, escapeLike(fullPrefix)+"%", relativePattern)
+		} else {
+			prefix := filepath.Join("files", strconv.FormatInt(userID, 10), dir) + string(filepath.Separator)
+			where += " AND substr(storage_path, 1, length(?)) = ?"
+			args = append(args, prefix, prefix)
+		}
 	} else if admin {
 		// 管理员无 dir 参数 = 全部文件（既有语义）
 	} else {
@@ -2928,7 +2959,7 @@ func (s *Store) UpdateLogSettings(ctx context.Context, settings LogSettings) err
 	// UpdateLogSettings 校验非负留存/阈值和正数解锁时长后事务更新设置。
 	// UpdateLogSettings validates non-negative retention/thresholds and positive unlock duration before a transactional update.
 	settings.ThemeColor = normalizeThemeColor(settings.ThemeColor)
-	if settings.LogRetentionDays < 0 || settings.LockThreshold < 0 || settings.AutoUnlockMinutes < 1 || settings.PasswordMinLength < 1 || settings.PasswordMinLength > 200 || settings.PasswordComplexity < 0 || settings.PasswordComplexity > 4 || settings.IPLockWindowMinutes < 1 || settings.IPLockThreshold < 0 || settings.IPUnlockMinutes < 1 || settings.UploadRateLimit < 0 || (settings.DefaultLang != "zh-CN" && settings.DefaultLang != "zh-TW" && settings.DefaultLang != "en") || (settings.ThemeColor != "" && !themeColorPattern.MatchString(settings.ThemeColor)) {
+	if settings.LogRetentionDays < 0 || settings.LogRetentionDays > constMaxRetentionDays || settings.LockThreshold < 0 || settings.AutoUnlockMinutes < 1 || settings.PasswordMinLength < 1 || settings.PasswordMinLength > 200 || settings.PasswordComplexity < 0 || settings.PasswordComplexity > 4 || settings.IPLockWindowMinutes < 1 || settings.IPLockThreshold < 0 || settings.IPUnlockMinutes < 1 || settings.UploadRateLimit < 0 || (settings.DefaultLang != "zh-CN" && settings.DefaultLang != "zh-TW" && settings.DefaultLang != "en") || (settings.ThemeColor != "" && !themeColorPattern.MatchString(settings.ThemeColor)) {
 		return errors.New("invalid settings")
 	}
 	values := map[string]string{

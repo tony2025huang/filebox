@@ -26,6 +26,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -195,12 +196,19 @@ func runServe(args []string) error {
 		Logger:          logger,
 		Static:          webassets.FS,
 	})
+	appHandler := server.Handler()
+	var activeHandlers sync.WaitGroup
+	trackedHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		activeHandlers.Add(1)
+		defer activeHandlers.Done()
+		appHandler.ServeHTTP(w, r)
+	})
 
 	logger.Infof("FileBox listening on %s", *addr)
 	logger.Infof("data directory: %s", *dataDir)
 	httpServer := &http.Server{
 		Addr:              *addr,
-		Handler:           server.Handler(),
+		Handler:           trackedHandler,
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
 		// ReadTimeout 保持为 0，避免大文件上传被服务器读超时截断。
@@ -283,11 +291,15 @@ func runServe(args []string) error {
 	case signalValue := <-signals:
 		logger.Event("shutdown", "operator=system ip=- signal=%s result=graceful", signalValue)
 		stopCleanup()
-		shutdownContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		shutdownContext, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		if err := httpServer.Shutdown(shutdownContext); err != nil {
-			return err
+			logger.Event("shutdown", "operator=system ip=- result=warning reason=active_handlers_timeout error=%s", err)
+			if closeErr := httpServer.Close(); closeErr != nil {
+				logger.Event("shutdown", "operator=system ip=- result=warning reason=close_active_connections error=%s", closeErr)
+			}
 		}
+		activeHandlers.Wait()
 		logger.Event("exit", "operator=system ip=- result=success")
 		return nil
 	case err := <-serverErrors:
@@ -1121,6 +1133,10 @@ func runAdminRestore(args []string) int {
 		extractedCount++
 		extractedBytes += header.Size
 	}
+	if !extracted["filebox.db"] {
+		fmt.Fprintln(os.Stderr, "archive is missing required filebox.db")
+		return 1
+	}
 	manifestData, err := os.ReadFile(filepath.Join(staging, "manifest.json"))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "archive has no valid manifest.json: %v\n", err)
@@ -1133,6 +1149,10 @@ func runAdminRestore(args []string) int {
 	}
 	if manifest.FormatVersion != 1 {
 		fmt.Fprintf(os.Stderr, "unsupported archive format version %d\n", manifest.FormatVersion)
+		return 1
+	}
+	if manifest.FileCount < 1 || manifest.FileCount != len(manifest.SHA256) || extractedCount != int64(manifest.FileCount+1) {
+		fmt.Fprintln(os.Stderr, "archive manifest file count does not match archive entries")
 		return 1
 	}
 	for name := range extracted {

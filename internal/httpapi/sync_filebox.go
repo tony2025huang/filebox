@@ -384,6 +384,7 @@ func (c *fileBoxRemoteClient) downloadFile(ctx context.Context, fileID int64, da
 	}
 	defer response.body.Close()
 	if response.status != http.StatusOK {
+		_ = temp.Close()
 		_ = os.Remove(tempPath)
 		return "", 0, fmt.Errorf("远端下载失败 (%d): %s", response.status, response.message)
 	}

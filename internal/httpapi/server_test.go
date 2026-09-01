@@ -497,6 +497,107 @@ func testAdminToken(t *testing.T, handler http.Handler) string {
 	return token
 }
 
+// TestSecurityHeadersIncludeFrameProtection 验证每个处理器响应都带有点击劫持防护。
+// TestSecurityHeadersIncludeFrameProtection verifies every handler response carries clickjacking protection.
+func TestSecurityHeadersIncludeFrameProtection(t *testing.T) {
+	_, handler := newTestServer(t)
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/auth/me", nil))
+	if recorder.Header().Get("X-Frame-Options") != "DENY" {
+		t.Fatalf("X-Frame-Options = %q, want DENY", recorder.Header().Get("X-Frame-Options"))
+	}
+	if !strings.Contains(recorder.Header().Get("Content-Security-Policy"), "frame-ancestors 'none'") {
+		t.Fatalf("CSP missing frame-ancestors protection: %q", recorder.Header().Get("Content-Security-Policy"))
+	}
+}
+
+// TestPasswordChangeWritesAudit 验证成功和拒绝的自助改密都会写入审计记录。
+// TestPasswordChangeWritesAudit verifies successful and rejected self-service password changes are audited.
+func TestPasswordChangeWritesAudit(t *testing.T) {
+	db, handler := newTestServer(t)
+	token := testAdminToken(t, handler)
+	bad := testJSONRequest(t, handler, http.MethodPost, "/api/auth/change-password", token, `{"oldPassword":"wrong","newPassword":"Changed123!"}`)
+	if bad.Code != http.StatusBadRequest {
+		t.Fatalf("failed password change = %d: %s", bad.Code, bad.Body.String())
+	}
+	var result, reason string
+	if err := db.DB.QueryRow("SELECT result, reason FROM audit_logs WHERE action = 'password_change' ORDER BY id DESC LIMIT 1").Scan(&result, &reason); err != nil || result != "failure" || reason != "failure" {
+		t.Fatalf("failed password audit = %q/%q, %v", result, reason, err)
+	}
+	good := testJSONRequest(t, handler, http.MethodPost, "/api/auth/change-password", token, `{"oldPassword":"admin123","newPassword":"Changed123!"}`)
+	if good.Code != http.StatusOK {
+		t.Fatalf("successful password change = %d: %s", good.Code, good.Body.String())
+	}
+	if err := db.DB.QueryRow("SELECT result, reason FROM audit_logs WHERE action = 'password_change' ORDER BY id DESC LIMIT 1").Scan(&result, &reason); err != nil || result != "success" || reason != "success" {
+		t.Fatalf("successful password audit = %q/%q, %v", result, reason, err)
+	}
+}
+
+// TestCompleteRejectsChangedChunkHash 验证 complete 会重新校验服务端记录的分片哈希。
+// TestCompleteRejectsChangedChunkHash verifies complete rechecks server-recorded chunk hashes.
+func TestCompleteRejectsChangedChunkHash(t *testing.T) {
+	db, handler := newTestServer(t)
+	token := testAdminToken(t, handler)
+	content := []byte("chunk hash source")
+	initData := initUpload(t, handler, token, "chunk-hash.txt", int64(len(content)), 0, "")
+	taskID := initData["taskId"].(string)
+	if got := testBinaryRequest(t, handler, http.MethodPut, "/api/files/"+taskID+"/chunks/0", token, content); got.Code != http.StatusOK {
+		t.Fatalf("chunk upload = %d: %s", got.Code, got.Body.String())
+	}
+	if _, err := db.DB.Exec("UPDATE chunks SET sha256 = 'tampered' WHERE task_id = ?", taskID); err != nil {
+		t.Fatal(err)
+	}
+	complete := testJSONRequest(t, handler, http.MethodPost, "/api/files/"+taskID+"/complete", token, "{}")
+	if complete.Code != http.StatusBadRequest || !strings.Contains(complete.Body.String(), "上传分片校验值不匹配") {
+		t.Fatalf("changed chunk hash complete = %d: %s", complete.Code, complete.Body.String())
+	}
+}
+
+// TestAdminGuardsLastAdministratorAndRemovesUserDirectory 验证唯一管理员保护和用户目录清理。
+// TestAdminGuardsLastAdministratorAndRemovesUserDirectory verifies account safety and filesystem cleanup.
+func TestAdminGuardsLastAdministratorAndRemovesUserDirectory(t *testing.T) {
+	db, handler := newTestServer(t)
+	token := testAdminToken(t, handler)
+	demote := testJSONRequest(t, handler, http.MethodPut, "/api/admin/users/1", token, `{"role":"user"}`)
+	if demote.Code != http.StatusBadRequest || !strings.Contains(demote.Body.String(), "唯一管理员") {
+		t.Fatalf("last administrator demotion = %d: %s", demote.Code, demote.Body.String())
+	}
+	created := testJSONRequest(t, handler, http.MethodPost, "/api/admin/users", token, `{"username":"directory-user","password":"Directory123!","role":"user","quotaBytes":1048576}`)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create directory user = %d: %s", created.Code, created.Body.String())
+	}
+	userID := int64(responseData(t, created)["id"].(float64))
+	userDir := filepath.Join(db.DataDir, "files", strconv.FormatInt(userID, 10), "nested")
+	if err := os.MkdirAll(userDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	deleted := testJSONRequest(t, handler, http.MethodDelete, "/api/admin/users/"+formatID(userID), token, "")
+	if deleted.Code != http.StatusOK {
+		t.Fatalf("delete directory user = %d: %s", deleted.Code, deleted.Body.String())
+	}
+	if _, err := os.Stat(filepath.Dir(userDir)); !os.IsNotExist(err) {
+		t.Fatalf("user directory still exists, stat error = %v", err)
+	}
+}
+
+// TestUnlimitedShareCanBecomeFinite 验证 HTTP 层允许不限次数分享转为有限次数。
+// TestUnlimitedShareCanBecomeFinite verifies the unlimited-to-finite transition at the HTTP layer.
+func TestUnlimitedShareCanBecomeFinite(t *testing.T) {
+	_, handler := newTestServer(t)
+	token := testAdminToken(t, handler)
+	file := uploadTestFile(t, handler, token, "unlimited-share.txt", "text/plain", []byte("share"))
+	fileID := int64(file["id"].(float64))
+	created := testJSONRequest(t, handler, http.MethodPost, "/api/files/"+formatID(fileID)+"/share", token, `{"expiresInHours":1,"maxDownloads":0}`)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create unlimited share = %d: %s", created.Code, created.Body.String())
+	}
+	shareToken := responseData(t, created)["token"].(string)
+	updated := testJSONRequest(t, handler, http.MethodPut, "/api/shares/"+shareToken+"/increase", token, `{"maxDownloads":2}`)
+	if updated.Code != http.StatusOK || responseData(t, updated)["maxDownloads"] != float64(2) {
+		t.Fatalf("unlimited share increase = %d: %s", updated.Code, updated.Body.String())
+	}
+}
+
 func TestJWTInvalidatedAfterPasswordChange(t *testing.T) {
 	_, handler := newTestServer(t)
 	adminToken := testAdminToken(t, handler)

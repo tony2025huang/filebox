@@ -142,6 +142,8 @@ const batchDownloadMaxBytes int64 = 2 << 30
 // batchDownloadMaxFiles caps the number of files in one batch ZIP download.
 const batchDownloadMaxFiles = 500
 
+const maxLogRetentionDays = 3650
+
 // rateLimiter keeps one token bucket per authenticated user and evicts idle buckets.
 // rateLimiter 按用户维护令牌桶，并清理长期未访问的桶。
 type rateLimiter struct {
@@ -444,7 +446,8 @@ func (s *Server) Handler() http.Handler {
 func (s *Server) securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:; connect-src 'self'; frame-src 'self'")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:; connect-src 'self'; frame-src 'self'; frame-ancestors 'none'")
 		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
 		next.ServeHTTP(w, r)
 	})
@@ -1091,6 +1094,10 @@ func (s *Server) recordIPFailure(r *http.Request, settings store.LogSettings) {
 // changePassword 校验旧密码、执行当前策略并重新签发 JWT。
 func (s *Server) changePassword(w http.ResponseWriter, r *http.Request) {
 	user := currentUser(r.Context())
+	auditResult, auditReason := "failure", "failure"
+	defer func() {
+		s.recordAudit(r, &user.ID, user.Username, "password_change", user.Username, auditResult, auditReason)
+	}()
 	if s.rejectReadOnly(w, r, user, "password_change", user.Username) {
 		return
 	}
@@ -1126,6 +1133,7 @@ func (s *Server) changePassword(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "登录失败")
 		return
 	}
+	auditResult, auditReason = "success", "success"
 	writeData(w, http.StatusOK, "密码已更新", map[string]any{"token": token, "user": publicUser(updated)})
 }
 
@@ -2102,11 +2110,19 @@ func (s *Server) completeUpload(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "上传分片不完整")
 			return
 		}
-		written, copyErr := io.Copy(io.MultiWriter(merged, sha, md5Hash), chunkFile)
+		chunkHash := sha256.New()
+		written, copyErr := io.Copy(io.MultiWriter(merged, sha, md5Hash, chunkHash), chunkFile)
 		closeErr := chunkFile.Close()
 		if copyErr != nil || closeErr != nil {
 			merged.Close()
 			writeError(w, http.StatusInternalServerError, "合并上传内容失败")
+			return
+		}
+		if chunks[index].SHA256 != "" && !strings.EqualFold(chunks[index].SHA256, hex.EncodeToString(chunkHash.Sum(nil))) {
+			merged.Close()
+			auditReason = "checksum_mismatch"
+			serviceReason = "checksum_mismatch"
+			writeError(w, http.StatusBadRequest, "上传分片校验值不匹配")
 			return
 		}
 		mergedSize += written
@@ -2822,7 +2838,7 @@ func (s *Server) increaseShare(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &input) {
 		return
 	}
-	if input.MaxDownloads < 0 || input.MaxDownloads > 100000 || share.MaxDownloads == 0 || (input.MaxDownloads != 0 && input.MaxDownloads <= share.MaxDownloads) {
+	if input.MaxDownloads < 0 || input.MaxDownloads > 100000 || (input.MaxDownloads != 0 && input.MaxDownloads <= share.MaxDownloads) {
 		writeError(w, http.StatusBadRequest, "分享次数限制无效")
 		return
 	}
@@ -3504,6 +3520,17 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	previous, _ := s.store.GetUser(id)
+	if previous.Role == "admin" && ((input.Role != nil && *input.Role != "admin") || (input.Disabled != nil && *input.Disabled)) {
+		var adminCount int
+		if err := s.store.DB.QueryRowContext(r.Context(), "SELECT COUNT(id) FROM users WHERE role = 'admin'").Scan(&adminCount); err != nil {
+			writeError(w, http.StatusInternalServerError, "检查管理员账号失败")
+			return
+		}
+		if adminCount <= 1 {
+			writeError(w, http.StatusBadRequest, "不能移除唯一管理员账号")
+			return
+		}
+	}
 	var hash *string
 	if input.Password != "" {
 		if err := s.validatePassword(input.Password); err != nil {
@@ -3759,6 +3786,9 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request) {
 			log.Printf("remove deleted user file: %v", removeErr)
 		}
 	}
+	if removeErr := os.RemoveAll(filepath.Join(s.config.DataDir, "files", strconv.FormatInt(id, 10))); removeErr != nil {
+		log.Printf("remove deleted user directory: %v", removeErr)
+	}
 	s.serviceEvent(r, "user_delete", admin.Username, "target=%s result=success", target)
 	writeData(w, http.StatusOK, "用户已删除", nil)
 }
@@ -3939,6 +3969,8 @@ func validateLogSettings(settings store.LogSettings) error {
 	switch {
 	case settings.LogRetentionDays < 0:
 		return errors.New("日志留存天数无效")
+	case settings.LogRetentionDays > maxLogRetentionDays:
+		return errors.New("日志留存天数超过上限")
 	case settings.LockThreshold < 0:
 		return errors.New("登录失败锁定阈值无效")
 	case settings.AutoUnlockMinutes < 1:
@@ -4085,7 +4117,9 @@ func (s *Server) authenticate(r *http.Request) (store.User, error) {
 	}
 	if user.LastLogoutAt != "" {
 		lastLogout, parseErr := time.Parse(time.RFC3339, user.LastLogoutAt)
-		if parseErr == nil && !issuedAt.Time.After(lastLogout) {
+		// JWT iat is second-precision; reject the rounding window after logout as well.
+		// JWT 的 iat 只有秒级精度，注销时一并拒绝该精度窗口，避免跨秒时旧令牌复活。
+		if parseErr == nil && !issuedAt.Time.After(lastLogout.Add(time.Second)) {
 			return store.User{}, errors.New("invalid token")
 		}
 	}

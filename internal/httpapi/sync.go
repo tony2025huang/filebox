@@ -1084,6 +1084,7 @@ func decodeFingerprintPayload(value string) ([]byte, bool) {
 		decoded, err := hex.DecodeString(value)
 		return decoded, err == nil && len(decoded) == sha256.Size
 	}
+	value = strings.NewReplacer("\r", "", "\n", "").Replace(value)
 	decoded, err := base64.StdEncoding.Strict().DecodeString(value)
 	if err != nil {
 		decoded, err = base64.RawStdEncoding.Strict().DecodeString(value)
@@ -1382,6 +1383,7 @@ func (s *Server) executeSyncPush(ctx context.Context, task store.SyncTask, syste
 				if renameErr != nil {
 					// 回退到标准重命名，以兼容不支持 POSIX 扩展的服务器。
 					// Fall back to the standard rename for servers without the POSIX extension.
+					// Standard rename does not provide the same atomic-replacement guarantee as PosixRename.
 					renameErr = client.Rename(tempRemote, remotePath)
 				}
 				if renameErr != nil {
@@ -1508,7 +1510,7 @@ func (s *Server) executeSyncPull(ctx context.Context, task store.SyncTask, syste
 				result.detail = append(result.detail, relative+": disk check failed")
 				return nil
 			}
-			if free < s.config.MinFreeSpace {
+			if free-remoteInfo.Size() < s.config.MinFreeSpace {
 				result.detail = append(result.detail, relative+": skipped (insufficient disk space)")
 				return nil
 			}

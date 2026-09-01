@@ -269,8 +269,8 @@ function restoreTransfers() {
       uploads.value.push({
         id: snap.id, file: null, name: snap.name, relPath: snap.relPath || '', dir: snap.dir || '', size: snap.size || 0,
         progress: snap.progress || 0, loadedBytes: snap.loadedBytes || 0, status: snap.failed ? (snap.error || t('files.uploadFailed')) : t('files.needReselect'),
-        taskId: snap.taskId || '', sha256: snap.sha256 || '', uploaded: [], paused: false, chunksTotal: 0, chunkSize: 0,
-        error: snap.error || '', failed: false, canContinue: false, running: false, pending: new Set(), controllers: new Map(), needsReselect: true, restored: true
+        taskId: snap.taskId || '', sha256: snap.sha256 || '', uploaded: [], paused: !!snap.paused, chunksTotal: 0, chunkSize: 0,
+        error: snap.error || '', failed: !!snap.failed, canContinue: !!snap.canContinue, running: false, pending: new Set(), controllers: new Map(), needsReselect: true, restored: true
       })
     }
   }

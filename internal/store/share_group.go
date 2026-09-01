@@ -265,7 +265,7 @@ WHERE token = ? AND created_by = ? AND revoked_at IS NULL`, value, value, token,
 // 0 means unlimited and a finite limit may be raised to unlimited (#6).
 func (s *Store) UpdateShareGroupMaxDownloads(ctx context.Context, token string, newMax int, ownerID int64) error {
 	result, err := s.DB.ExecContext(ctx, `UPDATE share_groups SET max_downloads = ?
-WHERE token = ? AND created_by = ? AND revoked_at IS NULL AND max_downloads > 0 AND (? = 0 OR ? > max_downloads)`, newMax, token, ownerID, newMax, newMax)
+WHERE token = ? AND created_by = ? AND revoked_at IS NULL AND max_downloads >= 0 AND (? = 0 OR ? > max_downloads)`, newMax, token, ownerID, newMax, newMax)
 	if err != nil {
 		return err
 	}

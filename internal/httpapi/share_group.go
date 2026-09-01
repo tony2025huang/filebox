@@ -482,7 +482,7 @@ func (s *Server) increaseShareGroup(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &input) {
 		return
 	}
-	if input.MaxDownloads < 0 || input.MaxDownloads > 100000 || group.MaxDownloads == 0 || (input.MaxDownloads != 0 && input.MaxDownloads <= group.MaxDownloads) {
+	if input.MaxDownloads < 0 || input.MaxDownloads > 100000 || (input.MaxDownloads != 0 && input.MaxDownloads <= group.MaxDownloads) {
 		writeError(w, http.StatusBadRequest, "分享次数限制无效")
 		return
 	}
