@@ -6,7 +6,7 @@
         <button v-for="tab in tabs" :key="tab.key" class="admin-tab" :class="{ active: activeTab === tab.key }" @click="switchTab(tab.key)"><component :is="tab.icon" :size="17" /><span>{{ t(tab.label) }}</span></button>
       </aside>
       <section class="content-wrap admin-content">
-        <div class="page-heading"><div><p class="eyebrow">{{ t('admin.eyebrow') }}</p><h1>{{ t('admin.heading') }}</h1><p class="muted">{{ t('admin.copy') }}</p></div></div>
+        <div class="page-heading"><div><p class="eyebrow">{{ t('admin.eyebrow') }}</p><h1>{{ t('admin.heading') }}</h1><p class="muted">{{ t(activeTab === 'overview' ? 'admin.copyOverview' : activeTab === 'users' ? 'admin.copyUsers' : activeTab === 'security' ? 'admin.copySecurity' : activeTab === 'brand' ? 'admin.copyBrand' : activeTab === 'locks' ? 'admin.copyLocks' : 'admin.copySystem') }}</p></div></div>
         <div v-if="error" class="alert error">{{ error }}</div><div v-if="notice" class="alert success">{{ notice }}</div>
 
         <div v-show="activeTab === 'overview'">
