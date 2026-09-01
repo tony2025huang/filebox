@@ -41,13 +41,14 @@ type ShareGroupFile struct {
 // migrateShareGroupsSchema 创建聚合分享表。
 // migrateShareGroupsSchema creates the aggregate share tables.
 func (s *Store) migrateShareGroupsSchema() error {
-	_, err := s.DB.Exec(`CREATE TABLE IF NOT EXISTS share_groups (
+	if _, err := s.DB.Exec(`CREATE TABLE IF NOT EXISTS share_groups (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   token TEXT NOT NULL UNIQUE,
   created_by INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   expires_at TEXT NOT NULL,
   download_count INTEGER NOT NULL DEFAULT 0,
   max_downloads INTEGER NOT NULL DEFAULT 0,
+  last_download_at TEXT,
   revoked_at TEXT,
   created_at TEXT NOT NULL
 );
@@ -60,7 +61,16 @@ CREATE TABLE IF NOT EXISTS share_group_files (
   display_order INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_share_group_files_group ON share_group_files(group_id, display_order, id);`)
+	CREATE INDEX IF NOT EXISTS idx_share_group_files_group ON share_group_files(group_id, display_order, id);`); err != nil {
+		return err
+	}
+	columns, err := tableColumns(s.DB, "share_groups")
+	if err != nil {
+		return err
+	}
+	if !columns["last_download_at"] {
+		_, err = s.DB.Exec("ALTER TABLE share_groups ADD COLUMN last_download_at TEXT")
+	}
 	return err
 }
 
@@ -227,10 +237,27 @@ func (s *Store) RevokeShareGroup(ctx context.Context, token string, ownerID int6
 
 // IncrementShareGroupDownloads 原子消耗一次聚合分享下载次数，返回是否允许。
 // IncrementShareGroupDownloads atomically consumes one aggregate download slot and reports whether it is allowed.
-func (s *Store) IncrementShareGroupDownloads(ctx context.Context, token string, maxDownloads int) (bool, error) {
-	now := time.Now().UTC().Format(time.RFC3339)
-	result, err := s.DB.ExecContext(ctx, `UPDATE share_groups SET download_count = download_count + 1
-WHERE token = ? AND revoked_at IS NULL AND expires_at > ? AND (max_downloads = 0 OR download_count < max_downloads)`, token, now)
+// Range requests may share one slot within the rolling 60-second window when windowMode is true.
+func (s *Store) IncrementShareGroupDownloads(ctx context.Context, token string, maxDownloads int, windowMode bool) (bool, error) {
+	_ = maxDownloads
+	now := time.Now().UTC()
+	nowValue := now.Format(time.RFC3339)
+	if windowMode {
+		windowStart := now.Add(-60 * time.Second).Format(time.RFC3339)
+		result, err := s.DB.ExecContext(ctx, `UPDATE share_groups SET
+  download_count = CASE WHEN last_download_at IS NOT NULL AND julianday(last_download_at) > julianday(?) THEN download_count ELSE download_count + 1 END,
+  last_download_at = ?
+WHERE token = ? AND revoked_at IS NULL AND expires_at > ?
+  AND (max_downloads = 0 OR download_count < max_downloads
+    OR (last_download_at IS NOT NULL AND julianday(last_download_at) > julianday(?)))`, windowStart, nowValue, token, nowValue, windowStart)
+		if err != nil {
+			return false, err
+		}
+		count, err := result.RowsAffected()
+		return count == 1, err
+	}
+	result, err := s.DB.ExecContext(ctx, `UPDATE share_groups SET download_count = download_count + 1, last_download_at = NULL
+WHERE token = ? AND revoked_at IS NULL AND expires_at > ? AND (max_downloads = 0 OR download_count < max_downloads)`, token, nowValue)
 	if err != nil {
 		return false, err
 	}

@@ -2985,7 +2985,7 @@ func (s *Server) shareDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer handle.Close()
-	allowed, err := s.store.IncrementShareDownloads(r.Context(), token, share.MaxDownloads)
+	allowed, err := s.store.IncrementShareDownloads(r.Context(), token, int64(share.MaxDownloads), r.Header.Get("Range") != "")
 	if err != nil {
 		reason = "download_count_failed"
 		writeError(w, http.StatusInternalServerError, "分享下载失败")

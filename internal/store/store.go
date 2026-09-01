@@ -511,6 +511,7 @@ func (s *Store) migrateSharesSchema() error {
   expires_at TEXT NOT NULL,
   download_count INTEGER NOT NULL DEFAULT 0,
   max_downloads INTEGER NOT NULL DEFAULT 0,
+  last_download_at TEXT,
   revoked_at TEXT,
   created_at TEXT NOT NULL
 );
@@ -526,6 +527,11 @@ CREATE INDEX IF NOT EXISTS idx_shares_revoked ON shares(revoked_at);`); err != n
 	}
 	if !columns["revoked_at"] {
 		if _, err := s.DB.Exec("ALTER TABLE shares ADD COLUMN revoked_at TEXT"); err != nil {
+			return err
+		}
+	}
+	if !columns["last_download_at"] {
+		if _, err := s.DB.Exec("ALTER TABLE shares ADD COLUMN last_download_at TEXT"); err != nil {
 			return err
 		}
 	}
@@ -1590,13 +1596,6 @@ func (s *Store) DeleteUploadTask(ctx context.Context, taskID string) error {
 	}
 	// Keep the expiration check and deletion in one write transaction. A task can
 	// finish between ListExpiredUploadTasks and this call, and must then be kept.
-	now := time.Now().UTC().Format(time.RFC3339)
-	if _, err := tx.ExecContext(ctx, `UPDATE upload_collections
-		SET upload_count = MAX(0, upload_count - 1), updated_at = ?
-		WHERE id = (SELECT collection_id FROM upload_tasks WHERE id = ? AND status = 'pending')`, now, taskID); err != nil {
-		tx.Rollback()
-		return err
-	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM chunks
 		WHERE task_id = ? AND EXISTS (SELECT 1 FROM upload_tasks WHERE id = ? AND status = 'pending')`, taskID, taskID); err != nil {
 		tx.Rollback()
@@ -1769,6 +1768,19 @@ func (s *Store) completeUploadWithCollection(ctx context.Context, task UploadTas
 		if expiresAt <= now {
 			tx.Rollback()
 			return File{}, ErrCollectionExpired
+		}
+		result, err := tx.ExecContext(ctx, `UPDATE upload_collections SET upload_count = upload_count + 1, updated_at = ?
+WHERE id = ? AND revoked_at IS NULL AND expires_at > ? AND (max_uploads = 0 OR upload_count < max_uploads)`, now, task.CollectionID, now)
+		if err != nil {
+			tx.Rollback()
+			return File{}, err
+		}
+		if count, err := result.RowsAffected(); err != nil {
+			tx.Rollback()
+			return File{}, err
+		} else if count != 1 {
+			tx.Rollback()
+			return File{}, ErrCollectionLimit
 		}
 		if err := s.insertCollectionFileTx(ctx, tx, task.CollectionID, file.ID, originalName, remark, now); err != nil {
 			tx.Rollback()
@@ -2024,10 +2036,27 @@ func (s *Store) DeleteShareByToken(ctx context.Context, token string, ownerID in
 
 // IncrementShareDownloads atomically consumes one available download slot.
 // IncrementShareDownloads 原子消耗一次可用下载次数，过期或超限时返回 false。
-func (s *Store) IncrementShareDownloads(ctx context.Context, token string, maxDownloads int) (bool, error) {
+// Range requests may share one slot within the rolling 60-second window when windowMode is true.
+func (s *Store) IncrementShareDownloads(ctx context.Context, token string, maxDownloads int64, windowMode bool) (bool, error) {
 	_ = maxDownloads
-	result, err := s.DB.ExecContext(ctx, `UPDATE shares SET download_count = download_count + 1
-WHERE token = ? AND revoked_at IS NULL AND expires_at > ? AND (max_downloads = 0 OR download_count < max_downloads)`, token, time.Now().UTC().Format(time.RFC3339))
+	now := time.Now().UTC()
+	nowValue := now.Format(time.RFC3339)
+	if windowMode {
+		windowStart := now.Add(-60 * time.Second).Format(time.RFC3339)
+		result, err := s.DB.ExecContext(ctx, `UPDATE shares SET
+  download_count = CASE WHEN last_download_at IS NOT NULL AND julianday(last_download_at) > julianday(?) THEN download_count ELSE download_count + 1 END,
+  last_download_at = ?
+WHERE token = ? AND revoked_at IS NULL AND expires_at > ?
+  AND (max_downloads = 0 OR download_count < max_downloads
+    OR (last_download_at IS NOT NULL AND julianday(last_download_at) > julianday(?)))`, windowStart, nowValue, token, nowValue, windowStart)
+		if err != nil {
+			return false, err
+		}
+		count, err := result.RowsAffected()
+		return count == 1, err
+	}
+	result, err := s.DB.ExecContext(ctx, `UPDATE shares SET download_count = download_count + 1, last_download_at = NULL
+WHERE token = ? AND revoked_at IS NULL AND expires_at > ? AND (max_downloads = 0 OR download_count < max_downloads)`, token, nowValue)
 	if err != nil {
 		return false, err
 	}
@@ -2283,8 +2312,8 @@ WHERE token = ? AND revoked_at IS NULL AND expires_at > ? AND (max_uploads = 0 O
 	return collection, nil
 }
 
-// CreateCollectionUploadTask reserves a collection slot, quota, and task atomically.
-// CreateCollectionUploadTask 在一个事务中预留收集次数、用户配额和分片任务。
+// CreateCollectionUploadTask validates collection capacity, quota, and creates a pending task atomically.
+// CreateCollectionUploadTask 在一个事务中校验收集容量、用户配额并创建待处理分片任务。
 func (s *Store) CreateCollectionUploadTask(ctx context.Context, task UploadTask, token string) error {
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
@@ -2320,14 +2349,7 @@ FROM upload_collections WHERE token = ?`, token).Scan(&collection.ID, &collectio
 	if used+pending+task.Size > quota {
 		return &QuotaError{UsedBytes: used, QuotaBytes: quota, FileSize: task.Size}
 	}
-	result, err := tx.ExecContext(ctx, `UPDATE upload_collections SET upload_count = upload_count + 1, updated_at = ?
-WHERE id = ? AND revoked_at IS NULL AND expires_at > ? AND (max_uploads = 0 OR upload_count < max_uploads)`, now, collection.ID, now)
-	if err != nil {
-		return err
-	}
-	if count, err := result.RowsAffected(); err != nil {
-		return err
-	} else if count != 1 {
+	if collection.MaxUploads > 0 && collection.UploadCount >= collection.MaxUploads {
 		return ErrCollectionLimit
 	}
 	_, err = tx.ExecContext(ctx, "INSERT INTO upload_tasks(id, user_id, collection_id, remark, name, size, mime, chunk_size, total_chunks, status, storage_dir, resolve, created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, '', ?, ?)", task.ID, task.UserID, task.CollectionID, task.Remark, task.Name, task.Size, task.Mime, task.ChunkSize, task.TotalChunks, task.StorageDir, now, now)

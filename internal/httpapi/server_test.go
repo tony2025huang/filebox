@@ -93,6 +93,19 @@ func TestUploadCollectionLifecycleAndAnonymousUpload(t *testing.T) {
 	if secondInit.Code != http.StatusOK {
 		t.Fatalf("second collection init status = %d: %s", secondInit.Code, secondInit.Body.String())
 	}
+	secondTaskID := responseData(t, secondInit)["taskId"].(string)
+	secondChunk := testBinaryRequest(t, handler, http.MethodPut, "/api/collections/"+collectionToken+"/upload-chunk/"+secondTaskID+"/0", "", []byte("x"))
+	if secondChunk.Code != http.StatusOK {
+		t.Fatalf("second collection chunk status = %d: %s", secondChunk.Code, secondChunk.Body.String())
+	}
+	secondComplete := testJSONRequest(t, handler, http.MethodPost, "/api/collections/"+collectionToken+"/upload-complete/"+secondTaskID, "", `{}`)
+	if secondComplete.Code != http.StatusOK {
+		t.Fatalf("second collection complete status = %d: %s", secondComplete.Code, secondComplete.Body.String())
+	}
+	var uploadCount int
+	if err := db.DB.QueryRow("SELECT upload_count FROM upload_collections WHERE id = ?", collectionID).Scan(&uploadCount); err != nil || uploadCount != 2 {
+		t.Fatalf("collection upload_count = %d, %v; want 2", uploadCount, err)
+	}
 	thirdInit := testJSONRequest(t, handler, http.MethodPost, "/api/collections/"+collectionToken+"/upload-init", "", `{"name":"third.txt","size":1,"chunkSize":0}`)
 	if thirdInit.Code != http.StatusForbidden {
 		t.Fatalf("collection limit status = %d: %s", thirdInit.Code, thirdInit.Body.String())
@@ -114,8 +127,31 @@ func TestUploadCollectionLifecycleAndAnonymousUpload(t *testing.T) {
 		t.Fatalf("revoked collection init = %d: %s", blocked.Code, blocked.Body.String())
 	}
 	var auditCount int
-	if err := db.DB.QueryRow("SELECT COUNT(*) FROM audit_logs WHERE action = 'upload_collect' AND reason = 'collection_upload'").Scan(&auditCount); err != nil || auditCount != 1 {
+	if err := db.DB.QueryRow("SELECT COUNT(*) FROM audit_logs WHERE action = 'upload_collect' AND reason = 'collection_upload'").Scan(&auditCount); err != nil || auditCount != 2 {
 		t.Fatalf("collection success audit count = %d, %v", auditCount, err)
+	}
+}
+
+// TestCollectionUploadInitDoesNotConsumeSlots verifies empty initializations do not occupy collection slots.
+// TestCollectionUploadInitDoesNotConsumeSlots 验证空 init 不占用收集箱槽位。
+func TestCollectionUploadInitDoesNotConsumeSlots(t *testing.T) {
+	db, handler := newTestServer(t)
+	token := testAdminToken(t, handler)
+	created := testJSONRequest(t, handler, http.MethodPost, "/api/collections", token, `{"name":"init-only","expiresInHours":24,"maxUploads":2}`)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create collection status = %d: %s", created.Code, created.Body.String())
+	}
+	collection := responseData(t, created)
+	collectionToken := collection["token"].(string)
+	for i := 0; i < 3; i++ {
+		init := testJSONRequest(t, handler, http.MethodPost, "/api/collections/"+collectionToken+"/upload-init", "", `{"name":"empty-`+strconv.Itoa(i)+`.txt","size":1,"chunkSize":0}`)
+		if init.Code != http.StatusOK {
+			t.Fatalf("empty collection init %d status = %d: %s", i+1, init.Code, init.Body.String())
+		}
+	}
+	var uploadCount int
+	if err := db.DB.QueryRow("SELECT upload_count FROM upload_collections WHERE token = ?", collectionToken).Scan(&uploadCount); err != nil || uploadCount != 0 {
+		t.Fatalf("empty init upload_count = %d, %v; want 0", uploadCount, err)
 	}
 }
 

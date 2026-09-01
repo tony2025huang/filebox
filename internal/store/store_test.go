@@ -135,7 +135,7 @@ func TestUploadTaskProgressAndConditionalDelete(t *testing.T) {
 	}
 }
 
-func TestDeleteCollectionUploadTasksReleasesSlots(t *testing.T) {
+func TestDeleteCollectionUploadTasksDoesNotChangeSlots(t *testing.T) {
 	db, err := Open(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -161,8 +161,8 @@ func TestDeleteCollectionUploadTasksReleasesSlots(t *testing.T) {
 	if err := db.DB.QueryRow("SELECT upload_count FROM upload_collections WHERE id = ?", collection.ID).Scan(&count); err != nil {
 		t.Fatal(err)
 	}
-	if count != 2 {
-		t.Fatalf("upload_count before cleanup = %d, want 2", count)
+	if count != 0 {
+		t.Fatalf("upload_count before cleanup = %d, want 0", count)
 	}
 	old := time.Now().UTC().Add(-25 * time.Hour).Format(time.RFC3339)
 	if _, err := db.DB.Exec("UPDATE upload_tasks SET created_at = ? WHERE collection_id = ?", old, collection.ID); err != nil {
@@ -409,11 +409,11 @@ func TestShareStorageAndSettings(t *testing.T) {
 	if err != nil || len(shares) != 1 {
 		t.Fatalf("ListSharesByFile() = %d, %v", len(shares), err)
 	}
-	allowed, err := db.IncrementShareDownloads(ctx, "storage-token", 1)
+	allowed, err := db.IncrementShareDownloads(ctx, "storage-token", 1, false)
 	if err != nil || !allowed {
 		t.Fatalf("first IncrementShareDownloads() = %t, %v", allowed, err)
 	}
-	allowed, err = db.IncrementShareDownloads(ctx, "storage-token", 1)
+	allowed, err = db.IncrementShareDownloads(ctx, "storage-token", 1, false)
 	if err != nil || allowed {
 		t.Fatalf("second IncrementShareDownloads() = %t, %v", allowed, err)
 	}
@@ -443,6 +443,82 @@ func TestShareStorageAndSettings(t *testing.T) {
 	unchanged, err := db.GetLogSettings(ctx)
 	if err != nil || !unchanged.RegisterEnabled {
 		t.Fatalf("SetSettingDefault overwrote setting = %+v, %v", unchanged, err)
+	}
+}
+
+// TestShareDownloadRangeWindowDeduplicatesContinuousRanges verifies Range-window counting and full-download behavior.
+// TestShareDownloadRangeWindowDeduplicatesContinuousRanges 验证 Range 窗口去重及完整下载计数行为。
+func TestShareDownloadRangeWindowDeduplicatesContinuousRanges(t *testing.T) {
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.EnsureAdmin("admin", "admin123", 1024*1024); err != nil {
+		t.Fatal(err)
+	}
+	user, err := db.GetUserByUsername("admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	result, err := db.DB.Exec("INSERT INTO files(user_id, name, stored_name, size, mime, sha256, md5, status, storage_path, created_at) VALUES(?, 'range.txt', 'range.txt', 1, 'text/plain', 'sha', 'md5', 'ready', ?, ?)", user.ID, "files/admin/range.txt", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fileID, err := result.LastInsertId()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := db.CreateShare(ctx, fileID, user.ID, "range-window", time.Now().UTC().Add(time.Hour), 3); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		allowed, err := db.IncrementShareDownloads(ctx, "range-window", 3, true)
+		if err != nil || !allowed {
+			t.Fatalf("Range download %d = %t, %v; want allowed", i+1, allowed, err)
+		}
+	}
+	share, err := db.GetShareByToken(ctx, "range-window")
+	if err != nil || share.DownloadCount != 1 {
+		t.Fatalf("continuous Range count = %d, %v; want 1", share.DownloadCount, err)
+	}
+
+	if err := db.CreateShare(ctx, fileID, user.ID, "full-download", time.Now().UTC().Add(time.Hour), 1); err != nil {
+		t.Fatal(err)
+	}
+	allowed, err := db.IncrementShareDownloads(ctx, "full-download", 1, false)
+	if err != nil || !allowed {
+		t.Fatalf("full download = %t, %v; want allowed", allowed, err)
+	}
+	allowed, err = db.IncrementShareDownloads(ctx, "full-download", 1, false)
+	if err != nil || allowed {
+		t.Fatalf("second full download = %t, %v; want denied", allowed, err)
+	}
+	share, err = db.GetShareByToken(ctx, "full-download")
+	if err != nil || share.DownloadCount != 1 {
+		t.Fatalf("full download count = %d, %v; want 1", share.DownloadCount, err)
+	}
+
+	if err := db.CreateShare(ctx, fileID, user.ID, "range-expired", time.Now().UTC().Add(time.Hour), 2); err != nil {
+		t.Fatal(err)
+	}
+	allowed, err = db.IncrementShareDownloads(ctx, "range-expired", 2, true)
+	if err != nil || !allowed {
+		t.Fatalf("initial expired-window Range = %t, %v; want allowed", allowed, err)
+	}
+	old := time.Now().UTC().Add(-61 * time.Second).Format(time.RFC3339)
+	if _, err := db.DB.Exec("UPDATE shares SET last_download_at = ? WHERE token = ?", old, "range-expired"); err != nil {
+		t.Fatal(err)
+	}
+	allowed, err = db.IncrementShareDownloads(ctx, "range-expired", 2, true)
+	if err != nil || !allowed {
+		t.Fatalf("Range outside window = %t, %v; want allowed", allowed, err)
+	}
+	share, err = db.GetShareByToken(ctx, "range-expired")
+	if err != nil || share.DownloadCount != 2 {
+		t.Fatalf("outside-window Range count = %d, %v; want 2", share.DownloadCount, err)
 	}
 }
 

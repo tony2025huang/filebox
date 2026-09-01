@@ -234,7 +234,7 @@ func (s *Server) shareGroupDownload(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "分享链接已过期")
 		return
 	}
-	allowed, err := s.store.IncrementShareGroupDownloads(r.Context(), token, group.MaxDownloads)
+	allowed, err := s.store.IncrementShareGroupDownloads(r.Context(), token, group.MaxDownloads, r.Header.Get("Range") != "")
 	if err != nil {
 		reason = "download_count_failed"
 		writeError(w, http.StatusInternalServerError, "分享下载失败")
@@ -336,7 +336,7 @@ func (s *Server) shareGroupBatchDownload(w http.ResponseWriter, r *http.Request)
 		writeErrorData(w, http.StatusServiceUnavailable, "系统存储空间不足，暂时禁止批量下载", map[string]string{"code": "DISK_FULL"})
 		return
 	}
-	allowed, err := s.store.IncrementShareGroupDownloads(r.Context(), token, group.MaxDownloads)
+	allowed, err := s.store.IncrementShareGroupDownloads(r.Context(), token, group.MaxDownloads, false)
 	if err != nil {
 		reason = "download_count_failed"
 		writeError(w, http.StatusInternalServerError, "分享下载失败")
