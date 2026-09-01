@@ -293,3 +293,7 @@ Object.assign(zhTW, {
 Object.assign(en, {
   'sync.viewSecret': 'View saved password', 'sync.hideSecret': 'Hide', 'sync.secretError': 'Could not read saved credentials', 'sync.savedSecretPlaceholder': 'Saved; click the eye to view', 'sync.startTime': 'Start time', 'sync.endTime': 'End time'
 })
+
+Object.assign(zhCN, { 'sync.currentFile': '当前文件', 'sync.rate': '速率', 'sync.status': '状态', 'sync.ended': '已结束', 'sync.nextRun': '下次执行' })
+Object.assign(zhTW, { 'sync.currentFile': '目前檔案', 'sync.rate': '速率', 'sync.status': '狀態', 'sync.ended': '已結束', 'sync.nextRun': '下次執行' })
+Object.assign(en, { 'sync.currentFile': 'Current file', 'sync.rate': 'Rate', 'sync.status': 'Status', 'sync.ended': 'Ended', 'sync.nextRun': 'Next run' })

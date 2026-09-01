@@ -71,6 +71,8 @@ type Server struct {
 	findUploadConflict func(context.Context, int64, string, string) (store.File, error)
 	syncMu             sync.Mutex
 	syncLocks          map[int64]*sync.Mutex
+	syncProgressMu     sync.Mutex
+	syncProgress       map[int64]*syncRunProgress
 }
 
 const uploadChunkIdleTimeout = 30 * time.Second
@@ -324,7 +326,7 @@ func NewServer(db *store.Store, config Config) *Server {
 	if config.JWTExpiry <= 0 {
 		config.JWTExpiry = 7 * 24 * time.Hour
 	}
-	return &Server{store: db, config: config, rateLimiter: rateLimiter{buckets: make(map[int64]*rate.Limiter), lastSeen: make(map[int64]time.Time), publicBuckets: make(map[string]*rate.Limiter), publicLastSeen: make(map[string]time.Time)}, findUploadConflict: db.FindUploadConflict, syncLocks: make(map[int64]*sync.Mutex)}
+	return &Server{store: db, config: config, rateLimiter: rateLimiter{buckets: make(map[int64]*rate.Limiter), lastSeen: make(map[int64]time.Time), publicBuckets: make(map[string]*rate.Limiter), publicLastSeen: make(map[string]time.Time)}, findUploadConflict: db.FindUploadConflict, syncLocks: make(map[int64]*sync.Mutex), syncProgress: make(map[int64]*syncRunProgress)}
 }
 
 func (s *Server) Handler() http.Handler {
@@ -418,6 +420,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/sync/tasks/{id}", s.requireAuth(s.deleteSyncTask))
 	mux.HandleFunc("POST /api/sync/tasks/{id}/run", s.requireAuth(s.runSyncTaskNow))
 	mux.HandleFunc("GET /api/sync/tasks/{id}/logs", s.requireAuth(s.listSyncTaskLogs))
+	mux.HandleFunc("GET /api/sync/tasks/{id}/progress", s.requireAuth(s.getSyncTaskProgress))
 
 	mux.HandleFunc("GET /api/admin/users", s.requireAdmin(s.listUsers))
 	mux.HandleFunc("POST /api/admin/users", s.requireAdmin(s.createUser))

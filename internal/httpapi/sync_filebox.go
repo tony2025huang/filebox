@@ -414,6 +414,7 @@ func (s *Server) executeSyncPushFileBox(ctx context.Context, task store.SyncTask
 		result.detail = append(result.detail, "读取源文件失败: "+s.syncErrorDetail(err))
 		return result
 	}
+	s.syncProgressSet(task.ID, func(p *syncRunProgress) { p.TotalFiles = len(files) })
 	sourceKind := task.SourceKind
 	if sourceKind == "" {
 		sourceKind = "directory"
@@ -438,6 +439,7 @@ func (s *Server) executeSyncPushFileBox(ctx context.Context, task store.SyncTask
 	limiter := s.rateLimiter.limiterFor(task.UserID, settings.UploadRateLimit)
 	root := filepath.ToSlash(filepath.Join("files", strconv.FormatInt(task.UserID, 10))) + "/"
 	for _, file := range files {
+		s.syncProgressSet(task.ID, func(p *syncRunProgress) { p.CurrentFile = file.Name })
 		relative := filepath.ToSlash(strings.TrimPrefix(filepath.ToSlash(file.StoragePath), root))
 		if task.SourcePath != "" {
 			if relative == task.SourcePath {
@@ -497,6 +499,7 @@ func (s *Server) executeSyncPushFileBox(ctx context.Context, task store.SyncTask
 		result.files++
 		result.bytes += file.Size
 		result.detail = append(result.detail, relative+": uploaded ("+strconv.FormatInt(file.Size, 10)+" bytes)")
+		s.syncProgressSet(task.ID, func(p *syncRunProgress) { p.DoneFiles++; p.TransferredBytes += file.Size })
 	}
 	return result
 }
@@ -513,6 +516,7 @@ func (s *Server) executeSyncPullFileBox(ctx context.Context, task store.SyncTask
 	}
 	defer client.close()
 	process := func(entry remoteBrowseEntry, relative string) error {
+		s.syncProgressSet(task.ID, func(p *syncRunProgress) { p.CurrentFile = entry.Name })
 		if entry.Size > s.config.MaxFileSize {
 			result.detail = append(result.detail, relative+": skipped (exceeds max file size)")
 			return nil
@@ -600,6 +604,7 @@ func (s *Server) executeSyncPullFileBox(ctx context.Context, task store.SyncTask
 		result.files++
 		result.bytes += size
 		result.detail = append(result.detail, relative+": downloaded ("+strconv.FormatInt(size, 10)+" bytes)")
+		s.syncProgressSet(task.ID, func(p *syncRunProgress) { p.DoneFiles++; p.TransferredBytes += size })
 		return nil
 	}
 	// 递归收集远端目录树（逐层 browse，MVP 不做深度限制之外的保护）。

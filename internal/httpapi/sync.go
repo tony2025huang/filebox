@@ -81,12 +81,25 @@ func publicSyncSystem(item store.RemoteSystem) map[string]any {
 	return map[string]any{"id": item.ID, "name": item.Name, "kind": kind, "host": item.Host, "url": item.URL, "port": item.Port, "username": item.Username, "authType": item.AuthType, "hostKeyFingerprint": item.HostKeyFingerprint, "hasCredentials": item.AuthSecret != "", "taskCount": item.TaskCount, "lastTestAt": item.LastTestAt, "lastTestResult": item.LastTestResult, "createdAt": item.CreatedAt}
 }
 
+// nextSyncRunTime 计算周期任务的下一次执行时间（UTC RFC3339）；非周期或 cron 非法时返回空字符串。
+// nextSyncRunTime computes the next run time of a periodic task (UTC RFC3339); empty for non-periodic or invalid cron.
+func nextSyncRunTime(scheduleType, cronExpr string, now time.Time) string {
+	if scheduleType != "periodic" || strings.TrimSpace(cronExpr) == "" {
+		return ""
+	}
+	schedule, err := cron.ParseStandard(cronExpr)
+	if err != nil {
+		return ""
+	}
+	return schedule.Next(now).UTC().Format(time.RFC3339)
+}
+
 func publicSyncTask(item store.SyncTask) map[string]any {
 	sourceKind := item.SourceKind
 	if sourceKind == "" {
 		sourceKind = "directory"
 	}
-	return map[string]any{"id": item.ID, "userId": item.UserID, "name": item.Name, "direction": item.Direction, "remoteSystemId": item.RemoteSystemID, "sourceType": item.SourceType, "sourcePath": item.SourcePath, "sourceKind": sourceKind, "targetType": item.TargetType, "targetPath": item.TargetPath, "conflictPolicy": item.ConflictPolicy, "scheduleType": item.ScheduleType, "cron": item.Cron, "enabled": item.Enabled, "lastRunAt": item.LastRunAt, "lastResult": item.LastResult, "createdAt": item.CreatedAt}
+	return map[string]any{"id": item.ID, "userId": item.UserID, "name": item.Name, "direction": item.Direction, "remoteSystemId": item.RemoteSystemID, "sourceType": item.SourceType, "sourcePath": item.SourcePath, "sourceKind": sourceKind, "targetType": item.TargetType, "targetPath": item.TargetPath, "conflictPolicy": item.ConflictPolicy, "scheduleType": item.ScheduleType, "cron": item.Cron, "enabled": item.Enabled, "lastRunAt": item.LastRunAt, "lastResult": item.LastResult, "nextRunAt": nextSyncRunTime(item.ScheduleType, item.Cron, time.Now()), "createdAt": item.CreatedAt}
 }
 
 func publicSyncLog(item store.SyncLog) map[string]any {
@@ -1204,6 +1217,37 @@ type syncRunResult struct {
 	detail  []string
 }
 
+// syncRunProgress 记录一次进行中的同步执行进度（进程内，仅用于轮询展示；不落库）。
+// syncRunProgress tracks an in-flight sync execution (in-process, polling display only; not persisted).
+type syncRunProgress struct {
+	LogID            int64  `json:"logId"`
+	StartedAt        string `json:"startedAt"`
+	Direction        string `json:"direction"`
+	TotalFiles       int    `json:"totalFiles"`
+	DoneFiles        int    `json:"doneFiles"`
+	CurrentFile      string `json:"currentFile"`
+	TransferredBytes int64  `json:"transferredBytes"`
+	UpdatedAt        string `json:"updatedAt"`
+}
+
+func (s *Server) syncProgressSet(taskID int64, fn func(*syncRunProgress)) {
+	s.syncProgressMu.Lock()
+	defer s.syncProgressMu.Unlock()
+	p := s.syncProgress[taskID]
+	if p == nil {
+		p = &syncRunProgress{}
+		s.syncProgress[taskID] = p
+	}
+	fn(p)
+	p.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+}
+
+func (s *Server) syncProgressDelete(taskID int64) {
+	s.syncProgressMu.Lock()
+	defer s.syncProgressMu.Unlock()
+	delete(s.syncProgress, taskID)
+}
+
 func (s *Server) executeSyncTask(ctx context.Context, task store.SyncTask) store.SyncLog {
 	// executeSyncTask 在执行前再次校验任务所有者的只读状态。
 	// executeSyncTask rechecks the task owner's read-only state before execution.
@@ -1238,6 +1282,7 @@ func (s *Server) executeSyncTask(ctx context.Context, task store.SyncTask) store
 	}
 	runAt := time.Now().UTC().Format(time.RFC3339)
 	runningEntry, logErr := s.store.CreateSyncLog(context.Background(), store.SyncLog{TaskID: task.ID, UserID: task.UserID, RunAt: runAt, Direction: task.Direction, Result: "running", Message: "执行中"})
+	s.syncProgressSet(task.ID, func(p *syncRunProgress) { p.LogID = runningEntry.ID; p.StartedAt = runAt; p.Direction = task.Direction })
 	if logErr != nil {
 		log.Printf("create sync running log: %v", logErr)
 	}
@@ -1271,6 +1316,7 @@ func (s *Server) executeSyncTask(ctx context.Context, task store.SyncTask) store
 	if err := s.store.UpdateSyncTaskResult(context.Background(), task.ID, runAt, resultValue); err != nil {
 		log.Printf("update sync task result: %v", err)
 	}
+	s.syncProgressDelete(task.ID)
 	return entry
 }
 
@@ -1340,6 +1386,7 @@ func (s *Server) executeSyncPush(ctx context.Context, task store.SyncTask, syste
 		result.detail = append(result.detail, "读取源文件失败: "+s.syncErrorDetail(err))
 		return result
 	}
+	s.syncProgressSet(task.ID, func(p *syncRunProgress) { p.TotalFiles = len(files) })
 	sourceKind := task.SourceKind
 	if sourceKind == "" {
 		sourceKind = "directory"
@@ -1365,6 +1412,7 @@ func (s *Server) executeSyncPush(ctx context.Context, task store.SyncTask, syste
 	limiter := s.rateLimiter.limiterFor(task.UserID, settings.UploadRateLimit)
 	root := filepath.ToSlash(filepath.Join("files", strconv.FormatInt(task.UserID, 10))) + "/"
 	for _, file := range files {
+		s.syncProgressSet(task.ID, func(p *syncRunProgress) { p.CurrentFile = file.Name })
 		relative := filepath.ToSlash(strings.TrimPrefix(filepath.ToSlash(file.StoragePath), root))
 		if task.SourcePath != "" {
 			if relative == task.SourcePath {
@@ -1450,6 +1498,7 @@ func (s *Server) executeSyncPush(ctx context.Context, task store.SyncTask, syste
 		result.files++
 		result.bytes += file.Size
 		result.detail = append(result.detail, relative+": uploaded ("+strconv.FormatInt(file.Size, 10)+" bytes)")
+		s.syncProgressSet(task.ID, func(p *syncRunProgress) { p.DoneFiles++; p.TransferredBytes += file.Size })
 	}
 	if result.message != "" {
 		return result
@@ -1514,6 +1563,7 @@ func (s *Server) executeSyncPull(ctx context.Context, task store.SyncTask, syste
 		if remoteInfo.IsDir() {
 			return nil
 		}
+		s.syncProgressSet(task.ID, func(p *syncRunProgress) { p.CurrentFile = remoteInfo.Name() })
 		relative := pathpkg.Base(remotePath)
 		if info.IsDir() {
 			relative = remoteRelative(task.SourcePath, remotePath)
@@ -1635,6 +1685,7 @@ func (s *Server) executeSyncPull(ctx context.Context, task store.SyncTask, syste
 		result.files++
 		result.bytes += remoteInfo.Size()
 		result.detail = append(result.detail, relative+": downloaded ("+strconv.FormatInt(remoteInfo.Size(), 10)+" bytes)")
+		s.syncProgressSet(task.ID, func(p *syncRunProgress) { p.DoneFiles++; p.TransferredBytes += remoteInfo.Size() })
 		return nil
 	}
 	if info.IsDir() {
@@ -1655,4 +1706,31 @@ func (s *Server) executeSyncPull(ctx context.Context, task store.SyncTask, syste
 		result.detail = append(result.detail, pathpkg.Base(task.SourcePath)+": "+s.syncErrorDetail(err))
 	}
 	return result
+}
+
+// getSyncTaskProgress 返回任务进行中的同步进度；无进行中任务时 running=false。
+// getSyncTaskProgress returns the in-flight progress of a task (running=false when idle).
+func (s *Server) getSyncTaskProgress(w http.ResponseWriter, r *http.Request) {
+	item, err := s.getSyncTaskForRequest(r)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "同步任务不存在")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "读取同步任务失败")
+		return
+	}
+	s.syncProgressMu.Lock()
+	progress := s.syncProgress[item.ID]
+	var snapshot *syncRunProgress
+	if progress != nil {
+		copy := *progress
+		snapshot = &copy
+	}
+	s.syncProgressMu.Unlock()
+	if snapshot == nil {
+		writeData(w, http.StatusOK, "无进行中任务", map[string]any{"running": false})
+		return
+	}
+	writeData(w, http.StatusOK, "获取成功", map[string]any{"running": true, "progress": snapshot})
 }
