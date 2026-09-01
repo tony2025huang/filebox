@@ -400,8 +400,8 @@ func (s *Store) RemoveShareGroupFile(ctx context.Context, groupID, fileID int64)
 func (s *Store) UpdateShareGroupAttributes(ctx context.Context, token string, ownerID int64, expiresAt string, maxDownloads int) error {
 	now := time.Now().UTC().Format(time.RFC3339)
 	result, err := s.DB.ExecContext(ctx, `UPDATE share_groups SET expires_at = ?, max_downloads = ?
-WHERE token = ? AND created_by = ? AND revoked_at IS NULL AND expires_at > ? AND (? = 0 OR ? >= download_count)`,
-		expiresAt, maxDownloads, token, ownerID, now, maxDownloads, maxDownloads)
+WHERE token = ? AND created_by = ? AND revoked_at IS NULL AND ? > ? AND (? = 0 OR ? >= download_count)`,
+		expiresAt, maxDownloads, token, ownerID, expiresAt, now, maxDownloads, maxDownloads)
 	if err != nil {
 		return err
 	}
