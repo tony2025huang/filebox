@@ -199,7 +199,7 @@ async function loadFiles() { loading.value = true; error.value = ''; try { const
 // loadFolders fetches all of the user's folders for breadcrumbs and child-folder navigation.
 async function loadFolders() { try { const body = await api('/api/folders'); folders.value = body.data.items } catch { /* 目录不可用时保持空导航 */ } }
 function search() { page.value = 1; keyword.value = searchInput.value.trim(); loadFiles() }
-function navigateDir(path) { currentDir.value = path; page.value = 1; loadFiles() }
+function navigateDir(path) { currentDir.value = String(path || '').replace(/\\/g, '/').replace(/^\/+|\/+$/g, ''); page.value = 1; loadFiles() }
 function openNewFolder() { if (readOnly.value) return; folderPrompt.value = { rename: false, name: '' }; folderError.value = '' }
 function openRenameFolder(folder) { if (readOnly.value) return; folderPrompt.value = { rename: true, id: folder.id, name: folder.name }; folderError.value = '' }
 // submitFolder 创建或重命名目录，成功后刷新目录与文件列表。
