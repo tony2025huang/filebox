@@ -335,6 +335,44 @@ func TestSyncTaskValidationAndLogRetention(t *testing.T) {
 	}
 }
 
+func TestSyncTaskExecutionCompletesLog(t *testing.T) {
+	_, handler := newTestServer(t)
+	token := testAdminToken(t, handler)
+	createdSystem := testJSONRequest(t, handler, http.MethodPost, "/api/sync/systems", token, `{"name":"unreachable-sftp","host":"127.0.0.1","port":1,"username":"sync","authType":"password","authSecret":"secret"}`)
+	if createdSystem.Code != http.StatusCreated {
+		t.Fatalf("create unreachable sftp = %d: %s", createdSystem.Code, createdSystem.Body.String())
+	}
+	systemID := int64(responseData(t, createdSystem)["id"].(float64))
+	createdTask := testJSONRequest(t, handler, http.MethodPost, "/api/sync/tasks", token, `{"name":"unreachable-task","direction":"push","remoteSystemId":`+strconv.FormatInt(systemID, 10)+`,"sourceType":"filebox","sourcePath":"","targetType":"sftp","targetPath":"/","conflictPolicy":"overwrite","scheduleType":"once","enabled":true}`)
+	if createdTask.Code != http.StatusCreated {
+		t.Fatalf("create unreachable task = %d: %s", createdTask.Code, createdTask.Body.String())
+	}
+	taskID := int64(responseData(t, createdTask)["id"].(float64))
+	run := testJSONRequest(t, handler, http.MethodPost, "/api/sync/tasks/"+strconv.FormatInt(taskID, 10)+"/run", token, "")
+	if run.Code != http.StatusAccepted {
+		t.Fatalf("run unreachable task = %d: %s", run.Code, run.Body.String())
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		detail := testJSONRequest(t, handler, http.MethodGet, "/api/sync/tasks/"+strconv.FormatInt(taskID, 10), token, "")
+		if detail.Code == http.StatusOK {
+			for _, rawLog := range responseData(t, detail)["logs"].([]any) {
+				entry := rawLog.(map[string]any)
+				if entry["result"] != "running" {
+					finishedAt, _ := entry["finishedAt"].(string)
+					if finishedAt == "" {
+						t.Fatalf("completed sync log has no finishedAt: %#v", entry)
+					}
+					return
+				}
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("sync task left only running logs")
+}
+
 func storeSyncLog(taskID, userID int64, runAt string) store.SyncLog {
 	return store.SyncLog{TaskID: taskID, UserID: userID, RunAt: runAt, Direction: "push", Result: "success", Message: "ok"}
 }

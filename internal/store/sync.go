@@ -60,16 +60,17 @@ type SyncTask struct {
 // SyncLog 是一次同步执行的汇总和文件级详情。
 // SyncLog stores one execution summary and its file-level details.
 type SyncLog struct {
-	ID        int64  `json:"id"`
-	TaskID    int64  `json:"taskId"`
-	UserID    int64  `json:"userId"`
-	RunAt     string `json:"runAt"`
-	Direction string `json:"direction"`
-	Result    string `json:"result"`
-	Files     int64  `json:"files"`
-	Bytes     int64  `json:"bytes"`
-	Message   string `json:"message"`
-	Detail    string `json:"detail"`
+	ID         int64  `json:"id"`
+	TaskID     int64  `json:"taskId"`
+	UserID     int64  `json:"userId"`
+	RunAt      string `json:"runAt"`
+	FinishedAt string `json:"finishedAt"`
+	Direction  string `json:"direction"`
+	Result     string `json:"result"`
+	Files      int64  `json:"files"`
+	Bytes      int64  `json:"bytes"`
+	Message    string `json:"message"`
+	Detail     string `json:"detail"`
 }
 
 // migrateSyncSchema 创建同步功能所需的三张表。
@@ -116,16 +117,55 @@ CREATE TABLE IF NOT EXISTS sync_logs (
   user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   run_at TEXT NOT NULL,
   direction TEXT NOT NULL,
-  result TEXT NOT NULL CHECK(result IN ('success', 'failure')),
+  result TEXT NOT NULL,
   files INTEGER NOT NULL DEFAULT 0,
   bytes INTEGER NOT NULL DEFAULT 0,
   message TEXT NOT NULL DEFAULT '',
-  detail TEXT NOT NULL DEFAULT ''
+  detail TEXT NOT NULL DEFAULT '',
+  finished_at TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_sync_logs_task_run ON sync_logs(task_id, run_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_sync_logs_run ON sync_logs(run_at);`)
 	if err != nil {
 		return err
+	}
+	syncLogColumns, err := tableColumns(s.DB, "sync_logs")
+	if err != nil {
+		return err
+	}
+	if !syncLogColumns["finished_at"] {
+		tx, err := s.DB.Begin()
+		if err != nil {
+			return err
+		}
+		const schema = `
+CREATE TABLE sync_logs_new (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id INTEGER NOT NULL REFERENCES sync_tasks(id) ON DELETE CASCADE,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  run_at TEXT NOT NULL,
+  direction TEXT NOT NULL,
+  result TEXT NOT NULL,
+  files INTEGER NOT NULL DEFAULT 0,
+  bytes INTEGER NOT NULL DEFAULT 0,
+  message TEXT NOT NULL DEFAULT '',
+  detail TEXT NOT NULL DEFAULT '',
+  finished_at TEXT NOT NULL DEFAULT ''
+);
+INSERT INTO sync_logs_new(id, task_id, user_id, run_at, direction, result, files, bytes, message, detail, finished_at)
+  SELECT id, task_id, user_id, run_at, direction, result, files, bytes, message, detail, '' FROM sync_logs;
+DROP TABLE sync_logs;
+ALTER TABLE sync_logs_new RENAME TO sync_logs;
+CREATE INDEX IF NOT EXISTS idx_sync_logs_task_run ON sync_logs(task_id, run_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_sync_logs_run ON sync_logs(run_at);
+`
+		if _, err := tx.Exec(schema); err != nil {
+			tx.Rollback()
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
 	}
 	columns, err := tableColumns(s.DB, "remote_systems")
 	if err != nil {
@@ -492,12 +532,28 @@ func (s *Store) CreateSyncLog(ctx context.Context, item SyncLog) (SyncLog, error
 	if item.RunAt == "" {
 		item.RunAt = time.Now().UTC().Format(time.RFC3339)
 	}
-	result, err := s.DB.ExecContext(ctx, `INSERT INTO sync_logs(task_id, user_id, run_at, direction, result, files, bytes, message, detail) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)`, item.TaskID, item.UserID, item.RunAt, item.Direction, item.Result, item.Files, item.Bytes, item.Message, item.Detail)
+	result, err := s.DB.ExecContext(ctx, `INSERT INTO sync_logs(task_id, user_id, run_at, finished_at, direction, result, files, bytes, message, detail) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, item.TaskID, item.UserID, item.RunAt, item.FinishedAt, item.Direction, item.Result, item.Files, item.Bytes, item.Message, item.Detail)
 	if err != nil {
 		return SyncLog{}, err
 	}
 	item.ID, err = result.LastInsertId()
 	return item, err
+}
+
+// UpdateSyncLogResult completes one execution log in place.
+func (s *Store) UpdateSyncLogResult(ctx context.Context, logID int64, result, finishedAt string, files, bytes int64, message, detail string) error {
+	updated, err := s.DB.ExecContext(ctx, "UPDATE sync_logs SET result = ?, finished_at = ?, files = ?, bytes = ?, message = ?, detail = ? WHERE id = ?", result, finishedAt, files, bytes, message, detail, logID)
+	if err != nil {
+		return err
+	}
+	affected, err := updated.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // UpdateSyncTaskResult 更新任务最近执行状态。
@@ -509,7 +565,7 @@ func (s *Store) UpdateSyncTaskResult(ctx context.Context, taskID int64, runAt, r
 
 func scanSyncLog(row interface{ Scan(...any) error }) (SyncLog, error) {
 	var item SyncLog
-	err := row.Scan(&item.ID, &item.TaskID, &item.UserID, &item.RunAt, &item.Direction, &item.Result, &item.Files, &item.Bytes, &item.Message, &item.Detail)
+	err := row.Scan(&item.ID, &item.TaskID, &item.UserID, &item.RunAt, &item.FinishedAt, &item.Direction, &item.Result, &item.Files, &item.Bytes, &item.Message, &item.Detail)
 	if errors.Is(err, sql.ErrNoRows) {
 		return SyncLog{}, ErrNotFound
 	}
@@ -523,7 +579,7 @@ func (s *Store) ListSyncLogs(ctx context.Context, taskID int64, page, pageSize i
 	if err := s.DB.QueryRowContext(ctx, "SELECT COUNT(id) FROM sync_logs WHERE task_id = ?", taskID).Scan(&total); err != nil {
 		return nil, 0, err
 	}
-	rows, err := s.DB.QueryContext(ctx, "SELECT id, task_id, user_id, run_at, direction, result, files, bytes, message, detail FROM sync_logs WHERE task_id = ? ORDER BY run_at DESC, id DESC LIMIT ? OFFSET ?", taskID, pageSize, (page-1)*pageSize)
+	rows, err := s.DB.QueryContext(ctx, "SELECT id, task_id, user_id, run_at, COALESCE(finished_at, ''), direction, result, files, bytes, message, detail FROM sync_logs WHERE task_id = ? ORDER BY run_at DESC, id DESC LIMIT ? OFFSET ?", taskID, pageSize, (page-1)*pageSize)
 	if err != nil {
 		return nil, 0, err
 	}

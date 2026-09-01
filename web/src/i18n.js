@@ -220,6 +220,10 @@ Object.assign(zhCN, { 'logs.fromTime': '开始时间', 'logs.toTime': '结束时
 Object.assign(zhTW, { 'logs.fromTime': '開始時間', 'logs.toTime': '結束時間' })
 Object.assign(en, { 'logs.fromTime': 'Start time', 'logs.toTime': 'End time' })
 
+Object.assign(zhCN, { 'notice.passwordChanged': '密码已修改' })
+Object.assign(zhTW, { 'notice.passwordChanged': '密碼已修改' })
+Object.assign(en, { 'notice.passwordChanged': 'Password changed' })
+
 export const dictionaries = { 'zh-CN': zhCN, 'zh-TW': zhTW, en }
 export const currentLocale = ref('zh-CN')
 export const systemLocale = ref('zh-CN')

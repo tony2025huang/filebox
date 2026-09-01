@@ -90,7 +90,7 @@ func publicSyncTask(item store.SyncTask) map[string]any {
 }
 
 func publicSyncLog(item store.SyncLog) map[string]any {
-	return map[string]any{"id": item.ID, "taskId": item.TaskID, "runAt": item.RunAt, "direction": item.Direction, "result": item.Result, "files": item.Files, "bytes": item.Bytes, "message": item.Message, "detail": item.Detail}
+	return map[string]any{"id": item.ID, "taskId": item.TaskID, "runAt": item.RunAt, "finishedAt": item.FinishedAt, "direction": item.Direction, "result": item.Result, "files": item.Files, "bytes": item.Bytes, "message": item.Message, "detail": item.Detail}
 }
 
 func parseSyncID(value string) (int64, error) {
@@ -1216,7 +1216,7 @@ func (s *Server) executeSyncTask(ctx context.Context, task store.SyncTask) store
 		// A failed owner lookup records a failure and skips execution (fail-closed), matching the scheduler and manual paths.
 		log.Printf("load sync task owner %d: %v", task.ID, ownerErr)
 		runAt := time.Now().UTC().Format(time.RFC3339)
-		entry := store.SyncLog{TaskID: task.ID, UserID: task.UserID, RunAt: runAt, Direction: task.Direction, Result: "failure", Message: "读取任务所有者失败，任务已跳过", Detail: "同步跳过: 任务所有者不可用"}
+		entry := store.SyncLog{TaskID: task.ID, UserID: task.UserID, RunAt: runAt, FinishedAt: runAt, Direction: task.Direction, Result: "failure", Message: "读取任务所有者失败，任务已跳过", Detail: "同步跳过: 任务所有者不可用"}
 		if _, logErr := s.store.CreateSyncLog(context.Background(), entry); logErr != nil {
 			log.Printf("create sync log: %v", logErr)
 		}
@@ -1227,7 +1227,7 @@ func (s *Server) executeSyncTask(ctx context.Context, task store.SyncTask) store
 	}
 	if s.userReadOnly(owner) {
 		runAt := time.Now().UTC().Format(time.RFC3339)
-		entry := store.SyncLog{TaskID: task.ID, UserID: task.UserID, RunAt: runAt, Direction: task.Direction, Result: "failure", Message: "用户在只读时段，任务已跳过", Detail: "同步跳过: 用户在只读时段"}
+		entry := store.SyncLog{TaskID: task.ID, UserID: task.UserID, RunAt: runAt, FinishedAt: runAt, Direction: task.Direction, Result: "failure", Message: "用户在只读时段，任务已跳过", Detail: "同步跳过: 用户在只读时段"}
 		if _, logErr := s.store.CreateSyncLog(context.Background(), entry); logErr != nil {
 			log.Printf("create sync log: %v", logErr)
 		}
@@ -1237,6 +1237,10 @@ func (s *Server) executeSyncTask(ctx context.Context, task store.SyncTask) store
 		return entry
 	}
 	runAt := time.Now().UTC().Format(time.RFC3339)
+	runningEntry, logErr := s.store.CreateSyncLog(context.Background(), store.SyncLog{TaskID: task.ID, UserID: task.UserID, RunAt: runAt, Direction: task.Direction, Result: "running", Message: "执行中"})
+	if logErr != nil {
+		log.Printf("create sync running log: %v", logErr)
+	}
 	result := syncRunResult{}
 	item, err := s.store.GetRemoteSystem(ctx, task.RemoteSystemID, task.UserID, false)
 	if err == nil {
@@ -1256,9 +1260,13 @@ func (s *Server) executeSyncTask(ctx context.Context, task store.SyncTask) store
 	if result.message == "" {
 		result.message = "同步完成"
 	}
-	entry := store.SyncLog{TaskID: task.ID, UserID: task.UserID, RunAt: runAt, Direction: task.Direction, Result: resultValue, Files: result.files, Bytes: result.bytes, Message: result.message, Detail: strings.Join(result.detail, "\n")}
-	if _, logErr := s.store.CreateSyncLog(context.Background(), entry); logErr != nil {
-		log.Printf("create sync log: %v", logErr)
+	finishedAt := time.Now().UTC().Format(time.RFC3339)
+	detail := strings.Join(result.detail, "\n")
+	entry := store.SyncLog{ID: runningEntry.ID, TaskID: task.ID, UserID: task.UserID, RunAt: runAt, FinishedAt: finishedAt, Direction: task.Direction, Result: resultValue, Files: result.files, Bytes: result.bytes, Message: result.message, Detail: detail}
+	if runningEntry.ID > 0 {
+		if logErr := s.store.UpdateSyncLogResult(context.Background(), runningEntry.ID, resultValue, finishedAt, result.files, result.bytes, result.message, detail); logErr != nil {
+			log.Printf("update sync log: %v", logErr)
+		}
 	}
 	if err := s.store.UpdateSyncTaskResult(context.Background(), task.ID, runAt, resultValue); err != nil {
 		log.Printf("update sync task result: %v", err)
