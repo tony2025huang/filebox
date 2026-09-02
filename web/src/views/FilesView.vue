@@ -26,12 +26,14 @@
       <div class="transfers-header"><div><p class="eyebrow">TRANSFERS</p><h2>{{ t('files.transfers') }}</h2></div><button class="icon-button" :title="t('common.close')" @click="transfersOpen = false"><X :size="18" /></button></div>
       <div class="transfers-body">
         <div v-if="overallRate > 0" class="overall-rate"><Gauge :size="16" /><span>{{ t('files.overallRate') }}</span><strong>{{ formatRate(overallRate) }}</strong></div>
-        <h3 class="transfers-section">{{ t('files.uploads') }}<span class="transfers-count">{{ uploads.length }}</span></h3>
+        <h3 class="transfers-section"><label class="transfer-section-select"><input type="checkbox" :checked="allUploadsSelected" :aria-label="t('files.selectAll')" @change="toggleAllUploads" /><span>{{ t('files.selectAll') }}</span></label><span class="transfers-section-name">{{ t('files.uploads') }}</span><span class="transfers-count">{{ uploads.length }}</span></h3>
+        <div v-if="uploads.length" class="transfer-batch-toolbar"><span class="transfer-selection-count">{{ t('files.selectedTransfers', { count: selectedUploadIds.size }) }}</span><div class="transfer-batch-actions"><button v-if="selectedUploadIds.size" class="secondary-button" :disabled="uploadBatchBusy || !canPauseSelectedUploads" @click="pauseSelectedUploads"><Pause :size="14" /> {{ t('files.pauseSelected') }}</button><button v-if="selectedUploadIds.size" class="secondary-button" :disabled="uploadBatchBusy || !canResumeSelectedUploads" @click="resumeSelectedUploads"><Play :size="14" /> {{ t('files.resumeSelected') }}</button><button v-if="selectedUploadIds.size" class="secondary-button danger-action" :disabled="uploadBatchBusy || !canTerminateSelectedUploads" @click="terminateSelectedUploads"><X :size="14" /> {{ t('files.terminateSelected') }}</button><button class="secondary-button" :disabled="uploadBatchBusy || !canPauseAllUploads" @click="pauseAllUploads"><Pause :size="14" /> {{ t('files.pauseAll') }}</button><button class="secondary-button" :disabled="uploadBatchBusy || !canResumeAllUploads" @click="resumeAllUploads"><Play :size="14" /> {{ t('files.resumeAll') }}</button><button class="secondary-button danger-action" :disabled="uploadBatchBusy || !canTerminateAllUploads" @click="terminateAllUploads"><X :size="14" /> {{ t('files.terminateAll') }}</button></div></div>
         <div v-if="!uploads.length" class="transfers-empty">{{ t('files.noTransfers') }}</div>
-        <div v-for="item in uploads" :key="item.id" class="transfer-row" :class="{ 'transfer-failed': item.failed }"><FileUp :size="16" class="transfer-icon" /><div class="transfer-main"><div class="transfer-name"><strong :title="item.relPath || item.file.name">{{ item.relPath || item.file.name }}</strong><span :class="{ 'transfer-error-text': item.failed }" :title="item.failed ? (item.error || item.status) : item.status">{{ item.failed ? item.error || item.status : item.status }}</span></div><div class="progress-track"><span :style="{ width: item.progress + '%' }"></span></div></div><span class="transfer-percent">{{ item.failed ? '' : item.progress + '%' }}</span><button v-if="item.paused" class="icon-button" :title="t('files.resume')" @click="resumeUpload(item)"><Play :size="15" /></button><button v-else-if="item.running" class="icon-button" :title="t('files.pause')" @click="pauseUpload(item)"><Pause :size="15" /></button><button v-if="item.canContinue || item.failed" class="icon-button" :title="t('files.retry')" @click="retryUpload(item)"><RefreshCw :size="15" /></button><button v-if="item.failed" class="icon-button" :title="t('files.dismiss')" @click="dismissUpload(item)"><X :size="15" /></button></div>
-        <h3 class="transfers-section">{{ t('files.downloads') }}<span class="transfers-count">{{ downloads.length }}</span></h3>
+        <div v-for="item in uploads" :key="item.id" class="transfer-row" :class="{ 'transfer-failed': item.failed, 'row-selected': selectedUploadIds.has(item.id) }"><input type="checkbox" class="transfer-select" :checked="selectedUploadIds.has(item.id)" :aria-label="item.relPath || item.file?.name || item.name" @change="toggleUploadSelect(item.id)" /><FileUp :size="16" class="transfer-icon" /><div class="transfer-main"><div class="transfer-name"><strong :title="item.relPath || item.file?.name || item.name">{{ item.relPath || item.file?.name || item.name }}</strong><span :class="{ 'transfer-error-text': item.failed }" :title="item.failed ? (item.error || item.status) : item.status">{{ item.failed ? item.error || item.status : item.status }}</span></div><div class="progress-track"><span :style="{ width: item.progress + '%' }"></span></div></div><span class="transfer-percent">{{ item.failed ? '' : item.progress + '%' }}</span><button v-if="item.paused && !item.terminating" class="icon-button" :title="t('files.resume')" :disabled="!canResumeUpload(item)" @click="resumeUpload(item)"><Play :size="15" /></button><button v-else-if="item.running && !item.terminating" class="icon-button" :title="t('files.pause')" @click="pauseUpload(item)"><Pause :size="15" /></button><button v-if="(item.canContinue || item.failed) && !item.terminating" class="icon-button" :title="t('files.retry')" :disabled="!item.file" @click="retryUpload(item)"><RefreshCw :size="15" /></button><button v-if="canTerminateUpload(item)" class="icon-button danger-icon" :title="t('files.terminate')" @click="terminateUploads([item])"><X :size="15" /></button><button v-if="item.failed" class="icon-button" :title="t('files.dismiss')" @click="dismissUpload(item)"><X :size="15" /></button></div>
+        <h3 class="transfers-section"><label class="transfer-section-select"><input type="checkbox" :checked="allDownloadsSelected" :aria-label="t('files.selectAll')" @change="toggleAllDownloads" /><span>{{ t('files.selectAll') }}</span></label><span class="transfers-section-name">{{ t('files.downloads') }}</span><span class="transfers-count">{{ downloads.length }}</span></h3>
+        <div v-if="downloads.length" class="transfer-batch-toolbar"><span class="transfer-selection-count">{{ t('files.selectedTransfers', { count: selectedDownloadIds.size }) }}</span><div class="transfer-batch-actions"><button v-if="selectedDownloadIds.size" class="secondary-button" :disabled="downloadBatchBusy || !canPauseSelectedDownloads" @click="pauseSelectedDownloads"><Pause :size="14" /> {{ t('files.pauseSelected') }}</button><button v-if="selectedDownloadIds.size" class="secondary-button" :disabled="downloadBatchBusy || !canResumeSelectedDownloads" @click="resumeSelectedDownloads"><Play :size="14" /> {{ t('files.resumeSelected') }}</button><button v-if="selectedDownloadIds.size" class="secondary-button danger-action" :disabled="downloadBatchBusy || !canTerminateSelectedDownloads" @click="terminateSelectedDownloads"><X :size="14" /> {{ t('files.terminateSelected') }}</button><button class="secondary-button" :disabled="downloadBatchBusy || !canPauseAllDownloads" @click="pauseAllDownloads"><Pause :size="14" /> {{ t('files.pauseAll') }}</button><button class="secondary-button" :disabled="downloadBatchBusy || !canResumeAllDownloads" @click="resumeAllDownloads"><Play :size="14" /> {{ t('files.resumeAll') }}</button><button class="secondary-button danger-action" :disabled="downloadBatchBusy || !canTerminateAllDownloads" @click="terminateAllDownloads"><X :size="14" /> {{ t('files.terminateAll') }}</button></div></div>
         <div v-if="!downloads.length" class="transfers-empty">{{ t('files.noTransfers') }}</div>
-        <div v-for="item in downloads" :key="item.id" class="transfer-row" :class="{ 'transfer-failed': item.failed }"><Download :size="16" class="transfer-icon" /><div class="transfer-main"><div class="transfer-name"><strong :title="item.name">{{ item.name }}</strong><span :class="{ 'transfer-error-text': item.failed }" :title="item.status">{{ item.status }}</span></div><div class="progress-track"><span :style="{ width: (item.progress < 0 ? 0 : item.progress) + '%' }"></span></div><div class="transfer-detail"><span>{{ t('download.detail.transferred', { loaded: formatBytes(item.loadedBytes), total: item.size > 0 ? formatBytes(item.size) : t('download.detail.unknown') }) }}</span><span>{{ item.progress < 0 ? t('download.detail.unknown') : item.progress + '%' }}</span><span>{{ t('download.detail.rate', { rate: formatRate(item.rate) }) }}</span></div></div><span class="transfer-percent">{{ item.progress < 0 ? '' : item.progress + '%' }}</span><button v-if="item.running" class="icon-button" :title="t('common.cancel')" @click="cancelDownload(item)"><X :size="15" /></button></div>
+        <div v-for="item in downloads" :key="item.id" class="transfer-row" :class="{ 'transfer-failed': item.failed, 'row-selected': selectedDownloadIds.has(item.id) }"><input type="checkbox" class="transfer-select" :checked="selectedDownloadIds.has(item.id)" :aria-label="item.name" @change="toggleDownloadSelect(item.id)" /><Download :size="16" class="transfer-icon" /><div class="transfer-main"><div class="transfer-name"><strong :title="item.name">{{ item.name }}</strong><span :class="{ 'transfer-error-text': item.failed }" :title="item.status">{{ item.status }}</span></div><div class="progress-track"><span :style="{ width: (item.progress < 0 ? 0 : item.progress) + '%' }"></span></div><div class="transfer-detail"><span>{{ t('download.detail.transferred', { loaded: formatBytes(item.loadedBytes), total: item.size > 0 ? formatBytes(item.size) : t('download.detail.unknown') }) }}</span><span>{{ item.progress < 0 ? t('download.detail.unknown') : item.progress + '%' }}</span><span>{{ t('download.detail.rate', { rate: formatRate(item.rate) }) }}</span></div></div><span class="transfer-percent">{{ item.progress < 0 ? '' : item.progress + '%' }}</span><button v-if="downloadCanResume(item)" class="icon-button" :title="t('files.resume')" @click="resumeDownload(item)"><Play :size="15" /></button><button v-else-if="downloadCanPause(item)" class="icon-button" :title="t('files.pause')" @click="pauseDownload(item)"><Pause :size="15" /></button><button v-if="downloadCanTerminate(item)" class="icon-button danger-icon" :title="t('common.cancel')" @click="terminateDownload(item)"><X :size="15" /></button></div>
       </div>
     </aside>
   </main>
@@ -55,6 +57,10 @@ const selectedIds = reactive(new Set())
 // 目录多选（v019 #7）：selectedFolderIds 记录勾选的目录 id，支持批量删除。
 // Folder multi-select (v019 #7): selectedFolderIds tracks checked folder ids for batch deletion.
 const selectedFolderIds = reactive(new Set())
+const selectedUploadIds = reactive(new Set())
+const selectedDownloadIds = reactive(new Set())
+const uploadBatchBusy = ref(false)
+const downloadBatchBusy = ref(false)
 const batchDeletingFolders = ref(false)
 const batchRenameQueue = ref([])
 const batchRenameTotal = ref(0)
@@ -96,6 +102,22 @@ const batchDeleting = ref(false)
 let batchDownloadController = null
 let batchDownloadItem = null
 const allSelected = computed(() => files.value.length > 0 && files.value.every(file => selectedIds.has(file.id)))
+const allUploadsSelected = computed(() => uploads.value.length > 0 && uploads.value.every(item => selectedUploadIds.has(item.id)))
+const allDownloadsSelected = computed(() => downloads.value.length > 0 && downloads.value.every(item => selectedDownloadIds.has(item.id)))
+const selectedUploadItems = computed(() => uploads.value.filter(item => selectedUploadIds.has(item.id)))
+const selectedDownloadItems = computed(() => downloads.value.filter(item => selectedDownloadIds.has(item.id)))
+const canPauseSelectedUploads = computed(() => selectedUploadItems.value.some(canPauseUpload))
+const canResumeSelectedUploads = computed(() => selectedUploadItems.value.some(canResumeUpload))
+const canTerminateSelectedUploads = computed(() => selectedUploadItems.value.some(canTerminateUpload))
+const canPauseAllUploads = computed(() => uploads.value.some(canPauseUpload))
+const canResumeAllUploads = computed(() => uploads.value.some(canResumeUpload))
+const canTerminateAllUploads = computed(() => uploads.value.some(canTerminateUpload))
+const canPauseSelectedDownloads = computed(() => selectedDownloadItems.value.some(downloadCanPause))
+const canResumeSelectedDownloads = computed(() => selectedDownloadItems.value.some(downloadCanResume))
+const canTerminateSelectedDownloads = computed(() => selectedDownloadItems.value.some(downloadCanTerminate))
+const canPauseAllDownloads = computed(() => downloads.value.some(downloadCanPause))
+const canResumeAllDownloads = computed(() => downloads.value.some(downloadCanResume))
+const canTerminateAllDownloads = computed(() => downloads.value.some(downloadCanTerminate))
 const readOnly = computed(() => user.value.readOnly === true)
 const batchShareOpen = ref(false)
 const batchSharing = ref(false)
@@ -107,6 +129,10 @@ const batchShareForm = ref({ expiresInHours: 24, maxDownloads: 0 })
 const batchShareCount = ref(0)
 function toggleSelect(id) { if (selectedIds.has(id)) selectedIds.delete(id); else selectedIds.add(id) }
 function toggleSelectAll() { if (allSelected.value) { files.value.forEach(file => selectedIds.delete(file.id)); childFolders.value.forEach(folder => selectedFolderIds.delete(folder.id)) } else { files.value.forEach(file => selectedIds.add(file.id)); childFolders.value.forEach(folder => selectedFolderIds.add(folder.id)) } }
+function toggleUploadSelect(id) { if (selectedUploadIds.has(id)) selectedUploadIds.delete(id); else selectedUploadIds.add(id) }
+function toggleDownloadSelect(id) { if (selectedDownloadIds.has(id)) selectedDownloadIds.delete(id); else selectedDownloadIds.add(id) }
+function toggleAllUploads() { if (allUploadsSelected.value) uploads.value.forEach(item => selectedUploadIds.delete(item.id)); else uploads.value.forEach(item => selectedUploadIds.add(item.id)) }
+function toggleAllDownloads() { if (allDownloadsSelected.value) downloads.value.forEach(item => selectedDownloadIds.delete(item.id)); else downloads.value.forEach(item => selectedDownloadIds.add(item.id)) }
 function openBatchShare() { if (readOnly.value) return; batchShareCount.value = selectedIds.size; batchShareOpen.value = true; batchShareError.value = ''; batchShareNotice.value = ''; batchShareResults.value = []; batchShareGroup.value = null; batchShareForm.value = { expiresInHours: 24, maxDownloads: 0 } }
 function closeBatchShare() { if (!batchSharing.value) batchShareOpen.value = false }
 // createBatchShare 创建统一聚合分享链接（#7）：一个 token 对应整个文件集合，替代逐文件独立链接。
@@ -144,23 +170,18 @@ async function batchDownload() {
   if (!ids.length) return
   batchDownloading.value = true
   error.value = ''
-  const controller = new AbortController()
-  batchDownloadController = controller
-  const item = { id: `dl-batch-${Date.now()}`, name: t('download.detail.batchName'), size: 0, loadedBytes: 0, progress: 0, rate: 0, status: t('files.downloading'), failed: false, cancelled: false, running: true, error: '', controller }
+  const item = { id: `dl-batch-${Date.now()}`, name: t('download.detail.batchName'), downloadName: batchDownloadFilename(), batchIds: ids, size: 0, loadedBytes: 0, progress: 0, rate: 0, status: t('files.downloading'), failed: false, paused: false, cancelled: false, completed: false, running: false, error: '', controller: null, parts: [], resumable: false }
   batchDownloadItem = item
   downloads.value.push(item)
   transfersOpen.value = true
   persistTransfers()
-  try {
-    await streamDownload(item, () => fetch('/api/files/batch-download', { method: 'POST', headers: { Authorization: `Bearer ${localStorage.getItem('filebox_token')}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ ids }), signal: controller.signal }), batchDownloadFilename())
-    selectedIds.clear()
-    notice.value = t('files.batchDownloadDone', { count: ids.length })
-  } catch (err) {
-    if (err.name === 'AbortError' || item.cancelled) { item.status = t('download.detail.cancelled'); item.progress = item.progress < 0 ? 0 : item.progress } else { item.failed = true; item.error = err.message; item.status = err.message; error.value = `${err.message}` }
-  } finally { item.running = false; if (batchDownloadController === controller) batchDownloadController = null; if (batchDownloadItem === item) batchDownloadItem = null; batchDownloading.value = false; setTimeout(() => { downloads.value = downloads.value.filter(entry => entry !== item) }, 4000) }
+  await startDownload(item)
+  if (item.completed) { selectedIds.clear(); notice.value = t('files.batchDownloadDone', { count: ids.length }) }
+  if (batchDownloadItem === item) batchDownloadItem = null
+  batchDownloading.value = false
 }
-function cancelBatchDownload() { if (batchDownloadItem) batchDownloadItem.cancelled = true; batchDownloadController?.abort() }
-function cancelDownload(item) { item.cancelled = true; item.controller?.abort() }
+function cancelBatchDownload() { if (batchDownloadItem) terminateDownload(batchDownloadItem); else batchDownloadController?.abort() }
+function cancelDownload(item) { terminateDownload(item) }
 // batchDelete 确认并删除选中文件，随后刷新配额和当前目录列表。
 // batchDelete confirms and removes the selected files, then refreshes quota and the current directory.
 async function batchDelete() {
@@ -215,7 +236,7 @@ function formatRate(bytesPerSecond = 0) {
 }
 // activeTransferCount 顶栏角标：进行中或待处理的上传 + 未完成的下载数量。
 // activeTransferCount is the topbar badge: running/pending uploads plus unfinished downloads.
-const activeTransferCount = computed(() => uploads.value.filter(u => u.running || u.failed || u.paused).length + downloads.value.filter(d => d.running && !d.failed && !d.cancelled).length)
+const activeTransferCount = computed(() => uploads.value.filter(u => u.running || u.failed || u.paused).length + downloads.value.filter(d => (d.running || d.paused || d.failed) && !d.cancelled && !d.completed).length)
 function persistMd5() { localStorage.setItem('filebox_show_md5', showMd5.value ? '1' : '0') }
 // breadcrumbs 把当前目录路径拆成可点击的分段（根 / a / b）。
 // breadcrumbs splits the current directory path into clickable segments (root / a / b).
@@ -271,7 +292,7 @@ function snapshotUpload(item) {
   }
 }
 function snapshotDownload(item) {
-  return { kind: 'download', id: item.id, name: item.name || '', size: item.size || 0, loadedBytes: item.loadedBytes || 0, progress: item.progress ?? 0, status: item.status || '', failed: !!item.failed, error: item.error || '' }
+  return { kind: 'download', id: item.id, name: item.name || '', fileId: item.fileId || '', size: item.size || 0, loadedBytes: item.loadedBytes || 0, progress: item.progress ?? 0, status: item.status || '', paused: !!item.paused, failed: !!item.failed, error: item.error || '' }
 }
 // persistTransfers 把当前面板记录的可序列化快照写入 sessionStorage（按用户隔离，退出登录时清理）。
 // persistTransfers writes serializable snapshots of the current drawer into sessionStorage (per-user; cleared on logout).
@@ -290,7 +311,7 @@ function restoreTransfers() {
   try { data = JSON.parse(sessionStorage.getItem(TRANSFERS_KEY) || '[]') } catch { sessionStorage.removeItem(TRANSFERS_KEY); return }
   for (const snap of data) {
     if (snap.kind === 'download') {
-      downloads.value.push({ id: snap.id, name: snap.name, size: snap.size || 0, loadedBytes: snap.loadedBytes || 0, progress: snap.progress ?? 0, rate: 0, status: t('files.sessionEnded'), failed: snap.failed, cancelled: true, running: false, error: snap.error || '', controller: null, restored: true })
+      downloads.value.push({ id: snap.id, name: snap.name, fileId: snap.fileId || '', size: snap.size || 0, loadedBytes: 0, progress: 0, rate: 0, status: t('files.sessionEnded'), paused: false, failed: snap.failed, cancelled: true, completed: false, running: false, error: snap.error || '', controller: null, parts: [], restored: true })
     } else if (snap.kind === 'upload') {
       uploads.value.push({
         id: snap.id, file: null, name: snap.name, relPath: snap.relPath || '', dir: snap.dir || '', size: snap.size || 0,
@@ -313,7 +334,7 @@ function restoreTransfers() {
 // exhaust the browser's same-origin connection limit and fail with a misleading network error.
 let uploadInFlight = 0
 async function queueFiles(list) { if (readOnly.value) { error.value = t('readOnly.error'); return } if (list.length) transfersOpen.value = true; const configuredMax = Number(brand.maxFileSize); const maxSize = Number.isFinite(configuredMax) && configuredMax > 0 ? configuredMax : 100 * 1024 * 1024 * 1024; const oversized = list.filter(value => (value.file || value).size > maxSize); const keep = list.filter(value => (value.file || value).size <= maxSize); if (oversized.length) { error.value = t('files.tooManyTooLarge', { count: oversized.length, max: formatBytes(maxSize) }) } if (keep.length > 50 && !(await askConfirm(t('files.bulkConfirm', { count: keep.length })))) return; keep.forEach(value => { const file = value.file || value; const path = value.relPath || file.webkitRelativePath || file.name; const parts = path.split('/').filter(Boolean); const dirParts = parts.length > 1 ? parts.slice(0, -1) : []; if (dirParts.length > 1) dirParts.shift(); const base = currentDir.value ? currentDir.value + '/' : ''; const relDir = dirParts.length ? dirParts.join('/') : ''; const restored = uploads.value.find(entry => entry.needsReselect && entry.name === file.name && entry.size === file.size); if (restored) { restored.file = file; restored.needsReselect = false; restored.paused = false; restored.failed = false; restored.error = ''; restored.status = t('files.uploadPreparing'); runGated(restored); persistTransfers(); return } const item = { id: `${Date.now()}-${Math.random()}-${file.name}`, file, relPath: path !== file.name ? path : '', dir: relDir ? `${base}${relDir}` : base.replace(/\/$/, ''), progress: 0, loadedBytes: 0, status: t('files.uploadPreparing'), taskId: '', uploaded: [], paused: false, chunksTotal: 0, chunkSize: 0, error: '', failed: false, canContinue: false, running: false, sha256: '', pending: new Set(), controllers: new Map(), resolve: '' }; uploads.value.push(item); runGated(item); persistTransfers() }) }
-async function runGated(item) { if (item.paused || item.failed) return; while (uploadInFlight >= 3) { if (item.paused || item.failed) return; await new Promise(resolve => setTimeout(resolve, 120)) } uploadInFlight++; try { await startUpload(item) } finally { uploadInFlight-- } }
+async function runGated(item) { if (item.paused || item.failed || item.terminating) return; while (uploadInFlight >= 3) { if (item.paused || item.failed || item.terminating) return; await new Promise(resolve => setTimeout(resolve, 120)) } uploadInFlight++; try { await startUpload(item) } finally { uploadInFlight-- } }
 function wakeWorkers() { const wake = workerWake; workerWake = null; wake?.() }
 function removeQueued(item) { for (let i = chunkQueue.length - 1; i >= 0; i--) if (chunkQueue[i].item === item) chunkQueue.splice(i, 1) }
 function enqueueChunks(item, indexes) { indexes.forEach(index => { item.pending.add(index); chunkQueue.push({ item, index }) }); wakeWorkers(); ensureWorkers() }
@@ -331,19 +352,33 @@ function waitForChunks(item) { return new Promise(resolve => { const check = () 
 
 // startUpload computes the checksum, performs instant-upload lookup, resumes missing chunks, and completes the task.
 // startUpload 负责计算校验值、秒传检查、补传缺片并提交完成请求。
-async function startUpload(item) { if (item.running) return item.running; item.running = true; item.paused = false; item.failed = false; item.canContinue = false; item.running = (async () => { let init = null; try { if (item.taskId) { try { await finishExistingUpload(item); return } catch (err) { if (err.status !== 404) throw err; item.taskId = ''; item.uploaded = []; item.pending.clear(); item.canContinue = false } } if (!item.sha256) { item.status = t('files.checksum', { progress: 0 }); item.sha256 = await computeFileSHA256(item.file, progress => { if (!item.paused) { item.progress = Math.round(progress * 0.25); syncLoadedBytes(item); item.status = t('files.checksum', { progress }) } }) } if (item.paused) return; if (item.file.size > 0) { const check = await api('/api/files/check', { method: 'POST', body: JSON.stringify({ sha256: item.sha256, size: item.file.size, name: item.file.name, ...(item.dir ? { dir: item.dir } : {}) }) }); if (check.data?.instant) { item.progress = 100; syncLoadedBytes(item); item.status = t('files.instantUpload'); notice.value = t('files.instantUpload'); await loadFiles(); await loadMe(); removeUploadLater(item); return } if (check.data?.conflict) { const resolve = await askConflict(check.data.existing); if (resolve === 'cancel') throw new Error(t('files.uploadCancelled')); init = await requestUploadInit(item, resolve); item.taskId = init.data.taskId; item.chunkSize = init.data.chunkSize; item.chunksTotal = init.data.totalChunks; item.uploaded = [...(init.data.uploadedChunks || [])]; item.status = t('files.uploading'); await continueChunks(item); if (item.paused || item.failed) return; await finishExistingUpload(item); return } } try { init = await requestUploadInit(item) } catch (err) { if (err.status !== 409 || !err.data?.conflict) throw err; const resolve = await askConflict(err.data.existing); if (resolve === 'cancel') throw new Error(t('files.uploadCancelled')); init = await requestUploadInit(item, resolve) } item.taskId = init.data.taskId; item.chunkSize = init.data.chunkSize; item.chunksTotal = init.data.totalChunks; item.uploaded = [...(init.data.uploadedChunks || [])]; item.status = t('files.uploading'); await continueChunks(item); if (item.paused || item.failed) return; await finishExistingUpload(item) } catch (err) { if (item.paused) return; const mapped = friendlyError(err); item.failed = true; item.canContinue = Boolean(item.taskId); item.error = mapped.message; item.status = mapped.message; error.value = `${item.file.name}: ${mapped.message}` } finally { item.running = false } })(); return item.running }
+async function startUpload(item) { if (item.running || item.terminating) return item.running; item.running = true; item.paused = false; item.failed = false; item.canContinue = false; item.running = (async () => { let init = null; try { if (item.taskId) { try { await finishExistingUpload(item); return } catch (err) { if (err.status !== 404) throw err; item.taskId = ''; item.uploaded = []; item.pending.clear(); item.canContinue = false } } if (!item.sha256) { item.status = t('files.checksum', { progress: 0 }); item.sha256 = await computeFileSHA256(item.file, progress => { if (!item.paused && !item.terminating) { item.progress = Math.round(progress * 0.25); syncLoadedBytes(item); item.status = t('files.checksum', { progress }) } }) } if (item.paused || item.terminating) return; if (item.file.size > 0) { const check = await api('/api/files/check', { method: 'POST', body: JSON.stringify({ sha256: item.sha256, size: item.file.size, name: item.file.name, ...(item.dir ? { dir: item.dir } : {}) }) }); if (check.data?.instant) { item.progress = 100; syncLoadedBytes(item); item.status = t('files.instantUpload'); notice.value = t('files.instantUpload'); await loadFiles(); await loadMe(); removeUploadLater(item); return } if (check.data?.conflict) { const resolve = await askConflict(check.data.existing); if (resolve === 'cancel') throw new Error(t('files.uploadCancelled')); if (item.paused || item.terminating) return; init = await requestUploadInit(item, resolve); item.taskId = init.data.taskId; item.chunkSize = init.data.chunkSize; item.chunksTotal = init.data.totalChunks; item.uploaded = [...(init.data.uploadedChunks || [])]; if (item.paused || item.terminating) return; item.status = t('files.uploading'); await continueChunks(item); if (item.paused || item.failed || item.terminating) return; await finishExistingUpload(item); return } } try { init = await requestUploadInit(item) } catch (err) { if (err.status !== 409 || !err.data?.conflict) throw err; const resolve = await askConflict(err.data.existing); if (resolve === 'cancel') throw new Error(t('files.uploadCancelled')); if (item.paused || item.terminating) return; init = await requestUploadInit(item, resolve) } if (item.paused || item.terminating) return; item.taskId = init.data.taskId; item.chunkSize = init.data.chunkSize; item.chunksTotal = init.data.totalChunks; item.uploaded = [...(init.data.uploadedChunks || [])]; item.status = t('files.uploading'); await continueChunks(item); if (item.paused || item.failed || item.terminating) return; await finishExistingUpload(item) } catch (err) { if (item.paused || item.terminating) return; const mapped = friendlyError(err); item.failed = true; item.canContinue = Boolean(item.taskId); item.error = mapped.message; item.status = mapped.message; error.value = `${item.file?.name || item.name}: ${mapped.message}` } finally { item.running = false } })(); return item.running }
 async function finishExistingUpload(item) { if (item.paused) return; await continueChunks(item); if (item.paused || item.failed) return; item.status = t('files.checking'); item.progress = 99; syncLoadedBytes(item); const completeBody = { sha256: item.sha256 }; if (item.resolve) completeBody.action = item.resolve; await api(`/api/files/${item.taskId}/complete`, { method: 'POST', body: JSON.stringify(completeBody) }); item.progress = 100; syncLoadedBytes(item); item.status = t('files.completed'); notice.value = t('files.uploadComplete', { name: item.relPath || item.file.name }); await loadMe(); await loadFiles(); persistTransfers(); removeUploadLater(item) }
 async function continueChunks(item) { const body = await api(`/api/files/${item.taskId}/status`); item.chunkSize = body.data.chunkSize; item.chunksTotal = body.data.totalChunks; item.uploaded = [...(body.data.uploadedChunks || [])].sort((a, b) => a - b); const missing = Array.from({ length: item.chunksTotal }, (_, index) => index).filter(index => !item.uploaded.includes(index)); item.pending.clear(); removeQueued(item); updateChunkProgress(item); if (!missing.length) return; enqueueChunks(item, missing); await waitForChunks(item) }
 function requestUploadInit(item, resolve = '') { item.resolve = resolve; return api('/api/files/upload-init', { method: 'POST', body: JSON.stringify({ name: item.file.name, size: item.file.size, chunkSize: item.file.size <= 8 * 1024 * 1024 ? item.file.size : 4194304, mime: item.file.type, sha256: item.sha256, ...(item.dir ? { dir: item.dir } : {}), ...(resolve ? { resolve } : {}) }) }) }
-function pauseUpload(item) { item.paused = true; item.status = t('files.paused'); removeQueued(item); item.controllers.forEach(controller => controller.abort()); wakeWorkers(); persistTransfers() }
-async function resumeUpload(item) { if (item.running) return; item.paused = false; item.failed = false; item.canContinue = false; item.status = t('files.uploading'); await runGated(item); persistTransfers() }
-async function retryUpload(item) { item.failed = false; item.error = ''; item.paused = false; await runGated(item); persistTransfers() }
+function pauseUpload(item) { if (!canPauseUpload(item)) return; item.paused = true; item.status = t('files.paused'); removeQueued(item); item.controllers.forEach(controller => controller.abort()); wakeWorkers(); persistTransfers() }
+async function resumeUpload(item) { if (!canResumeUpload(item)) return; item.paused = false; item.failed = false; item.canContinue = false; item.status = t('files.uploading'); await runGated(item); persistTransfers() }
+async function retryUpload(item) { if (item.running || item.terminating || !item.file) return; item.failed = false; item.error = ''; item.paused = false; await runGated(item); persistTransfers() }
+function isUploadComplete(item) { return Boolean(item && (item.progress >= 100 || item.status === t('files.completed') || item.status === t('files.instantUpload'))) }
+function canPauseUpload(item) { const checking = t('files.checking'); return Boolean(item && item.running && item.progress < 100 && !item.paused && !item.terminating && !String(item.status || '').startsWith(checking)) }
+function canResumeUpload(item) { return Boolean(item && item.file && !item.running && !item.terminating && !isUploadComplete(item) && (item.paused || item.failed || item.canContinue)) }
+function canTerminateUpload(item) { return Boolean(item && !item.terminating && !isUploadComplete(item)) }
+function uniqueTransferItems(items) { return [...new Map(items.filter(Boolean).map(item => [item.id, item])).values()] }
+function pauseUploads(items) { uniqueTransferItems(items).forEach(item => { if (canPauseUpload(item)) pauseUpload(item) }); persistTransfers() }
+function pauseSelectedUploads() { pauseUploads(selectedUploadItems.value.slice()) }
+function pauseAllUploads() { pauseUploads(uploads.value.slice()) }
+async function resumeUploads(items) { const targets = uniqueTransferItems(items).filter(canResumeUpload); if (!targets.length) return; uploadBatchBusy.value = true; try { await Promise.all(targets.map(resumeUpload)) } finally { uploadBatchBusy.value = false; persistTransfers() } }
+function resumeSelectedUploads() { return resumeUploads(selectedUploadItems.value.slice()) }
+function resumeAllUploads() { return resumeUploads(uploads.value.slice()) }
+async function terminateUploads(items) { const targets = uniqueTransferItems(items).filter(item => uploads.value.some(entry => entry.id === item.id) && canTerminateUpload(item)); if (!targets.length) return; uploadBatchBusy.value = true; let success = 0; let failed = 0; try { for (const item of targets) { item.terminating = true; item.paused = true; item.status = t('files.terminating'); removeQueued(item); new Set(item.controllers.values()).forEach(controller => controller.abort()); wakeWorkers(); let removed = true; try { if (item.taskId) await api(`/api/upload-tasks/${item.taskId}`, { method: 'DELETE' }) } catch (err) { removed = false; failed++; item.terminating = false; item.failed = true; item.canContinue = Boolean(item.taskId); item.error = err.message; item.status = err.message; item.paused = true } if (removed) { uploads.value = uploads.value.filter(entry => entry.id !== item.id); selectedUploadIds.delete(item.id); success++ } } notice.value = t('files.transferTerminated', { success, failed }); } finally { uploadBatchBusy.value = false; persistTransfers() } }
+function terminateSelectedUploads() { return terminateUploads(selectedUploadItems.value.slice()) }
+function terminateAllUploads() { return terminateUploads(uploads.value.slice()) }
 // removeUploadLater 仅对成功项做短时保留后移除；失败/取消项保留在面板中，
 // 由用户重试或点击关闭（dismissUpload）处理，避免"2.6 秒后消失、无提示"。
 // removeUploadLater auto-removes only successful items; failed/cancelled ones stay in
 // the drawer for the user to retry or dismiss, so failures are never silently dropped.
-function removeUploadLater(item) { if (item.failed) return; setTimeout(() => { uploads.value = uploads.value.filter(entry => entry !== item) }, 2200) }
-function dismissUpload(item) { uploads.value = uploads.value.filter(entry => entry !== item); persistTransfers() }
+function removeUploadLater(item) { if (item.failed) return; setTimeout(() => { uploads.value = uploads.value.filter(entry => entry !== item); selectedUploadIds.delete(item.id); persistTransfers() }, 2200) }
+function dismissUpload(item) { uploads.value = uploads.value.filter(entry => entry !== item); selectedUploadIds.delete(item.id); persistTransfers() }
 // askConflict 将冲突请求加入队列并返回 Promise；队列保证每个请求最终都被 resolve
 // （用户选择或 60s 超时按取消处理），避免并发同名文件相互覆盖导致协程永久挂死。
 // askConflict enqueues a conflict prompt and resolves every caller eventually — via the
@@ -421,17 +456,29 @@ function isShared(file) { return sharedIds.has(file.id) }
 // streamDownload reads each response chunk so both file and ZIP downloads expose byte-level progress.
 // streamDownload 逐块读取响应，让单文件和 ZIP 下载都能展示字节级进度。
 async function streamDownload(item, request, downloadName) {
-  const response = await request()
+  const requestedOffset = item.loadedBytes || 0
+  const response = await request(requestedOffset)
   if (!response.ok) {
     let body = null
     try { body = await response.json() } catch {}
     throw Object.assign(new Error(localizeError({ status: response.status, data: body?.data, backendMessage: body?.message })), { status: response.status })
   }
   if (!response.body) throw new Error(t('error.downloadFailed'))
+  const contentRange = response.headers.get('Content-Range') || ''
+  const rangeMatch = contentRange.match(/^bytes\s+(\d+)-(\d+)\/(\d+|\*)$/i)
+  const isPartial = response.status === 206 && rangeMatch && Number(rangeMatch[1]) === requestedOffset
+  if (response.status === 206 && !isPartial) throw new Error(t('error.downloadFailed'))
+  if (isPartial) {
+    const totalSize = Number(rangeMatch[3])
+    if (Number.isFinite(totalSize) && totalSize > 0) item.size = totalSize
+  } else {
+    item.parts = []
+    item.loadedBytes = 0
+  }
   const headerSize = Number(response.headers.get('Content-Length'))
-  if (Number.isFinite(headerSize) && headerSize > 0) item.size = headerSize
+  if (!isPartial && Number.isFinite(headerSize) && headerSize > 0) item.size = headerSize
   const reader = response.body.getReader()
-  const parts = []
+  const parts = item.parts || (item.parts = [])
   const startedAt = performance.now()
   let received = 0
   for (;;) {
@@ -439,12 +486,14 @@ async function streamDownload(item, request, downloadName) {
     if (done) break
     parts.push(value)
     received += value.byteLength
-    item.loadedBytes = received
-    item.progress = item.size > 0 ? Math.min(100, Math.round(received / item.size * 100)) : -1
+    item.loadedBytes = (isPartial ? requestedOffset : 0) + received
+    item.progress = item.size > 0 ? Math.min(100, Math.round(item.loadedBytes / item.size * 100)) : -1
     const elapsed = (performance.now() - startedAt) / 1000
     item.rate = elapsed > 0 ? received / elapsed : 0
   }
-  item.loadedBytes = received
+  if (item.paused || item.cancelled) throw new DOMException('download stopped', 'AbortError')
+  item.loadedBytes = (isPartial ? requestedOffset : 0) + received
+  if (item.size > 0 && item.loadedBytes < item.size) throw new Error(t('error.downloadFailed'))
   item.progress = 100
   item.rate = received / Math.max((performance.now() - startedAt) / 1000, 0.001)
   const blob = new Blob(parts, { type: response.headers.get('Content-Type') || 'application/octet-stream' })
@@ -454,24 +503,66 @@ async function streamDownload(item, request, downloadName) {
   link.download = downloadName
   link.click()
   setTimeout(() => URL.revokeObjectURL(objectUrl), 0)
+  item.completed = true
+  item.paused = false
   item.status = t('files.completed')
 }
 
 // download streams the file and reports detailed progress in the transfers drawer.
 // download 流式下载并在传输面板显示详细进度。
 async function download(file) {
-  const controller = new AbortController()
-  const item = { id: `dl-${Date.now()}-${file.id}`, name: file.name, size: file.size || 0, loadedBytes: 0, progress: 0, rate: 0, status: t('files.downloading'), failed: false, cancelled: false, running: true, error: '', controller }
+  const item = { id: `dl-${Date.now()}-${file.id}`, fileId: file.id, name: file.name, size: file.size || 0, loadedBytes: 0, progress: 0, rate: 0, status: t('files.downloading'), failed: false, paused: false, cancelled: false, completed: false, running: false, error: '', controller: null, parts: [], resumable: true }
   downloads.value.push(item); transfersOpen.value = true; persistTransfers()
-  try {
-    await streamDownload(item, () => fetch(`/api/files/${file.id}/download`, { headers: { Authorization: `Bearer ${localStorage.getItem('filebox_token')}` }, signal: controller.signal }), file.name)
-  } catch (err) {
-    if (err.name === 'AbortError' || item.cancelled) { item.status = t('download.detail.cancelled'); item.progress = item.progress < 0 ? 0 : item.progress } else { const mapped = friendlyError(err); item.failed = true; item.error = mapped.message; item.status = mapped.message; error.value = `${file.name}: ${mapped.message}` }
-  } finally {
-    item.running = false
-  }
-  setTimeout(() => { downloads.value = downloads.value.filter(entry => entry !== item) }, 4000)
+  void startDownload(item)
 }
+function downloadRequest(item, offset) {
+  const headers = new Headers({ Authorization: `Bearer ${localStorage.getItem('filebox_token')}` })
+  if (item.resumable && offset > 0) headers.set('Range', `bytes=${offset}-`)
+  if (item.fileId) return fetch(`/api/files/${item.fileId}/download`, { headers, signal: item.controller.signal })
+  headers.set('Content-Type', 'application/json')
+  return fetch('/api/files/batch-download', { method: 'POST', headers, body: JSON.stringify({ ids: item.batchIds || [] }), signal: item.controller.signal })
+}
+async function startDownload(item) {
+  if (item.running || item.cancelled || item.completed) return item.downloadPromise
+  item.running = true
+  item.paused = false
+  item.failed = false
+  item.error = ''
+  item.status = t('files.downloading')
+  const controller = new AbortController()
+  item.controller = controller
+  if (item === batchDownloadItem) batchDownloadController = controller
+  const promise = (async () => {
+    try {
+      await streamDownload(item, offset => downloadRequest(item, offset), item.downloadName || item.name)
+    } catch (err) {
+      if (err.name === 'AbortError' && item.paused && !item.cancelled) { item.status = t('files.paused') } else if (err.name === 'AbortError' || item.cancelled) { item.status = t('download.detail.cancelled'); item.progress = item.progress < 0 ? 0 : item.progress } else { const mapped = friendlyError(err); item.failed = true; item.error = mapped.message; item.status = mapped.message; error.value = `${item.name}: ${mapped.message}` }
+    } finally {
+      item.running = false
+      if (item.controller === controller) item.controller = null
+      if (batchDownloadController === controller) batchDownloadController = null
+      persistTransfers()
+      if (item.completed) setTimeout(() => { downloads.value = downloads.value.filter(entry => entry !== item); selectedDownloadIds.delete(item.id); persistTransfers() }, 4000)
+    }
+  })()
+  item.downloadPromise = promise
+  return promise
+}
+function downloadCanPause(item) { return Boolean(item && item.running && !item.paused && !item.cancelled && !item.completed) }
+function downloadCanResume(item) { return Boolean(item && !item.running && !item.cancelled && !item.completed && (item.paused || item.failed)) }
+function downloadCanTerminate(item) { return Boolean(item && !item.cancelled && !item.completed) }
+function pauseDownload(item) { if (!downloadCanPause(item)) return; item.paused = true; item.status = t('files.paused'); item.controller?.abort(); persistTransfers() }
+function resumeDownload(item) { if (!downloadCanResume(item)) return; void startDownload(item) }
+function terminateDownload(item) { if (!downloadCanTerminate(item)) return; item.cancelled = true; item.paused = false; item.controller?.abort(); downloads.value = downloads.value.filter(entry => entry.id !== item.id); selectedDownloadIds.delete(item.id); if (item === batchDownloadItem) { batchDownloadItem = null; batchDownloadController = null; batchDownloading.value = false } persistTransfers() }
+function pauseDownloads(items) { uniqueTransferItems(items).forEach(item => { if (downloadCanPause(item)) pauseDownload(item) }); persistTransfers() }
+function pauseSelectedDownloads() { pauseDownloads(selectedDownloadItems.value.slice()) }
+function pauseAllDownloads() { pauseDownloads(downloads.value.slice()) }
+async function resumeDownloads(items) { const targets = uniqueTransferItems(items).filter(downloadCanResume); if (!targets.length) return; downloadBatchBusy.value = true; try { await Promise.all(targets.map(item => startDownload(item))) } finally { downloadBatchBusy.value = false; persistTransfers() } }
+function resumeSelectedDownloads() { return resumeDownloads(selectedDownloadItems.value.slice()) }
+function resumeAllDownloads() { return resumeDownloads(downloads.value.slice()) }
+function terminateDownloads(items) { uniqueTransferItems(items).forEach(item => { if (downloadCanTerminate(item)) terminateDownload(item) }); persistTransfers() }
+function terminateSelectedDownloads() { terminateDownloads(selectedDownloadItems.value.slice()) }
+function terminateAllDownloads() { terminateDownloads(downloads.value.slice()) }
 async function remove(file) { if (readOnly.value) { error.value = t('readOnly.error'); return } if (!(await askConfirm(t('confirm.deleteFile', { name: file.name })))) return; try { await api(`/api/files/${file.id}`, { method: 'DELETE' }); selectedIds.delete(file.id); notice.value = t('notice.fileDeleted'); await loadMe(); await loadFiles() } catch (err) { error.value = err.message } }
 function formatBytes(bytes = 0) { if (bytes < 1024) return `${bytes} B`; const units = ['KB', 'MB', 'GB', 'TB']; let value = bytes; let unit = -1; do { value /= 1024; unit++ } while (value >= 1024 && unit < units.length - 1); return `${value.toFixed(value >= 10 ? 0 : 1)} ${units[unit]}` }
 function formatDate(value) { return value ? new Date(value).toLocaleString(currentLocale.value === 'en' ? 'en-US' : currentLocale.value, { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '-' }

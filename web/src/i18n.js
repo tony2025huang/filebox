@@ -190,6 +190,16 @@ Object.assign(en, {
   'batchShare.heading': 'Batch file share', 'batchShare.title': 'File collection', 'batchShare.fileCount': 'Files', 'batchShare.owner': 'Shared by', 'batchShare.downloadZip': 'Download selected ({count})', 'batchShare.noFiles': 'This collection has no downloadable files', 'files.batchShareUnified': 'Create unified share link', 'files.batchShareUnifiedCreated': 'Unified share link created ({count} files)'
 })
 
+Object.assign(zhCN, {
+  'files.selectedTransfers': '已选 {count} 项', 'files.pauseSelected': '暂停选中', 'files.resumeSelected': '继续选中', 'files.terminateSelected': '终止选中', 'files.pauseAll': '暂停全部', 'files.resumeAll': '继续全部', 'files.terminateAll': '终止全部', 'files.terminate': '终止传输', 'files.terminating': '正在终止', 'files.transferTerminated': '已终止：{success} 项成功，{failed} 项失败'
+})
+Object.assign(zhTW, {
+  'files.selectedTransfers': '已選 {count} 項', 'files.pauseSelected': '暫停選取', 'files.resumeSelected': '繼續選取', 'files.terminateSelected': '終止選取', 'files.pauseAll': '暫停全部', 'files.resumeAll': '繼續全部', 'files.terminateAll': '終止全部', 'files.terminate': '終止傳輸', 'files.terminating': '正在終止', 'files.transferTerminated': '已終止：{success} 項成功，{failed} 項失敗'
+})
+Object.assign(en, {
+  'files.selectedTransfers': '{count} selected', 'files.pauseSelected': 'Pause selected', 'files.resumeSelected': 'Resume selected', 'files.terminateSelected': 'Terminate selected', 'files.pauseAll': 'Pause all', 'files.resumeAll': 'Resume all', 'files.terminateAll': 'Terminate all', 'files.terminate': 'Terminate transfer', 'files.terminating': 'Terminating', 'files.transferTerminated': 'Terminated: {success} succeeded, {failed} failed'
+})
+
 // Sync keys are intentionally identical across all three locale dictionaries.
 // 同步功能的三语键集保持一致，覆盖任务、目标系统、目录选择和日志详情。
 Object.assign(zhCN, {
