@@ -29,6 +29,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -3264,7 +3265,7 @@ type folderRequest struct {
 // validateFolderName validates a single folder name (no separators, ≤255 bytes, no control or Windows-illegal characters).
 func validateFolderName(name string) (string, error) {
 	name = strings.TrimSpace(name)
-	if name == "" || strings.ContainsAny(name, `/\`) {
+	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, `/\`) {
 		return "", errors.New("invalid folder name")
 	}
 	for _, char := range name {
@@ -3321,8 +3322,36 @@ func (s *Server) createFolder(w http.ResponseWriter, r *http.Request) {
 	writeData(w, http.StatusCreated, "目录已创建", folder)
 }
 
-// listFolders 返回当前用户的全部目录。
-// listFolders returns all of the current user's folders.
+// normalizeFolderPath 归一化目录记录路径：剥掉历史遗留的 files/ 或 files/<uid>/ storage 前缀，
+// 再按 validateUploadDir 校验相对路径；不合法（如 v010 遗留 uploads\xxx、`.`、`..`）返回 false。
+// normalizeFolderPath strips the legacy files/ or files/<uid>/ storage prefix from a folder-record path,
+// then validates the relative path; records that fail (e.g. legacy uploads\xxx, ".", "..") yield false.
+func normalizeFolderPath(path string) (string, bool) {
+	normalized := strings.TrimSpace(path)
+	// v010 遗留路径以反斜杠分隔（uploads\xxx）：历史孤儿记录，直接过滤，不归一化，
+	// 避免把不存在的目录当作可进入目录展示。
+	// v010 legacy paths use backslashes (uploads\xxx): orphaned records are dropped as-is,
+	// so nonexistent directories never appear as navigable folders.
+	if strings.Contains(normalized, "\\") {
+		return "", false
+	}
+	normalized = filepath.ToSlash(normalized)
+	// 剥掉 storage 前缀：files/<uid>/… 或 files/…
+	re := regexp.MustCompile(`^files/\d+/`)
+	if re.MatchString(normalized) {
+		normalized = re.ReplaceAllString(normalized, "")
+	} else if strings.HasPrefix(normalized, "files/") {
+		normalized = strings.TrimPrefix(normalized, "files/")
+	}
+	validated, err := validateUploadDir(normalized)
+	if err != nil {
+		return "", false
+	}
+	return validated, true
+}
+
+// listFolders 返回当前用户的全部目录（过滤并归一化历史遗留的非法/带前缀路径，v019 #4）。
+// listFolders returns all of the current user's folders, filtering and normalizing legacy invalid/prefixed paths (v019 #4).
 func (s *Server) listFolders(w http.ResponseWriter, r *http.Request) {
 	user := currentUser(r.Context())
 	folders, err := s.store.ListFolders(r.Context(), user.ID)
@@ -3331,8 +3360,19 @@ func (s *Server) listFolders(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "获取目录列表失败")
 		return
 	}
-	s.serviceEvent(r, "folder_list", user.Username, "result=success count=%d", len(folders))
-	writeData(w, http.StatusOK, "获取成功", map[string]any{"items": folders})
+	items := make([]store.Folder, 0, len(folders))
+	for _, folder := range folders {
+		normalized, ok := normalizeFolderPath(folder.Path)
+		if !ok {
+			// 历史遗留的非法路径记录（如 v010 反斜杠路径）不再返回，避免前端点击触发「目录无效」。
+			// Legacy invalid path records (e.g. v010 backslash paths) are dropped so navigation never hits "invalid directory".
+			continue
+		}
+		folder.Path = normalized
+		items = append(items, folder)
+	}
+	s.serviceEvent(r, "folder_list", user.Username, "result=success count=%d", len(items))
+	writeData(w, http.StatusOK, "获取成功", map[string]any{"items": items})
 }
 
 // renameFolder 重命名目录并级联更新子目录与文件路径。
