@@ -2,7 +2,7 @@
   <main class="app-shell" :class="{ 'read-only': readOnly }">
     <AuthenticatedTopbar :user="user" section="files">
       <template #actions>
-        <button class="icon-button transfer-button" :title="t('files.transfers')" @click="transfersOpen = !transfersOpen"><ArrowUpDown :size="18" /><span v-if="activeTransferCount" class="transfer-badge">{{ activeTransferCount }}</span></button>
+        <button class="icon-text-button transfer-button" :title="t('files.transfers')" @click="transfersOpen = !transfersOpen"><ArrowUpDown :size="16" /> {{ t('files.transfers') }}<span v-if="activeTransferCount" class="transfer-badge">{{ activeTransferCount }}</span></button>
       </template>
     </AuthenticatedTopbar>
     <section class="content-wrap">
