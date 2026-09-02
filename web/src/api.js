@@ -1,5 +1,14 @@
 import { t } from './i18n'
 
+// batchDownloadFilename uses the browser's local clock to match the backend's
+// YYYYMMDD-HHMMSS archive naming format.
+// batchDownloadFilename 使用浏览器本地时间生成与后端一致的 ZIP 文件名。
+export function batchDownloadFilename(date = new Date()) {
+  const pad = value => String(value).padStart(2, '0')
+  const timestamp = `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}-${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}`
+  return `filebox-batch-${timestamp}.zip`
+}
+
 const messageKeys = {
   '用户名或密码错误': 'error.loginFailed', '用户名和密码不能为空': 'error.invalidRequest', '请先登录': 'error.authRequired',
   '需要管理员权限': 'error.adminRequired', '请求格式无效': 'error.invalidRequest', '语言设置无效': 'error.invalidLanguage',

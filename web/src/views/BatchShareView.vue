@@ -36,7 +36,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { RouterLink, useRoute } from 'vue-router'
 import { Archive, ArrowLeft, Download, LoaderCircle, RefreshCw, XCircle } from 'lucide-vue-next'
-import { api, localizeError } from '../api'
+import { api, batchDownloadFilename, localizeError } from '../api'
 import { brand, loadBrand } from '../brand'
 import BrandFooter from '../components/BrandFooter.vue'
 import BrandLogo from '../components/BrandLogo.vue'
@@ -55,7 +55,7 @@ const downloadExhausted = computed(() => meta.value.maxDownloads > 0 && (meta.va
 function toggleSelect(id) { if (selected.value.has(id)) selected.value.delete(id); else selected.value.add(id) }
 function toggleSelectAll() { if (allSelected.value) selected.value.clear(); else files.value.forEach(file => selected.value.add(file.fileId)) }
 async function loadMeta() { loading.value = true; error.value = ''; downloadError.value = ''; try { const body = await api(`/api/shared-groups/${encodeURIComponent(token.value)}/meta`); meta.value = body.data; files.value = body.data.files || [] } catch (err) { error.value = err.message } finally { loading.value = false } }
-async function requestDownload(path, options) {
+async function requestDownload(path, options, fallbackName) {
   if (downloadLoading.value) return
   if (downloadExhausted.value) { downloadError.value = t('share.limitReached'); return }
   downloadLoading.value = true
@@ -75,7 +75,7 @@ async function requestDownload(path, options) {
     link.href = objectUrl
     const disposition = response.headers.get('Content-Disposition') || ''
     const match = disposition.match(/filename\*?=(?:UTF-8'')?"?([^";]+)"?/i)
-    link.download = match ? decodeURIComponent(match[1]) : 'filebox-batch-download.zip'
+    link.download = match ? decodeURIComponent(match[1]) : (fallbackName || batchDownloadFilename())
     document.body.appendChild(link)
     link.click()
     link.remove()
@@ -87,8 +87,8 @@ async function requestDownload(path, options) {
     }
   } finally { downloadLoading.value = false }
 }
-function downloadOne(file) { requestDownload(`/api/shared-groups/${encodeURIComponent(token.value)}/download/${file.fileId}`) }
-function downloadZip() { if (!selectedCount.value) return; requestDownload(`/api/shared-groups/${encodeURIComponent(token.value)}/batch-download`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids: [...selected.value] }) }) }
+function downloadOne(file) { requestDownload(`/api/shared-groups/${encodeURIComponent(token.value)}/download/${file.fileId}`, undefined, file.name) }
+function downloadZip() { if (!selectedCount.value) return; requestDownload(`/api/shared-groups/${encodeURIComponent(token.value)}/batch-download`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids: [...selected.value] }) }, batchDownloadFilename()) }
 function formatBytes(bytes = 0) { if (bytes < 1024) return `${bytes} B`; const units = ['KB', 'MB', 'GB', 'TB']; let value = bytes; let unit = -1; do { value /= 1024; unit++ } while (value >= 1024 && unit < units.length - 1); return `${value.toFixed(value >= 10 ? 0 : 1)} ${units[unit]}` }
 function formatDate(value) { return value ? new Date(value).toLocaleString(currentLocale.value === 'en' ? 'en-US' : currentLocale.value, { dateStyle: 'medium', timeStyle: 'short' }) : '-' }
 onMounted(async () => { await loadBrand(); await loadLocale(brand.defaultLang); loadMeta() })

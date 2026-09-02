@@ -40,7 +40,7 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { api, clearSession, computeFileSHA256, localizeError } from '../api'
+import { api, batchDownloadFilename, clearSession, computeFileSHA256, localizeError } from '../api'
 import AuthenticatedTopbar from '../components/AuthenticatedTopbar.vue'
 import BrandFooter from '../components/BrandFooter.vue'
 import { brand } from '../brand'
@@ -152,7 +152,7 @@ async function batchDownload() {
   transfersOpen.value = true
   persistTransfers()
   try {
-    await streamDownload(item, () => fetch('/api/files/batch-download', { method: 'POST', headers: { Authorization: `Bearer ${localStorage.getItem('filebox_token')}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ ids }), signal: controller.signal }), 'filebox-batch-download.zip')
+    await streamDownload(item, () => fetch('/api/files/batch-download', { method: 'POST', headers: { Authorization: `Bearer ${localStorage.getItem('filebox_token')}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ ids }), signal: controller.signal }), batchDownloadFilename())
     selectedIds.clear()
     notice.value = t('files.batchDownloadDone', { count: ids.length })
   } catch (err) {

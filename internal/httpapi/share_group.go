@@ -358,10 +358,10 @@ func (s *Server) shareGroupBatchDownload(w http.ResponseWriter, r *http.Request)
 		writeErrorData(w, http.StatusForbidden, "分享次数已用完", map[string]string{"code": "SHARE_DOWNLOAD_LIMIT"})
 		return
 	}
-	temp, err := os.CreateTemp(filepath.Join(s.config.DataDir, "tmp"), "batch-share-group-*.zip")
+	temp, err := createBatchTempFile(filepath.Join(s.config.DataDir, "tmp"), "batch-share-group-*.zip")
 	if err != nil {
 		reason = "archive_failed"
-		writeError(w, http.StatusInternalServerError, "创建下载文件失败")
+		batchZipError(w, "创建下载文件失败", err)
 		return
 	}
 	tempPath := temp.Name()
@@ -384,7 +384,7 @@ func (s *Server) shareGroupBatchDownload(w http.ResponseWriter, r *http.Request)
 			zw.Close()
 			temp.Close()
 			reason = "archive_failed"
-			writeError(w, http.StatusInternalServerError, "创建下载文件失败")
+			batchZipError(w, "创建下载文件失败", createErr)
 			return
 		}
 		_, copyErr := io.Copy(entry, handle)
@@ -393,36 +393,36 @@ func (s *Server) shareGroupBatchDownload(w http.ResponseWriter, r *http.Request)
 			zw.Close()
 			temp.Close()
 			reason = "archive_failed"
-			writeError(w, http.StatusInternalServerError, "读取文件内容失败")
+			batchZipError(w, "读取文件内容失败", copyErr)
 			return
 		}
 	}
 	if err := zw.Close(); err != nil {
 		temp.Close()
 		reason = "archive_failed"
-		writeError(w, http.StatusInternalServerError, "创建下载文件失败")
+		batchZipError(w, "创建下载文件失败", err)
 		return
 	}
 	if err := temp.Close(); err != nil {
 		reason = "archive_failed"
-		writeError(w, http.StatusInternalServerError, "创建下载文件失败")
+		batchZipError(w, "创建下载文件失败", err)
 		return
 	}
 	info, err := os.Stat(tempPath)
 	if err != nil {
 		reason = "archive_failed"
-		writeError(w, http.StatusInternalServerError, "读取下载文件失败")
+		batchZipError(w, "读取下载文件失败", err)
 		return
 	}
 	archive, err := os.Open(tempPath)
 	if err != nil {
 		reason = "archive_failed"
-		writeError(w, http.StatusInternalServerError, "读取下载文件失败")
+		batchZipError(w, "读取下载文件失败", err)
 		return
 	}
 	defer archive.Close()
 	w.Header().Set("Content-Type", "application/zip")
-	w.Header().Set("Content-Disposition", contentDisposition("filebox-batch-download.zip"))
+	w.Header().Set("Content-Disposition", contentDisposition(batchDownloadFilename()))
 	w.Header().Set("Content-Length", strconv.FormatInt(info.Size(), 10))
 	if _, err := io.Copy(w, archive); err != nil {
 		log.Printf("stream share-group archive: %v", err)

@@ -34,6 +34,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -136,6 +137,11 @@ func copyRequestBodyWithIdleTimeout(ctx context.Context, dst io.Writer, src io.R
 // exercised without depending on the host filesystem's actual free space.
 // diskUsageFunc 可在包内测试中替换，以便不依赖测试机真实磁盘空间验证磁盘保护。
 var diskUsageFunc = diskusage.DiskUsage
+
+// createBatchTempFile is replaceable in package tests so archive creation
+// failures can be exercised without relying on host filesystem permissions.
+// createBatchTempFile 可在包内测试中替换，以便不依赖测试机权限验证归档创建失败。
+var createBatchTempFile = os.CreateTemp
 
 // batchDownloadMaxBytes 限制单次批量 ZIP 下载的原始文件总大小，避免临时归档耗尽磁盘。
 // batchDownloadMaxBytes caps the raw total size of one batch ZIP download so its temporary archive cannot exhaust disk space.
@@ -2324,10 +2330,9 @@ func (s *Server) batchDownload(w http.ResponseWriter, r *http.Request) {
 	}
 	// Build the archive before writing headers so the client receives a reliable Content-Length.
 	// 先生成临时 ZIP 再写响应头，确保客户端能拿到可靠的 Content-Length。
-	temp, err := os.CreateTemp(filepath.Join(s.config.DataDir, "tmp"), "batch-download-*.zip")
+	temp, err := createBatchTempFile(filepath.Join(s.config.DataDir, "tmp"), "batch-download-*.zip")
 	if err != nil {
-		log.Printf("create batch download archive: %v", err)
-		writeError(w, http.StatusInternalServerError, "创建下载文件失败")
+		batchZipError(w, "创建下载文件失败", err)
 		return
 	}
 	tempPath := temp.Name()
@@ -2351,7 +2356,7 @@ func (s *Server) batchDownload(w http.ResponseWriter, r *http.Request) {
 			handle.Close()
 			zw.Close()
 			temp.Close()
-			writeError(w, http.StatusInternalServerError, "创建下载文件失败")
+			batchZipError(w, "创建下载文件失败", err)
 			return
 		}
 		_, copyErr := io.Copy(entry, handle)
@@ -2359,32 +2364,32 @@ func (s *Server) batchDownload(w http.ResponseWriter, r *http.Request) {
 		if copyErr != nil {
 			zw.Close()
 			temp.Close()
-			writeError(w, http.StatusInternalServerError, "读取文件内容失败")
+			batchZipError(w, "读取文件内容失败", copyErr)
 			return
 		}
 	}
 	if err := zw.Close(); err != nil {
 		temp.Close()
-		writeError(w, http.StatusInternalServerError, "创建下载文件失败")
+		batchZipError(w, "创建下载文件失败", err)
 		return
 	}
 	if err := temp.Close(); err != nil {
-		writeError(w, http.StatusInternalServerError, "创建下载文件失败")
+		batchZipError(w, "创建下载文件失败", err)
 		return
 	}
 	info, err := os.Stat(tempPath)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "读取下载文件失败")
+		batchZipError(w, "读取下载文件失败", err)
 		return
 	}
 	archive, err := os.Open(tempPath)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "读取下载文件失败")
+		batchZipError(w, "读取下载文件失败", err)
 		return
 	}
 	defer archive.Close()
 	w.Header().Set("Content-Type", "application/zip")
-	w.Header().Set("Content-Disposition", contentDisposition("filebox-batch-download.zip"))
+	w.Header().Set("Content-Disposition", contentDisposition(batchDownloadFilename()))
 	w.Header().Set("Content-Length", strconv.FormatInt(info.Size(), 10))
 	if _, err := io.Copy(w, archive); err != nil {
 		log.Printf("stream batch download archive: %v", err)
@@ -2396,6 +2401,35 @@ func (s *Server) batchDownload(w http.ResponseWriter, r *http.Request) {
 	}
 	s.recordAudit(r, &user.ID, user.Username, "download", strings.Join(names, ","), "success", "batch")
 	s.serviceEvent(r, "download", user.Username, "name=%s count=%d result=success reason=batch", strings.Join(names, ","), len(names))
+}
+
+const batchZipErrorCode = "ZIP_CREATE_FAILED"
+
+// batchZipError returns a safe, actionable archive error while logging the
+// original error for operators. Never expose PathError.Error() to clients.
+// batchZipError 向用户返回可操作的归档错误，同时仅在日志中保留原始错误，避免泄露服务器路径。
+func batchZipError(w http.ResponseWriter, action string, err error) {
+	reason, message := classifyBatchZipError(err)
+	log.Printf("batch zip %s (%s): %v", action, reason, err)
+	writeErrorData(w, http.StatusInternalServerError, action+"："+message, map[string]string{
+		"code":   batchZipErrorCode,
+		"reason": reason,
+	})
+}
+
+func classifyBatchZipError(err error) (string, string) {
+	switch {
+	case errors.Is(err, syscall.ENOSPC), errors.Is(err, syscall.EDQUOT):
+		return "disk_full", "磁盘空间不足"
+	case errors.Is(err, syscall.EACCES), errors.Is(err, syscall.EPERM), errors.Is(err, syscall.EROFS):
+		return "permission_denied", "目录无写入权限"
+	default:
+		return "io_error", "IO 错误"
+	}
+}
+
+func batchDownloadFilename() string {
+	return "filebox-batch-" + time.Now().Format("20060102-150405") + ".zip"
 }
 
 // batchDownloadDiskAvailable 检查临时 ZIP 占用后是否仍保留配置的最小可用空间。

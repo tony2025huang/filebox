@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io/fs"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +17,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -359,6 +361,9 @@ func TestBatchShareGroupLifecycle(t *testing.T) {
 	if zipBody.Code != http.StatusOK || zipBody.Header().Get("Content-Type") != "application/zip" {
 		t.Fatalf("share group zip = %d: %s", zipBody.Code, zipBody.Body.String())
 	}
+	if !strings.Contains(zipBody.Header().Get("Content-Disposition"), "filebox-batch-"+time.Now().Format("20060102-")) || !strings.Contains(zipBody.Header().Get("Content-Disposition"), ".zip") {
+		t.Fatalf("share group zip filename = %q", zipBody.Header().Get("Content-Disposition"))
+	}
 	blocked := testJSONRequest(t, handler, http.MethodGet, "/api/shared-groups/"+groupToken+"/download/"+strconv.FormatInt(fileIDs[1], 10), "", "")
 	if blocked.Code != http.StatusForbidden {
 		t.Fatalf("share group limit = %d: %s", blocked.Code, blocked.Body.String())
@@ -430,6 +435,57 @@ func TestBatchDownloadsRejectOversizedArchives(t *testing.T) {
 	}
 	groupToken := responseData(t, group)["token"].(string)
 	assertBatchTooLarge(t, testJSONRequest(t, handler, http.MethodPost, "/api/shared-groups/"+groupToken+"/batch-download", "", `{"ids":[`+strconv.FormatInt(fileID, 10)+`]}`))
+}
+
+func TestBatchDownloadsExposeArchiveCreationReason(t *testing.T) {
+	_, handler := newTestServer(t)
+	token := testAdminToken(t, handler)
+	file := uploadTestFile(t, handler, token, "archive-error.txt", "text/plain", []byte("content"))
+	fileID := int64(file["id"].(float64))
+	group := testJSONRequest(t, handler, http.MethodPost, "/api/files/batch-share-group", token, `{"fileIds":[`+strconv.FormatInt(fileID, 10)+`],"expiresInHours":1}`)
+	if group.Code != http.StatusCreated {
+		t.Fatalf("create archive-error share group = %d: %s", group.Code, group.Body.String())
+	}
+	groupToken := responseData(t, group)["token"].(string)
+
+	previousCreateBatchTempFile := createBatchTempFile
+	t.Cleanup(func() { createBatchTempFile = previousCreateBatchTempFile })
+	createBatchTempFile = func(string, string) (*os.File, error) {
+		return nil, &fs.PathError{Op: "create", Path: `C:\\private\\filebox\\tmp`, Err: syscall.EACCES}
+	}
+
+	assertArchiveReason := func(t *testing.T, recorder *httptest.ResponseRecorder) {
+		t.Helper()
+		if recorder.Code != http.StatusInternalServerError {
+			t.Fatalf("archive creation status = %d: %s", recorder.Code, recorder.Body.String())
+		}
+		if !strings.Contains(recorder.Body.String(), "创建下载文件失败：目录无写入权限") {
+			t.Fatalf("archive creation message = %s", recorder.Body.String())
+		}
+		if strings.Contains(recorder.Body.String(), `C:\\private\\filebox\\tmp`) || responseData(t, recorder)["code"] != "ZIP_CREATE_FAILED" {
+			t.Fatalf("archive creation response leaked details or code is wrong: %s", recorder.Body.String())
+		}
+	}
+	assertArchiveReason(t, testJSONRequest(t, handler, http.MethodPost, "/api/files/batch-download", token, `{"ids":[`+strconv.FormatInt(fileID, 10)+`]}`))
+	assertArchiveReason(t, testJSONRequest(t, handler, http.MethodPost, "/api/shared-groups/"+groupToken+"/batch-download", "", `{"ids":[`+strconv.FormatInt(fileID, 10)+`]}`))
+}
+
+func TestBatchDownloadsReportMissingSourceContent(t *testing.T) {
+	db, handler := newTestServer(t)
+	token := testAdminToken(t, handler)
+	file := uploadTestFile(t, handler, token, "missing-source.txt", "text/plain", []byte("content"))
+	fileID := int64(file["id"].(float64))
+	storedPath, err := db.FindFile(context.Background(), fileID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(db.DataDir, storedPath.StoragePath)); err != nil {
+		t.Fatal(err)
+	}
+	recorder := testJSONRequest(t, handler, http.MethodPost, "/api/files/batch-download", token, `{"ids":[`+strconv.FormatInt(fileID, 10)+`]}`)
+	if recorder.Code != http.StatusNotFound || !strings.Contains(recorder.Body.String(), "文件内容不存在") {
+		t.Fatalf("missing source response = %d: %s", recorder.Code, recorder.Body.String())
+	}
 }
 
 // TestDeleteUploadTaskReleasesQuotaAndTemporaryChunks verifies cancellation removes the pending reservation and tmp directory.
@@ -1237,6 +1293,9 @@ func TestBatchShareCreatesIndependentLinksAndRejectsUnauthorizedBatch(t *testing
 	batchDownload := testBinaryRequest(t, handler, http.MethodPost, "/api/files/batch-download", adminToken, []byte(`{"ids":[`+strconv.FormatInt(firstID, 10)+`,`+strconv.FormatInt(secondID, 10)+`]}`))
 	if batchDownload.Code != http.StatusOK || batchDownload.Header().Get("Content-Length") != strconv.Itoa(batchDownload.Body.Len()) {
 		t.Fatalf("batch download content length = %d/%q", batchDownload.Code, batchDownload.Header().Get("Content-Length"))
+	}
+	if !strings.Contains(batchDownload.Header().Get("Content-Disposition"), "filebox-batch-"+time.Now().Format("20060102-")) || !strings.Contains(batchDownload.Header().Get("Content-Disposition"), ".zip") {
+		t.Fatalf("batch download filename = %q", batchDownload.Header().Get("Content-Disposition"))
 	}
 	body := `{"fileIds":[` + strconv.FormatInt(firstID, 10) + `,` + strconv.FormatInt(secondID, 10) + `],"expiresInHours":24,"maxDownloads":3}`
 	created := testJSONRequest(t, handler, http.MethodPost, "/api/files/batch-share", adminToken, body)
