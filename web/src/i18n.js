@@ -313,3 +313,7 @@ Object.assign(en, {
 Object.assign(zhCN, { 'sync.currentFile': '当前文件', 'sync.rate': '速率', 'sync.status': '状态', 'sync.ended': '已结束', 'sync.nextRun': '下次执行' })
 Object.assign(zhTW, { 'sync.currentFile': '目前檔案', 'sync.rate': '速率', 'sync.status': '狀態', 'sync.ended': '已結束', 'sync.nextRun': '下次執行' })
 Object.assign(en, { 'sync.currentFile': 'Current file', 'sync.rate': 'Rate', 'sync.status': 'Status', 'sync.ended': 'Ended', 'sync.nextRun': 'Next run' })
+
+Object.assign(zhCN, { 'sync.fileDetail': '查看文件详情', 'sync.file': '文件', 'sync.resultStatus': '结果 / 状态', 'sync.skipped': '跳过', 'sync.note': '信息', 'sync.overallError': '整体错误', 'sync.rawContent': '原始内容', 'sync.rawFallback': '无法解析文件明细，以下为原始内容。' })
+Object.assign(zhTW, { 'sync.fileDetail': '查看檔案詳情', 'sync.file': '檔案', 'sync.resultStatus': '結果 / 狀態', 'sync.skipped': '跳過', 'sync.note': '資訊', 'sync.overallError': '整體錯誤', 'sync.rawContent': '原始內容', 'sync.rawFallback': '無法解析檔案明細，以下為原始內容。' })
+Object.assign(en, { 'sync.fileDetail': 'View file details', 'sync.file': 'File', 'sync.resultStatus': 'Result / status', 'sync.skipped': 'Skipped', 'sync.note': 'Info', 'sync.overallError': 'Overall error', 'sync.rawContent': 'Raw content', 'sync.rawFallback': 'File details could not be parsed; the raw content is shown below.' })
