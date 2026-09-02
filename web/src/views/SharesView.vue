@@ -1,6 +1,7 @@
 <template>
   <main class="app-shell">
     <AuthenticatedTopbar :user="user" section="shares" />
+    <div v-if="activeConfirm" class="modal-backdrop" @click.self="chooseConfirm(false)"><section class="modal-panel" role="dialog" aria-modal="true"><div class="panel-heading"><div><p class="eyebrow">CONFIRM</p><h2>{{ t('common.confirm') }}</h2></div><button class="icon-button" :title="t('common.close')" @click="chooseConfirm(false)"><X :size="18" /></button></div><p class="modal-copy">{{ activeConfirm.message }}</p><div class="modal-actions"><button class="secondary-button" @click="chooseConfirm(false)">{{ t('common.cancel') }}</button><button class="secondary-button danger-action" @click="chooseConfirm(true)">{{ t('common.confirm') }}</button></div></section></div>
     <section class="content-wrap">
       <div class="page-heading"><div><p class="eyebrow">{{ t('shares.eyebrow') }}</p><h1>{{ t('shares.heading') }}</h1><p class="muted">{{ t('shares.intro') }}</p></div><button class="refresh-button" :title="t('shares.refresh')" @click="loadShares"><RefreshCw :size="18" :class="{ spin: loading }" /></button></div>
       <div v-if="error" class="alert error">{{ error }}</div><div v-if="notice" class="alert success">{{ notice }}</div>
@@ -25,7 +26,7 @@ import { Clock3, Copy, ExternalLink, Eye, LoaderCircle, Pencil, Plus, RefreshCw,
 
 const user = ref(JSON.parse(localStorage.getItem('filebox_user') || '{}'))
 const shares = ref([]); const groups = ref([]); const groupsLoading = ref(false); const selected = ref(null); const shareLogs = ref([]); const loading = ref(false); const logsLoading = ref(false); const saving = ref(false); const error = ref(''); const detailError = ref(''); const notice = ref(''); const extendHours = ref(24); const increaseMax = ref(1); const groupAction = ref(null); const groupActionError = ref('')
-const sharePage = ref(1); const shareTotal = ref(0); const sharePageSize = ref(Number(localStorage.getItem('filebox_pagesize_shares')) || 20); const sharePageInput = ref(''); const groupPage = ref(1); const groupTotal = ref(0); const groupPageSize = ref(Number(localStorage.getItem('filebox_pagesize_groups')) || 20); const groupPageInput = ref('')
+const sharePage = ref(1); const shareTotal = ref(0); const sharePageSize = ref(Number(localStorage.getItem('filebox_pagesize_shares')) || 20); const sharePageInput = ref(''); const groupPage = ref(1); const groupTotal = ref(0); const groupPageSize = ref(Number(localStorage.getItem('filebox_pagesize_groups')) || 20); const groupPageInput = ref(''); const confirmQueue = ref([])
 
 // loadShares fetches the owner-scoped management list, including revoked history rows.
 // loadShares 拉取当前用户可管理的分享列表，并保留已撤销历史行。
@@ -41,7 +42,25 @@ function changeSharePageSize() { sharePage.value = 1; localStorage.setItem('file
 function changeGroupPageSize() { groupPage.value = 1; localStorage.setItem('filebox_pagesize_groups', String(groupPageSize.value)); loadGroups() }
 function jumpSharePage() { const target = Number(sharePageInput.value); if (!target || target < 1 || target > shareTotalPages.value) { sharePageInput.value = ''; return } sharePage.value = target; sharePageInput.value = ''; loadShares() }
 function jumpGroupPage() { const target = Number(groupPageInput.value); if (!target || target < 1 || target > groupTotalPages.value) { groupPageInput.value = ''; return } groupPage.value = target; groupPageInput.value = ''; loadGroups() }
-async function revokeGroup(group) { if (!window.confirm(t('shares.confirmRevoke'))) return; try { await api(`/api/shared-groups/${encodeURIComponent(group.token)}`, { method: 'DELETE' }); notice.value = t('shares.revoked'); await loadGroups() } catch (err) { error.value = err.message } }
+function askConfirm(message) {
+  return new Promise(resolve => {
+    const entry = { message, resolve }
+    entry.timer = setTimeout(() => {
+      const position = confirmQueue.value.indexOf(entry)
+      if (position >= 0) confirmQueue.value.splice(position, 1)
+      resolve(false)
+    }, 60000)
+    confirmQueue.value.push(entry)
+  })
+}
+const activeConfirm = computed(() => confirmQueue.value[0] || null)
+function chooseConfirm(value) {
+  const entry = confirmQueue.value.shift()
+  if (!entry) return
+  clearTimeout(entry.timer)
+  entry.resolve(Boolean(value))
+}
+async function revokeGroup(group) { if (!(await askConfirm(t('shares.confirmRevoke')))) return; try { await api(`/api/shared-groups/${encodeURIComponent(group.token)}`, { method: 'DELETE' }); notice.value = t('shares.revoked'); await loadGroups() } catch (err) { error.value = err.message } }
 // 聚合分享成员文件弹窗与编辑弹窗（v018 #2）：眼睛查看文件范围；编辑可增删成员文件并改有效期/下载上限。
 // Aggregate-share member-file dialog and edit dialog (v018 #2): the eye lists the file scope; the edit dialog
 // adds/removes member files and changes the expiry and download limit.
@@ -68,7 +87,7 @@ function closeDetails() { selected.value = null; shareLogs.value = [] }
 async function loadShareLogs() { if (!selected.value) return; logsLoading.value = true; try { shareLogs.value = (await api(`/api/shares/${encodeURIComponent(selected.value.token)}/logs?page=1&pageSize=100`)).data.items || [] } catch (err) { detailError.value = err.message } finally { logsLoading.value = false } }
 async function extendShare() { if (!selected.value) return; saving.value = true; detailError.value = ''; try { const body = await api(`/api/shares/${encodeURIComponent(selected.value.token)}/extend`, { method: 'PUT', body: JSON.stringify({ expiresInHours: extendHours.value }) }); replaceShare(body.data); notice.value = t('shares.extended') } catch (err) { detailError.value = err.message } finally { saving.value = false } }
 async function increaseShare() { if (!selected.value) return; saving.value = true; detailError.value = ''; try { const body = await api(`/api/shares/${encodeURIComponent(selected.value.token)}/increase`, { method: 'PUT', body: JSON.stringify({ maxDownloads: increaseMax.value }) }); replaceShare(body.data); notice.value = t('shares.increased') } catch (err) { detailError.value = err.message } finally { saving.value = false } }
-async function revokeShare(item) { if (!window.confirm(t('shares.confirmRevoke'))) return; try { await api(`/api/shares/${encodeURIComponent(item.token)}`, { method: 'DELETE' }); notice.value = t('shares.revoked'); await loadShares(); if (selected.value?.token === item.token) { selected.value = shares.value.find(value => value.token === item.token) || null; if (selected.value) await loadShareLogs() } } catch (err) { detailError.value = err.message } }
+async function revokeShare(item) { if (!(await askConfirm(t('shares.confirmRevoke')))) return; try { await api(`/api/shares/${encodeURIComponent(item.token)}`, { method: 'DELETE' }); notice.value = t('shares.revoked'); await loadShares(); if (selected.value?.token === item.token) { selected.value = shares.value.find(value => value.token === item.token) || null; if (selected.value) await loadShareLogs() } } catch (err) { detailError.value = err.message } }
 function replaceShare(value) { selected.value = value; const index = shares.value.findIndex(item => item.token === value.token); if (index >= 0) shares.value[index] = value }
 function absoluteUrl(item) { return item?.url ? new URL(item.url, window.location.origin).href : '' }
 async function copyShare(item) { try { await navigator.clipboard.writeText(absoluteUrl(item)) } catch { const input = document.querySelector('.share-url input'); input?.select(); document.execCommand('copy') } notice.value = t('shares.copied') }

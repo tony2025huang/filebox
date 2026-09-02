@@ -2,6 +2,8 @@
   <main class="app-shell">
     <AuthenticatedTopbar :user="user" section="sync" />
 
+    <div v-if="activeConfirm" class="modal-backdrop" @click.self="chooseConfirm(false)"><section class="modal-panel" role="dialog" aria-modal="true"><div class="panel-heading"><div><p class="eyebrow">CONFIRM</p><h2>{{ t('common.confirm') }}</h2></div><button class="icon-button" :title="t('common.close')" @click="chooseConfirm(false)"><X :size="18" /></button></div><p class="modal-copy">{{ activeConfirm.message }}</p><div class="modal-actions"><button class="secondary-button" @click="chooseConfirm(false)">{{ t('common.cancel') }}</button><button class="secondary-button danger-action" @click="chooseConfirm(true)">{{ t('common.confirm') }}</button></div></section></div>
+
     <section class="content-wrap sync-page">
       <div class="page-heading"><div><p class="eyebrow">{{ t('sync.eyebrow') }}</p><h1>{{ t('sync.heading') }}</h1><p class="muted">{{ t('sync.copy') }}</p></div><div class="sync-heading-actions"><button class="secondary-button" :title="t('sync.refresh')" @click="loadAll"><RefreshCw :size="16" :class="{ spin: loading }" /></button><button class="primary-button" @click="openTaskCreate"><Plus :size="17" /> {{ t('sync.newTask') }}</button></div></div>
       <div v-if="error" class="alert error">{{ error }}</div><div v-if="notice" class="alert success">{{ notice }}</div>
@@ -29,7 +31,7 @@ import { t, currentLocale } from '../i18n'
 import { Activity, ArrowUp, Check, Eye, EyeOff, File, Folder, FolderOpen, Globe, Home, LoaderCircle, Pencil, Play, Plus, RefreshCw, Save, Server, Trash2, X } from 'lucide-vue-next'
 
 const user = ref(JSON.parse(localStorage.getItem('filebox_user') || '{}'))
-const tasks = ref([]); const systems = ref([]); const folders = ref([]); const loading = ref(false); const saving = ref(false); const error = ref(''); const notice = ref(''); const formError = ref(''); const runningId = ref(0)
+const tasks = ref([]); const systems = ref([]); const folders = ref([]); const loading = ref(false); const saving = ref(false); const error = ref(''); const notice = ref(''); const formError = ref(''); const runningId = ref(0); const confirmQueue = ref([])
 const taskModal = ref(false); const taskEditing = ref(false); const systemModal = ref(false); const systemEditing = ref(false); const picker = ref(null); const pickerFilter = ref(''); const pickerPathInput = ref(''); const pickerPathSaving = ref(false); const remoteEntries = ref([]); const localFileEntries = ref([]); const details = ref(null); const detailLogs = ref([]); const detailsLoading = ref(false); const testingId = ref(0)
 const taskForm = reactive({ id: 0, name: '', direction: 'push', remoteSystemId: 0, sourceType: 'filebox', sourcePath: '', sourceKind: 'directory', targetType: 'sftp', targetPath: '.', conflictPolicy: 'overwrite', scheduleType: 'once', cron: '0 3 * * *', enabled: true })
 // 进行中同步进度（v018 #4）：详情弹窗打开时每 2s 轮询 /api/sync/tasks/{id}/progress，速率由两次采样差值计算。
@@ -108,7 +110,25 @@ function applyPreset(event) { const values = { daily: '0 3 * * *', hourly: '0 * 
 function taskPayload() { return { name: taskForm.name, direction: taskForm.direction, remoteSystemId: Number(taskForm.remoteSystemId), sourceType: taskForm.sourceType, sourcePath: taskForm.sourcePath, sourceKind: taskForm.sourceKind || 'directory', targetType: taskForm.targetType, targetPath: taskForm.targetPath, conflictPolicy: taskForm.conflictPolicy, scheduleType: taskForm.scheduleType, cron: taskForm.cron, enabled: taskForm.enabled } }
 async function saveTask() { saving.value = true; formError.value = ''; try { const body = await api(taskEditing.value ? `/api/sync/tasks/${taskForm.id}` : '/api/sync/tasks', { method: taskEditing.value ? 'PUT' : 'POST', body: JSON.stringify(taskPayload()) }); notice.value = t('sync.taskSaved'); taskModal.value = false; await loadAll(); if (body.data) tasks.value = tasks.value } catch (err) { formError.value = err.message } finally { saving.value = false } }
 async function runTask(item) { runningId.value = item.id; error.value = ''; try { await api(`/api/sync/tasks/${item.id}/run`, { method: 'POST' }); notice.value = t('sync.runStarted'); await loadAll() } catch (err) { error.value = err.message } finally { runningId.value = 0 } }
-async function deleteTask(item) { if (!window.confirm(t('sync.confirmDeleteTask', { name: item.name }))) return; try { await api(`/api/sync/tasks/${item.id}`, { method: 'DELETE' }); notice.value = t('sync.taskDeleted'); await loadAll() } catch (err) { error.value = err.message } }
+function askConfirm(message) {
+  return new Promise(resolve => {
+    const entry = { message, resolve }
+    entry.timer = setTimeout(() => {
+      const position = confirmQueue.value.indexOf(entry)
+      if (position >= 0) confirmQueue.value.splice(position, 1)
+      resolve(false)
+    }, 60000)
+    confirmQueue.value.push(entry)
+  })
+}
+const activeConfirm = computed(() => confirmQueue.value[0] || null)
+function chooseConfirm(value) {
+  const entry = confirmQueue.value.shift()
+  if (!entry) return
+  clearTimeout(entry.timer)
+  entry.resolve(Boolean(value))
+}
+async function deleteTask(item) { if (!(await askConfirm(t('sync.confirmDeleteTask', { name: item.name })))) return; try { await api(`/api/sync/tasks/${item.id}`, { method: 'DELETE' }); notice.value = t('sync.taskDeleted'); await loadAll() } catch (err) { error.value = err.message } }
 function resetSecretView() { revealedSecret.value = null; secretVisible.value = false; secretDisplay.value = '' }
 function resetSystem() { Object.assign(systemForm, { id: 0, name: '', kind: 'sftp', host: '', url: '', port: 22, username: '', authType: 'password', authSecret: '', authPassphrase: '', hasCredentials: false }); resetSecretView() }
 function openSystemCreate() { resetSystem(); systemEditing.value = false; formError.value = ''; systemModal.value = true }
@@ -135,7 +155,7 @@ async function toggleSecret() {
 }
 function syncSystemKind() { if (systemForm.kind === 'filebox') { systemForm.authType = 'password'; systemForm.host = ''; systemForm.authPassphrase = '' } }
 async function saveSystem() { saving.value = true; formError.value = ''; try { const body = { name: systemForm.name, kind: systemForm.kind || 'sftp', host: systemForm.kind === 'filebox' ? '' : systemForm.host, url: systemForm.kind === 'filebox' ? systemForm.url : '', port: Number(systemForm.port) || 22, username: systemForm.username, authType: systemForm.authType, authSecret: systemForm.authSecret, authPassphrase: systemForm.authPassphrase }; await api(systemEditing.value ? `/api/sync/systems/${systemForm.id}` : '/api/sync/systems', { method: systemEditing.value ? 'PUT' : 'POST', body: JSON.stringify(body) }); notice.value = t('sync.systemSaved'); systemModal.value = false; await loadAll() } catch (err) { formError.value = err.message } finally { saving.value = false } }
-async function deleteSystem(item) { if (!window.confirm(t('sync.confirmDeleteSystem', { name: item.name }))) return; try { await api(`/api/sync/systems/${item.id}`, { method: 'DELETE' }); notice.value = t('sync.systemDeleted'); await loadAll() } catch (err) { error.value = err.message } }
+async function deleteSystem(item) { if (!(await askConfirm(t('sync.confirmDeleteSystem', { name: item.name })))) return; try { await api(`/api/sync/systems/${item.id}`, { method: 'DELETE' }); notice.value = t('sync.systemDeleted'); await loadAll() } catch (err) { error.value = err.message } }
 // testSystem 探测目标系统连通性（#5）：调用 POST /api/sync/systems/{id}/test，
 // 成功后把 ok/失败与测试时间写回行内徽标；失败消息仅临时展示，不落库（避免保存敏感信息）。
 // testSystem probes a remote system's connectivity (#5) via POST /api/sync/systems/{id}/test,

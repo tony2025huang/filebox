@@ -1,6 +1,7 @@
 <template>
   <main class="app-shell">
     <AuthenticatedTopbar :user="user" section="collections" />
+    <div v-if="activeConfirm" class="modal-backdrop" @click.self="chooseConfirm(false)"><section class="modal-panel" role="dialog" aria-modal="true"><div class="panel-heading"><div><p class="eyebrow">CONFIRM</p><h2>{{ t('common.confirm') }}</h2></div><button class="icon-button" :title="t('common.close')" @click="chooseConfirm(false)"><X :size="18" /></button></div><p class="modal-copy">{{ activeConfirm.message }}</p><div class="modal-actions"><button class="secondary-button" @click="chooseConfirm(false)">{{ t('common.cancel') }}</button><button class="secondary-button danger-action" @click="chooseConfirm(true)">{{ t('common.confirm') }}</button></div></section></div>
     <section class="content-wrap">
       <div class="page-heading"><div><p class="eyebrow">WORKSPACE / COLLECTIONS</p><h1>{{ t('page.collections') }}</h1><p class="muted">{{ t('collections.copy') }}</p></div><div class="sync-heading-actions"><button class="secondary-button" :title="t('files.refresh')" @click="loadCollections"><RefreshCw :size="16" :class="{ spin: collectionsLoading }" /></button><button class="primary-button" @click="openCollectionCreate"><UploadCloud :size="17" /> {{ t('collection.create') }}</button></div></div>
       <div v-if="error" class="alert error">{{ error }}</div><div v-if="collectionNotice" class="alert success">{{ collectionNotice }}</div>
@@ -29,7 +30,7 @@ import { Copy, Eye, LoaderCircle, Pencil, RefreshCw, Trash2, UploadCloud, X } fr
 
 const user = ref(JSON.parse(localStorage.getItem('filebox_user') || '{}'))
 const collections = ref([]); const collectionsLoading = ref(false); const collectionCreateOpen = ref(false); const collectionSaving = ref(false); const collectionError = ref(''); const collectionNotice = ref(''); const collectionResult = ref(null); const collectionDetails = ref(null); const editingCollection = ref(false); const collectionForm = ref({ name: '', expiresInHours: 24, maxUploads: 0, maxFileBytesMB: 0, expiresAtLocal: '' }); const error = ref('')
-const collectionsPage = ref(1); const collectionsTotal = ref(0); const collectionsPageSize = ref(Number(localStorage.getItem('filebox_pagesize_collections')) || 20); const collectionsPageInput = ref('')
+const collectionsPage = ref(1); const collectionsTotal = ref(0); const collectionsPageSize = ref(Number(localStorage.getItem('filebox_pagesize_collections')) || 20); const collectionsPageInput = ref(''); const confirmQueue = ref([])
 
 async function loadCollections() { collectionsLoading.value = true; try { const body = await api(`/api/collections?page=${collectionsPage.value}&pageSize=${collectionsPageSize.value}`); collections.value = body.data.items || []; collectionsTotal.value = body.data.total || 0 } catch (err) { error.value = err.message } finally { collectionsLoading.value = false } }
 // 收集分页辅助（v018 #7）：pageSize 选择 + 页码跳转。
@@ -48,7 +49,25 @@ async function copyCollection(item) { try { await navigator.clipboard.writeText(
 function remainingLabel(item) { if (!item.remainingSeconds) return `${t('collection.remaining')}: 0`; const hours = Math.floor(item.remainingSeconds / 3600); const minutes = Math.max(1, Math.floor(item.remainingSeconds / 60)); return `${t('collection.remaining')}: ${hours ? `${hours}h` : `${minutes}m`}` }
 function collectionStatusLabel(item) { const label = item.status === 'expired' ? t('collection.expired') : item.status === 'revoked' ? t('collection.revoked') : item.status === 'limit_reached' ? t('collection.limitReached') : t('collection.active'); return `${label} · ${remainingLabel(item)}` }
 async function viewCollection(item) { if (collectionDetails.value?.id === item.id) { collectionDetails.value = null; return } try { const body = await api(`/api/collections/${item.id}`); collectionDetails.value = body.data } catch (err) { error.value = err.message } }
-async function revokeCollection(item) { if (!window.confirm(t('collection.confirmRevoke'))) return; try { await api(`/api/collections/${item.id}`, { method: 'DELETE' }); collectionNotice.value = t('collection.revoked'); await loadCollections() } catch (err) { error.value = err.message } }
+function askConfirm(message) {
+  return new Promise(resolve => {
+    const entry = { message, resolve }
+    entry.timer = setTimeout(() => {
+      const position = confirmQueue.value.indexOf(entry)
+      if (position >= 0) confirmQueue.value.splice(position, 1)
+      resolve(false)
+    }, 60000)
+    confirmQueue.value.push(entry)
+  })
+}
+const activeConfirm = computed(() => confirmQueue.value[0] || null)
+function chooseConfirm(value) {
+  const entry = confirmQueue.value.shift()
+  if (!entry) return
+  clearTimeout(entry.timer)
+  entry.resolve(Boolean(value))
+}
+async function revokeCollection(item) { if (!(await askConfirm(t('collection.confirmRevoke')))) return; try { await api(`/api/collections/${item.id}`, { method: 'DELETE' }); collectionNotice.value = t('collection.revoked'); await loadCollections() } catch (err) { error.value = err.message } }
 function formatDate(value) { return value ? new Date(value).toLocaleString(currentLocale.value === 'en' ? 'en-US' : currentLocale.value, { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '-' }
 onMounted(loadCollections)
 </script>
