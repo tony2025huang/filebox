@@ -20,6 +20,10 @@ export const zhCN = {
   'title.separator': ' | '
 }
 
+Object.assign(zhCN, {
+  'logReason.readOnly': '只读时段限制', 'logReason.settingsFailed': '设置保存失败', 'logReason.invalidRequest': '请求无效', 'logReason.deleteFailed': '删除失败', 'logReason.writeFailed': '写入失败', 'logReason.batch': '批量操作'
+})
+
 export const zhTW = {
   'lang.zhCN': '簡體中文', 'lang.zhTW': '繁體中文', 'lang.en': 'English', 'lang.followSystem': '跟隨系統',
   'nav.files': '我的檔案', 'nav.system': '系統設定', 'nav.syncTasks': '同步任務', 'nav.logs': '日誌', 'nav.logout': '登出',
@@ -35,6 +39,10 @@ export const zhTW = {
   'logReason.userNotFound': '使用者不存在', 'logReason.wrongPassword': '密碼錯誤', 'logReason.userDisabled': '帳號已停用', 'logReason.locked': '帳號已鎖定', 'logReason.notFound': '檔案不存在', 'logReason.contentNotFound': '檔案內容不存在', 'logReason.checksumMismatch': '校驗值不符', 'logReason.saveFailed': '儲存失敗', 'logReason.uploadFailed': '上傳失敗', 'logReason.invalidName': '檔名非法', 'logReason.tooLarge': '超過大小上限', 'logReason.conflict': '同名衝突', 'logReason.diskFull': '磁碟空間不足', 'logReason.quotaExceeded': '超出配額', 'logReason.taskNotFound': '任務不存在', 'logReason.invalidIndex': '分片序號無效', 'logReason.rateLimited': '上傳過慢', 'logReason.sizeMismatch': '分片大小不一致', 'logReason.invalidDir': '目錄無效', 'logReason.invalidResolve': '衝突處理無效', 'logReason.prepareFailed': '上傳空間準備失敗', 'logReason.conflictCheckFailed': '同名檢查失敗', 'logReason.diskCheckFailed': '磁碟檢查失敗', 'logReason.taskCreateFailed': '任務建立失敗', 'logReason.invalidChunkSize': '分片大小非法', 'title.separator': ' | '
 }
 
+Object.assign(zhTW, {
+  'logReason.readOnly': '唯讀時段限制', 'logReason.settingsFailed': '設定儲存失敗', 'logReason.invalidRequest': '請求無效', 'logReason.deleteFailed': '刪除失敗', 'logReason.writeFailed': '寫入失敗', 'logReason.batch': '批次操作'
+})
+
 export const en = {
   'lang.zhCN': 'Simplified Chinese', 'lang.zhTW': 'Traditional Chinese', 'lang.en': 'English', 'lang.followSystem': 'Follow system',
   'nav.files': 'My files', 'nav.system': 'System settings', 'nav.syncTasks': 'Sync tasks', 'nav.logs': 'Logs', 'nav.logout': 'Log out',
@@ -48,6 +56,10 @@ export const en = {
   'error.requestFailed': 'Request failed', 'error.network': 'Network connection failed', 'error.invalidResponse': 'Invalid server response', 'error.loginFailed': 'Invalid username or password', 'error.authRequired': 'Please log in first', 'error.adminRequired': 'Administrator permission required', 'error.invalidRequest': 'Invalid request format', 'error.invalidLanguage': 'Invalid language setting', 'error.invalidThemeColor': 'Use #RGB or #RRGGBB', 'error.conflict': 'A file with this name already exists', 'error.userExists': 'Username already exists', 'error.quotaExceeded': 'User quota exceeded', 'error.quotaExceededDetail': 'Quota exceeded: {used} used of {quota}, this file needs {fileSize}, short by {short}. Free up space or adjust the quota', 'error.fileTooLarge': 'File exceeds the single-file size limit', 'error.fileTooLargeDetail': 'File exceeds the single-file size limit of {max}', 'error.diskFull': 'Storage space is insufficient; uploads are temporarily disabled', 'error.fileNotFound': 'File not found', 'error.fileContentNotFound': 'File content not found', 'error.uploadFailed': 'Upload failed', 'error.downloadFailed': 'Download failed', 'error.deleteFailed': 'File deletion failed', 'error.passwordTooLong': 'Password is too long', 'error.invalidSettings': 'Invalid settings', 'error.invalidUser': 'Invalid user information', 'error.userNotFound': 'User not found', 'error.cannotDeleteSelf': 'You cannot delete the current administrator', 'error.brandFailed': 'Brand settings failed', 'error.saveLanguage': 'Could not save language settings', 'error.checksumMismatch': 'File checksum mismatch', 'error.invalidFilename': 'The filename contains invalid characters; upload rejected',
   'logReason.userNotFound': 'User not found', 'logReason.wrongPassword': 'Wrong password', 'logReason.userDisabled': 'Account disabled', 'logReason.locked': 'Account locked', 'logReason.notFound': 'File not found', 'logReason.contentNotFound': 'File content not found', 'logReason.checksumMismatch': 'Checksum mismatch', 'logReason.saveFailed': 'Save failed', 'logReason.uploadFailed': 'Upload failed', 'logReason.invalidName': 'Invalid file name', 'logReason.tooLarge': 'Exceeds the size limit', 'logReason.conflict': 'Name conflict', 'logReason.diskFull': 'Disk space low', 'logReason.quotaExceeded': 'Quota exceeded', 'logReason.taskNotFound': 'Task not found', 'logReason.invalidIndex': 'Invalid chunk index', 'logReason.rateLimited': 'Upload too slow', 'logReason.sizeMismatch': 'Chunk size mismatch', 'logReason.invalidDir': 'Invalid directory', 'logReason.invalidResolve': 'Invalid conflict mode', 'logReason.prepareFailed': 'Could not prepare upload space', 'logReason.conflictCheckFailed': 'Conflict check failed', 'logReason.diskCheckFailed': 'Disk check failed', 'logReason.taskCreateFailed': 'Task creation failed', 'logReason.invalidChunkSize': 'Invalid chunk size', 'title.separator': ' | '
 }
+
+Object.assign(en, {
+  'logReason.readOnly': 'Read-only window restriction', 'logReason.settingsFailed': 'Settings update failed', 'logReason.invalidRequest': 'Invalid request', 'logReason.deleteFailed': 'Delete failed', 'logReason.writeFailed': 'Write failed', 'logReason.batch': 'Batch operation'
+})
 
 Object.assign(zhCN, {
   'files.uploadFolder': '上传文件夹', 'files.instantUpload': '秒传成功', 'files.paused': '已暂停', 'files.resume': '继续', 'files.pause': '暂停', 'files.chunks': '{done}/{total} 分片', 'files.preview': '预览', 'files.share': '分享', 'files.shareDialog': '分享文件', 'files.shareExpiresHours': '有效期（小时）', 'files.shareMaxDownloads': '最大下载次数（0=不限）', 'files.shareUrl': '分享链接', 'files.shareCopied': '链接已复制', 'files.revokeShares': '撤销分享', 'files.shared': '已分享', 'files.openShare': '打开分享页', 'files.retry': '重试', 'files.uploadError': '上传失败', 'files.folderPath': '目录：{path}', 'files.checksum': '校验中 {progress}%', 'files.uploadContinue': '继续上传', 'files.previewUnsupported': '此文件类型不支持在线预览', 'files.previewLoading': '正在加载预览…', 'files.transfers': '传输', 'files.uploads': '上传', 'files.downloads': '下载', 'files.downloading': '下载中', 'files.noTransfers': '暂无传输任务', 'files.showMd5': '显示 MD5', 'files.selectFolder': '选择目录 {name}', 'files.batchDeleteFolders': '删除目录({count})', 'files.dropEmpty': '拖拽内容不包含可上传的文件（如空目录），请点击按钮选择文件或文件夹', 'files.root': '根目录', 'files.newFolder': '新建文件夹', 'files.folderName': '文件夹名称', 'files.renameFolder': '重命名文件夹', 'files.deleteFolder': '删除文件夹', 'files.emptyFolder': '此目录为空',
