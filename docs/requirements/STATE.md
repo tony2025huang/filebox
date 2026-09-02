@@ -1,6 +1,28 @@
 # FileBox Requirement State
 
-Updated: 2026-09-01 (v018：8 项新需求全部交付)
+Updated: 2026-09-02 (v020：11 项用户反馈优化全部交付)
+
+| Requirement | State | Notes |
+|---|---|---|
+| v020 delete/revoke confirm → custom modal | done | All 12 `window.confirm` call sites replaced: FilesView queue-based `askConfirm` (60s timeout=cancel) + modal-backdrop/modal-panel; Shares/Collections/Sync/Admin adopt the same pattern; zero `window.confirm` left in web/src; commits `ccc6272`/`54477fe`. |
+| v020 batch-download error cause + timestamped ZIP | done | ZIP build/read failures classified (ENOSPC/EDQUOT→disk full, EACCES/EPERM/EROFS→not writable, else→IO error; `code=ZIP_CREATE_FAILED`+`reason`; raw error only logged); archive named `filebox-batch-YYYYMMDD-HHMMSS.zip` on server and client; injectable `createBatchTempFile` + regression tests; commit `3ee19ce`. |
+| v020 transfer batch control | done | Drawer selection/select-all per upload & download section with pause/resume/terminate-selected and "all" actions; upload terminate calls `DELETE /api/upload-tasks/{taskId}`; downloads gain pause (AbortController) + Range resume (206/200); commit `cec1382`. |
+| v020 topbar transfers label | done | Icon-only transfers entry → icon-text-button with trilingual label; badge kept; commit `1c62df8`. |
+| v020 my-collections duplicate refresh removed | done | List-section header refresh icon removed (page-heading refresh kept); plus `.value` residual cleaned so the collections pagination bar shows for >1 page; commits `dfe4512`/`4a031de`. |
+| v020 shares subtitle wrong "Copy link" | done | Duplicated `shares.copy` key split into `shares.intro` (subtitle) and `shares.copy` (copy-button title); trilingual; commit `e51cbdb`. |
+| v020 aggregate-share edit aligned with single share | done | Group edit dialog now shows info grid + link (copy/open) + hour-based extend/increase (PUT extend/increase) + member add/remove + expiry/limit edit; dead groupAction code removed; commit `665922d`. |
+| v020 sync file detail modal | done | Inline `<details>` replaced by a button → modal parsing `detail` into per-file rows with success/skipped/failure/overall-error badges; raw view kept; commit `f6d7b5e`. |
+| v020 sync detail modal width | done | `.wide-modal` 1100px→`min(1280px,96vw)`, log table min-width 1160px; task-edit modal keeps 1100px via `sync-task-modal`; commit `b685856`. |
+| v020 log failure reason localization | done | Backend reasons enumerated; trilingual `logReason.*` key sets aligned to 38 identical keys (share*5, ipLocked/totpFailed, readOnly/settingsFailed/invalidRequest/deleteFailed/writeFailed/batch); node-verified; commits `ef9d083` (+`bdf1eee` mapping). |
+| v020 transfers icon direction | done | ArrowLeftRight → ArrowUpDown on the topbar transfers button; commit `6d75e1b`. |
+
+| Requirement | State | Notes |
+|---|---|---|
+| v019 time-range apply/clear buttons | done | Draft-state time panel: edits only commit on 确定, 清空 resets; v019 batch (7 items). |
+| v019 pagination display fixes | done | Template ref-unwrap bug (`pageSize.value` → undefined) fixed across logs/files/shares/groups list pages. |
+| v019 folder navigation invalid fix | done | navigateDir normalization + backend listFolders filtering/`validateFolderName` rejects `.`/`..`. |
+| v019 aggregate-share card polish | done | Eye/Copy/Trash only; edit merged into the eye dialog. |
+| v019 sync dialog width + collections/group pagination etc. | done | wide-modal 780→1100px; pagination controls shown on four list pages; v019 doc/commits already recorded in CHANGELOG/RELEASE_NOTES. |
 
 | Requirement | State | Notes |
 |---|---|---|

@@ -4,6 +4,22 @@
 
 [English](RELEASE_NOTES.en.md)
 
+## v0.2.0-v020（用户反馈优化批次，11 项）
+
+v019 后新一轮 11 项用户反馈与优化，全部由 codex CLI 分批实施（每批 1 项、独立提交推送，前端 `npm run build` / 后端 `go test ./...` 验证通过）；任务书见 `docs/CODEX_TASK_v020.md`。
+
+- **删除/撤销确认统一为自定义弹窗（缺陷1）**：枚举全仓 12 处 `window.confirm`（删文件/批量删文件/删目录/批量删目录/大数量上传/撤销分享与聚合分享/撤销收集/删同步任务与系统/删用户/重置品牌）；FilesView 建立队列式确认（`askConfirm`，60s 超时视为取消）与 modal-backdrop/modal-panel 风格弹窗，Shares/Collections/Sync/Admin 视图以同模式收口；`web/src` 已零 `window.confirm` 残留。
+- **聚合下载失败原因透传 + ZIP 文件名时间戳（缺陷2）**：`batchDownload`/`shareGroupBatchDownload` 的打包失败不再笼统提示「创建下载文件失败」——按底层错误分类透传（ENOSPC/EDQUOT→磁盘空间不足、EACCES/EPERM/EROFS→目录无写入权限、其余→IO 错误；响应带 `code=ZIP_CREATE_FAILED` 与 `reason`，原始错误仅写日志防服务器路径泄露）；文件名改为 `filebox-batch-YYYYMMDD-HHMMSS.zip`（前后端一致）；`createBatchTempFile` 可注入 + 双入口错误/文件名回归测试。
+- **传输任务批量控制（缺陷3）**：传输抽屉上传/下载分区支持勾选与全选，提供 暂停选中/继续选中/终止选中 与各分区「全部」操作；上传终止调用 `DELETE /api/upload-tasks/{taskId}` 释放服务端配额；下载新增暂停（AbortController）与 Range 断点续传（206 续传、200 自动全量重下）；进度/速率/会话快照联动；完成/校验中状态自动禁用相应操作。
+- **顶栏「传输」按钮加文字（缺陷4）**：纯图标入口改为 icon-text-button（图标+「传输/傳輸/Transfers」），与其余导航一致，角标保留。
+- **我的收集双刷新按钮去重（缺陷5）**：删除列表小节标题行的刷新图标按钮，保留页面标题区刷新入口；顺带清理该页分页模板 v019 同类 `.value` 残留（修复多页时收藏分页条不显示的隐患）。
+- **分享管理页副标题误显「复制链接」（缺陷6）**：根因 i18n `shares.copy` 键重复定义（描述句被覆盖）→ 拆分为 `shares.intro`（三语副标题描述句）与 `shares.copy`（复制按钮 title），三语去重。
+- **聚合分享编辑对齐单分享（缺陷7）**：聚合分享编辑弹窗补齐单分享详情同等能力——基本信息网格（token/使用/到期/剩余/状态/创建时间）、链接展示+复制+打开分享页、小时制延期/增次（PUT `extend`/`increase` 后列表与弹窗同步刷新），保留成员文件增删与到期/上限编辑；移除死代码 `groupAction`/`openGroupAction`。
+- **同步日志文件详情弹窗化（缺陷8）**：详情行内 `<details>` 展开改为按钮 → 弹窗；解析 `detail` 多行文本（`路径: 结果` 或整体错误行）逐文件展示，uploaded/downloaded→成功、skipped→跳过、失败/错误关键词→失败、整体错误行独立样式；保留原始内容折叠兜底。
+- **同步任务详情弹窗加宽（缺陷9）**：`.wide-modal` 1100px→`min(1280px, 96vw)`，日志表 min-width 1000→1160px（横向滚动兜底）；任务编辑弹窗保留 1100px（独立 `sync-task-modal`），避免布局变化。
+- **日志失败原因本地化补齐（缺陷10）**：枚举后端 reason 并与 LogsView/SharesView 映射比对，三语 `logReason.*` 键补至 38 键完全一致（zh/zh-TW 缺分享 5 键、zh-TW 缺 ipLocked/totpFailed、readOnly/settingsFailed/invalidRequest/deleteFailed/writeFailed/batch 六新映射补三语）；未覆盖 reason 仍显示原始值兜底。
+- **传输图标方向（缺陷11）**：顶栏传输按钮 ArrowLeftRight→ArrowUpDown（上下箭头符合传输语义）。
+
 ## v0.2.0-v019（用户反馈修复批次）
 
 7 项用户实测反馈修复（4 项缺陷 + 3 项优化）：

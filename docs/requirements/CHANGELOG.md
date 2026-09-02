@@ -1,5 +1,21 @@
 # Requirement Change Log
 
+## 2026-09-02 - v020（用户反馈优化批次，11 项）
+
+任务书：`docs/CODEX_TASK_v020.md`；codex 分批实施（每批 1 项、独立提交推送，前端 `npm run build`/后端 `go test ./...` 验证；缺陷 4 由并发 codex 执行者提交、内容已核验）；日期 2026-09-02。
+
+- 缺陷1：删除/撤销类操作统一为自定义确认弹窗——全仓 12 处 `window.confirm` 枚举（文件删除/批量删除/目录删除/批量目录删除/>50 文件批量上传/撤销分享/撤销聚合分享/撤销收集/删除同步任务/删除同步系统/删除用户/重置品牌）；FilesView 队列式 `askConfirm`（60s 超时按取消）+ modal-backdrop/modal-panel 弹窗，其余四视图同模式收口（commit `ccc6272`/`54477fe`）；`web/src` 零残留
+- 缺陷2：批量 ZIP 失败原因分类透传（`classifyBatchZipError`：ENOSPC/EDQUOT→磁盘空间不足、EACCES/EPERM/EROFS→无写入权限、其余→IO 错误；响应 `code=ZIP_CREATE_FAILED`+`reason`，原始错误仅日志防路径泄露；`batchZipError` 双入口复用）；ZIP 文件名 `filebox-batch-YYYYMMDD-HHMMSS.zip`（后端 Content-Disposition + 前端 download 名一致）；`createBatchTempFile` 可注入 + 双入口回归测试（commit `3ee19ce`）
+- 缺陷3：传输抽屉批量控制——上传/下载分区 checkbox+全选，暂停选中/继续选中/终止选中与「全部」；上传终止 `DELETE /api/upload-tasks/{taskId}` 释放配额；下载暂停(AbortController)+Range 断点续传（206 续传/200 重下），进度速率与持久化联动；完成/校验态禁用（commit `cec1382`）
+- 缺陷4：顶栏「传输」按钮图标-only → icon-text-button（图标+文字，与导航一致），角标保留（commit `1c62df8`）
+- 缺陷5：我的收集双刷新去重（删列表小节头部刷新，留页面标题区）+ 顺带清理分页模板 `.value` 残留（commit `dfe4512`/`4a031de`）
+- 缺陷6：`shares.copy` 键重复定义致副标题误显「复制链接」→ 拆分 `shares.intro`（三语描述句）/`shares.copy`（复制按钮 title），SharesView 副标题改引用（commit `e51cbdb`）
+- 缺陷7：聚合分享编辑对齐单分享——基本信息网格+链接复制/打开+小时制延期/增次（PUT extend/increase，`replaceGroup` 同步列表与弹窗）+成员增删与到期/上限编辑保留；移除死代码 groupAction（commit `665922d`）
+- 缺陷8：同步日志详情行内 `<details>` → 弹窗；解析 `detail`（`路径: 结果`/整体错误行）逐文件展示，状态徽标 成功/跳过/失败/整体错误，原始内容折叠兜底（commit `f6d7b5e`）
+- 缺陷9：`.wide-modal` 1100px→`min(1280px,96vw)`，`.sync-log-table` min-width 1160px；任务编辑弹窗独立 `sync-task-modal` 保留 1100px（commit `b685856`）
+- 缺陷10：日志失败原因三语本地化补齐——后端 reason 枚举比对，`logReason.*` 键 zhCN/zhTW/en 补至 38 键完全一致（share*5 补 zh/zh-TW、ipLocked/totpFailed 补 zh-TW、readOnly/settingsFailed/invalidRequest/deleteFailed/writeFailed/batch 补三语）；node 校验三语键集合一致（commit `ef9d083`，含并发方 `bdf1eee` 映射扩充）
+- 缺陷11：传输按钮 ArrowLeftRight→ArrowUpDown（commit `6d75e1b`）
+
 ## 2026-09-01 - v019（用户反馈修复批次，7 项）
 
 - 缺陷1：日志时间筛选弹出面板增加「确定」「清空」按钮（common.confirm/clear 三语 + time-range-actions 样式）；采用草稿态（timeDraft）——打开面板时同步生效值，输入不直接改 filters，未点「确定」关闭不生效；点「确定」应用草稿并刷新、点「清空」清空草稿与生效时间并刷新

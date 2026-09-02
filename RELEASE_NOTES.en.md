@@ -4,6 +4,22 @@ Stage 2 release notes
 
 [中文](RELEASE_NOTES.md)
 
+## v0.2.0-v020 (user-feedback polish batch, 11 items)
+
+A fresh batch of 11 user-reported issues and polish items after v019. Each item was implemented by the codex CLI (one item per run, independently committed and pushed; frontend verified with `npm run build`, backend with `go test ./...`). Task book: `docs/CODEX_TASK_v020.md`.
+
+- **Native confirm dialogs unified into custom modals (item 1)**: all 12 `window.confirm` call sites enumerated (delete file / batch delete / delete folder / batch folder delete / bulk upload / revoke share & group share / revoke collection / delete sync task & system / delete user / reset brand); FilesView gains a queue-based confirm (`askConfirm`, 60s timeout treats as cancel) with modal-backdrop/modal-panel styling; Shares/Collections/Sync/Admin views adopt the same pattern. `web/src` has zero `window.confirm` left.
+- **Batch-download failures now carry a real cause + timestamped ZIP name (item 2)**: `batchDownload`/`shareGroupBatchDownload` no longer reply with a generic "failed to create download file" — the underlying cause is classified and returned (ENOSPC/EDQUOT→disk full, EACCES/EPERM/EROFS→directory not writable, otherwise→IO error; response carries `code=ZIP_CREATE_FAILED` + `reason`, raw errors only logged to avoid leaking server paths); the archive is named `filebox-batch-YYYYMMDD-HHMMSS.zip` consistently on server and client; `createBatchTempFile` is injectable and both endpoints got regression tests.
+- **Batch control for transfer tasks (item 3)**: the transfers drawer lets you select/select-all uploads and downloads and run pause-selected / resume-selected / terminate-selected plus per-section "all" actions; terminating uploads calls `DELETE /api/upload-tasks/{taskId}` to release server quota; downloads gain pause (AbortController) and Range-based resume (206 continues, 200 restarts); progress/rate/session snapshots stay in sync; actions are disabled for finished/verifying states.
+- **Topbar "Transfers" button gains a label (item 4)**: the icon-only entry became icon-text-button (icon + 传输/傳輸/Transfers) matching the other nav items; badge kept.
+- **My collections duplicate refresh buttons removed (item 5)**: the refresh icon in the list-section header was removed, keeping the page-heading refresh; also cleaned a v019-class `.value` residual in that page's pagination template (collections pagination bar never showed beyond one page).
+- **Share-management page subtitle wrongly showed "Copy link" (item 6)**: root cause was a duplicated `shares.copy` i18n key (description overridden) → split into `shares.intro` (trilingual subtitle sentence) and `shares.copy` (copy-button title); duplicates removed.
+- **Aggregate-share edit dialog aligned with single-share details (item 7)**: the group edit dialog now matches the single-share dialog — info grid (token/usage/expiry/remaining/status/created), link display + copy + open page, hour-based extend/increase (PUT `extend`/`increase`, list and dialog refresh), member add/remove and expiry/limit editing kept; dead code `groupAction`/`openGroupAction` removed.
+- **Sync log file detail moved into a modal (item 8)**: the inline `<details>` expansion became a button → modal that parses the multiline `detail` (`path: outcome` lines or whole-run errors) into per-file rows; uploaded/downloaded→success, skipped→skipped, failure/error keywords→failed, whole-run error lines highlighted separately; a collapsible raw view remains as fallback.
+- **Sync task detail dialog widened (item 9)**: `.wide-modal` went from 1100px to `min(1280px, 96vw)`, log table min-width 1000→1160px (horizontal scroll retained); the task edit dialog keeps 1100px via a dedicated `sync-task-modal` class.
+- **Localized log failure reasons completed (item 10)**: backend reasons enumerated and compared against the LogsView/SharesView mappings; the trilingual `logReason.*` key sets are now identical at 38 keys (share 5 keys added to zh/zh-TW, ipLocked/totpFailed to zh-TW, and readOnly/settingsFailed/invalidRequest/deleteFailed/writeFailed/batch added in all three languages); unmapped reasons still fall back to the raw value.
+- **Transfer icon direction (item 11)**: the topbar transfers button switched ArrowLeftRight → ArrowUpDown to match up/down transfer semantics.
+
 ## v0.2.0-v019 (user-feedback fix batch)
 
 Seven user-reported fixes (4 defects + 3 polish items):
