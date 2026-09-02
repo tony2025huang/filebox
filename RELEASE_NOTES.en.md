@@ -9,14 +9,14 @@ Stage 2 release notes
 Seven user-reported fixes (4 defects + 3 polish items):
 
 **Defect fixes**
-- Log time-range popover gained Confirm/Clear buttons
-- Logs (67 rows) and Files pages now show pagination (template ref-unwrap bug fixed)
-- Entering a folder no longer reports "invalid directory" (navigation normalization)
+- Log time-range popover gained Confirm/Clear buttons with draft state: edits are ignored until "Confirm" is pressed; "Clear" resets and reloads
+- Logs (67 rows), Files, Shares and Share-groups pages now show pagination (template ref-unwrap bug: `pageSize.value` was `undefined` in templates, so the paging condition was always false)
+- Entering a folder no longer reports "invalid directory" (frontend path normalization + backend folder-list filtering: legacy `files/`/`files/<uid>/` prefixes stripped, v010 backslash paths and `.`/`..` dropped, folder names `.`/`..` rejected)
 - Aggregate-share card icons simplified (eye/copy/delete); editing merged into the eye dialog
 
 **Polish**
 - Sync task log dialog widened to 1100px for better readability
-- Folder rows support multi-select and batch deletion
+- Folder rows support multi-select, batch deletion and batch rename (step-by-step dialog with progress; non-empty failures reported separately)
 - Pagination controls (page size / jump) display correctly on all four list pages
 
 ## v0.2.0-v018 (8 new requirements) release notes

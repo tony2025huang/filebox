@@ -92,7 +92,8 @@ v016 完成 V1-01～V1-38 共 38 项修复。DSH 在 `.test-data\stage3\` 执行
 
 ## v019 测试报告（2026-09-01）
 
-- 7 项用户反馈修复全部完成：日志时间筛选确定/清空按钮、日志/文件分页显示修复（模板 ref 解包 bug）、目录导航规范化、聚合分享小眼睛合并、同步日志弹窗加宽、目录批量删除
+- 7 项用户反馈修复全部完成：日志时间筛选确定/清空按钮（草稿态，未确定不生效）、日志/文件/分享/聚合分享分页显示修复（模板 ref 解包 bug）、目录导航规范化（前端规范化 + 后端目录列表过滤归一化 + validateFolderName 拒 `.`/`..`）、聚合分享小眼睛合并、同步日志弹窗加宽、目录批量操作（勾选/删除/重命名）
 - 全量 `go test ./...` 通过（httpapi/store/srvlog/cmd 全绿）
 - `npm --prefix web run build` 通过（v019 前端含分页修复与目录批量操作）
-- 缺陷根因说明：分页不显示 = 模板 `pageSize.value`（Vue 模板 ref 自动解包，`.value` 未定义）；目录无效 = 导航未规范化分隔符
+- 缺陷根因说明：分页不显示 = 模板 `pageSize.value`（Vue 模板 ref 自动解包，`.value` 未定义）；目录无效 = ①user-test 库 v010 遗留 `uploads\xxx` 反斜杠路径记录（3/4 条）点击后 dir 含反斜杠被 validateUploadDir 拒绝；②18080 演示库 872 条目录中 869 条带 `files/` storage 前缀（同步写入），点击进入列表错位；③validateFolderName 未拒 `.`/`..` 可造出必 400 目录
+- 新增单测（`internal/httpapi/v019_test.go`）：`TestListFoldersFiltersLegacyPaths`（遗留路径过滤 + files 前缀归一化 + 导航不再 400）、`TestValidateFolderNameRejectsDotDirs`、`TestNormalizeFolderPath`（分支覆盖）——全部通过
