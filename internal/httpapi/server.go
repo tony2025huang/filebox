@@ -2568,6 +2568,7 @@ func (s *Server) batchDelete(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		IDs       []int64 `json:"ids"`
 		FolderIDs []int64 `json:"folder_ids"`
+		Force     bool    `json:"force"`
 	}
 	if !decodeJSON(w, r, &input) {
 		return
@@ -2628,7 +2629,7 @@ func (s *Server) batchDelete(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "检查目录失败")
 			return
 		}
-		if len(nonEmpty) > 0 {
+		if len(nonEmpty) > 0 && !input.Force {
 			names := make([]string, 0, len(nonEmpty))
 			for _, folder := range nonEmpty {
 				names = append(names, folder.Name)
@@ -2636,6 +2637,109 @@ func (s *Server) batchDelete(w http.ResponseWriter, r *http.Request) {
 			writeErrorData(w, http.StatusBadRequest, "以下目录非空，无法删除："+strings.Join(names, "、")+"（请先清空目录内容）", map[string]string{"code": "FOLDER_NOT_EMPTY"})
 			return
 		}
+	}
+	if len(input.FolderIDs) > 0 && input.Force {
+		treeFileIDs := make([]int64, 0)
+		treeFileSeen := make(map[int64]struct{})
+		treeFolderIDs := make([]int64, 0)
+		treeFolderSeen := make(map[int64]struct{})
+		rootFolders := make([]store.Folder, 0, len(input.FolderIDs))
+		rootSeen := make(map[int64]struct{}, len(input.FolderIDs))
+
+		for _, id := range input.FolderIDs {
+			root, err := s.store.GetFolderByID(r.Context(), id, user.ID)
+			if errors.Is(err, store.ErrNotFound) {
+				writeError(w, http.StatusNotFound, "目录不存在")
+				return
+			}
+			if err != nil {
+				log.Printf("load batch-delete root folder %d: %v", id, err)
+				writeError(w, http.StatusInternalServerError, "删除目录失败")
+				return
+			}
+			if _, exists := rootSeen[root.ID]; !exists {
+				rootSeen[root.ID] = struct{}{}
+				rootFolders = append(rootFolders, root)
+			}
+			_, treeFiles, treeFolders, err := s.store.ListFolderTree(r.Context(), user.ID, id)
+			if errors.Is(err, store.ErrNotFound) {
+				writeError(w, http.StatusNotFound, "目录不存在")
+				return
+			}
+			if err != nil {
+				log.Printf("list batch-delete folder tree %d: %v", id, err)
+				writeError(w, http.StatusInternalServerError, "检查目录失败")
+				return
+			}
+			for _, file := range treeFiles {
+				if _, exists := treeFileSeen[file.ID]; exists {
+					continue
+				}
+				treeFileSeen[file.ID] = struct{}{}
+				treeFileIDs = append(treeFileIDs, file.ID)
+			}
+			for _, folder := range treeFolders {
+				if _, exists := treeFolderSeen[folder.ID]; exists {
+					continue
+				}
+				treeFolderSeen[folder.ID] = struct{}{}
+				treeFolderIDs = append(treeFolderIDs, folder.ID)
+			}
+		}
+
+		standaloneIDs := make([]int64, 0, len(input.IDs))
+		standaloneSeen := make(map[int64]struct{}, len(input.IDs))
+		for _, id := range input.IDs {
+			if _, inTree := treeFileSeen[id]; inTree {
+				continue
+			}
+			if _, exists := standaloneSeen[id]; exists {
+				continue
+			}
+			standaloneSeen[id] = struct{}{}
+			standaloneIDs = append(standaloneIDs, id)
+		}
+		paths := make([]string, 0)
+		if len(standaloneIDs) > 0 {
+			filePaths, err := s.store.BatchDeleteFiles(r.Context(), standaloneIDs, user.ID, user.Role == "admin")
+			if errors.Is(err, store.ErrNotFound) {
+				writeError(w, http.StatusNotFound, "文件不存在")
+				return
+			}
+			if err != nil {
+				log.Printf("batch delete files: %v", err)
+				writeError(w, http.StatusInternalServerError, "删除文件失败")
+				return
+			}
+			paths = append(paths, filePaths...)
+		}
+		treePaths, err := s.store.DeleteFolderTree(r.Context(), treeFileIDs, treeFolderIDs, user.ID)
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "文件或目录不存在")
+			return
+		}
+		if err != nil {
+			log.Printf("delete folder tree: %v", err)
+			writeError(w, http.StatusInternalServerError, "删除目录失败")
+			return
+		}
+		paths = append(paths, treePaths...)
+		for _, path := range paths {
+			if err := os.Remove(filepath.Join(s.config.DataDir, path)); err != nil && !errors.Is(err, os.ErrNotExist) {
+				log.Printf("remove batch-deleted file content: %v", err)
+			}
+		}
+		for _, folder := range rootFolders {
+			diskPath := filepath.Join(s.config.DataDir, "files", strconv.FormatInt(user.ID, 10), filepath.FromSlash(folder.Path))
+			if err := os.RemoveAll(diskPath); err != nil {
+				log.Printf("remove batch-deleted folder content: %v", err)
+			}
+			s.serviceEvent(r, "folder_delete", user.Username, "target=%s result=success", folder.Path)
+			s.recordAudit(r, &user.ID, user.Username, "folder_delete", folder.Path, "success", "folder_delete")
+		}
+		auditResult = "success"
+		writeData(w, http.StatusOK, "已删除", map[string]any{"deleted": len(paths), "foldersDeleted": len(treeFolderIDs)})
+		return
 	}
 	paths := make([]string, 0)
 	if len(input.IDs) > 0 {

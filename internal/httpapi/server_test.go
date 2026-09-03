@@ -1104,6 +1104,81 @@ func TestBatchDeleteFilesAndFoldersPrechecksNonEmptyFolders(t *testing.T) {
 	}
 }
 
+func TestBatchDeleteForceRemovesFolderTree(t *testing.T) {
+	db, handler := newTestServer(t)
+	token := testAdminToken(t, handler)
+
+	rootResponse := testJSONRequest(t, handler, http.MethodPost, "/api/folders", token, `{"name":"recursive-root"}`)
+	if rootResponse.Code != http.StatusCreated {
+		t.Fatalf("create recursive root = %d: %s", rootResponse.Code, rootResponse.Body.String())
+	}
+	root := responseData(t, rootResponse)
+	rootID := int64(root["id"].(float64))
+	rootPath := root["path"].(string)
+	childResponse := testJSONRequest(t, handler, http.MethodPost, "/api/folders", token, `{"name":"nested-child","parent":"`+rootPath+`"}`)
+	if childResponse.Code != http.StatusCreated {
+		t.Fatalf("create nested child = %d: %s", childResponse.Code, childResponse.Body.String())
+	}
+	child := responseData(t, childResponse)
+	childID := int64(child["id"].(float64))
+	childPath := child["path"].(string)
+
+	content := []byte("recursive deletion content")
+	init := initUpload(t, handler, token, "tree-file.txt", int64(len(content)), 0, childPath)
+	taskID := init["taskId"].(string)
+	chunk := testBinaryRequest(t, handler, http.MethodPut, "/api/files/"+taskID+"/chunks/0", token, content)
+	if chunk.Code != http.StatusOK {
+		t.Fatalf("upload tree file chunk = %d: %s", chunk.Code, chunk.Body.String())
+	}
+	complete := testJSONRequest(t, handler, http.MethodPost, "/api/files/"+taskID+"/complete", token, `{}`)
+	if complete.Code != http.StatusOK {
+		t.Fatalf("complete tree file = %d: %s", complete.Code, complete.Body.String())
+	}
+	fileID := int64(responseData(t, complete)["id"].(float64))
+
+	var usedBefore int64
+	if err := db.DB.QueryRow("SELECT used_bytes FROM users WHERE id = 1").Scan(&usedBefore); err != nil {
+		t.Fatal(err)
+	}
+	if usedBefore != int64(len(content)) {
+		t.Fatalf("used bytes before force delete = %d, want %d", usedBefore, len(content))
+	}
+
+	rejected := testJSONRequest(t, handler, http.MethodPost, "/api/files/batch-delete", token, `{"ids":[],"folder_ids":[`+strconv.FormatInt(rootID, 10)+`]}`)
+	if rejected.Code != http.StatusBadRequest || responseData(t, rejected)["code"] != "FOLDER_NOT_EMPTY" || !strings.Contains(rejected.Body.String(), "recursive-root") {
+		t.Fatalf("reject non-empty recursive delete = %d: %s", rejected.Code, rejected.Body.String())
+	}
+
+	deleted := testJSONRequest(t, handler, http.MethodPost, "/api/files/batch-delete", token, `{"ids":[],"folder_ids":[`+strconv.FormatInt(rootID, 10)+`],"force":true}`)
+	if deleted.Code != http.StatusOK {
+		t.Fatalf("force delete folder tree = %d: %s", deleted.Code, deleted.Body.String())
+	}
+	deletedData := responseData(t, deleted)
+	if deletedData["deleted"] != float64(1) || deletedData["foldersDeleted"] != float64(2) {
+		t.Fatalf("force delete response = %s", deleted.Body.String())
+	}
+	if _, err := db.GetFolderByID(context.Background(), rootID, 1); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("root folder after force delete = %v, want not found", err)
+	}
+	if _, err := db.GetFolderByID(context.Background(), childID, 1); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("child folder after force delete = %v, want not found", err)
+	}
+	deletedFile, err := db.FindFile(context.Background(), fileID)
+	if err != nil || deletedFile.Status != "deleted" {
+		t.Fatalf("file after force delete = %+v, %v; want deleted", deletedFile, err)
+	}
+	var usedAfter int64
+	if err := db.DB.QueryRow("SELECT used_bytes FROM users WHERE id = 1").Scan(&usedAfter); err != nil {
+		t.Fatal(err)
+	}
+	if usedAfter != 0 {
+		t.Fatalf("used bytes after force delete = %d, want 0", usedAfter)
+	}
+	if _, err := os.Stat(filepath.Join(db.DataDir, "files", "1", rootPath)); !os.IsNotExist(err) {
+		t.Fatalf("root folder on disk after force delete = %v, want not found", err)
+	}
+}
+
 func TestSharingLifecycleAndAtomicDownloadLimit(t *testing.T) {
 	db, handler := newTestServer(t)
 	token := testAdminToken(t, handler)

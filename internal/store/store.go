@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -224,6 +225,14 @@ type Folder struct {
 	Name      string `json:"name"`
 	Path      string `json:"path"`
 	CreatedAt string `json:"createdAt"`
+}
+
+// FolderTreeFile contains the ready-file metadata needed for recursive folder deletion.
+type FolderTreeFile struct {
+	ID          int64
+	UserID      int64
+	Size        int64
+	StoragePath string
 }
 
 // AuditLog 表示一次登录、上传或下载等操作的审计记录。
@@ -2570,6 +2579,68 @@ func (s *Store) ListFolders(ctx context.Context, userID int64) ([]Folder, error)
 	return folders, rows.Err()
 }
 
+// ListFolderTree returns all folders and ready files below rootID. Folders are ordered deepest first.
+func (s *Store) ListFolderTree(ctx context.Context, userID, rootID int64) (fileIDs []int64, files []FolderTreeFile, folders []Folder, err error) {
+	allFolders, err := s.ListFolders(ctx, userID)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	byID := make(map[int64]Folder, len(allFolders))
+	children := make(map[int64][]Folder)
+	for _, folder := range allFolders {
+		byID[folder.ID] = folder
+		if folder.ParentID != nil {
+			children[*folder.ParentID] = append(children[*folder.ParentID], folder)
+		}
+	}
+	root, ok := byID[rootID]
+	if !ok {
+		return nil, nil, nil, ErrNotFound
+	}
+
+	depthByID := map[int64]int{root.ID: 0}
+	stack := []Folder{root}
+	seen := make(map[int64]struct{}, len(allFolders))
+	for len(stack) > 0 {
+		folder := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if _, ok := seen[folder.ID]; ok {
+			continue
+		}
+		seen[folder.ID] = struct{}{}
+		folders = append(folders, folder)
+		for _, child := range children[folder.ID] {
+			depthByID[child.ID] = depthByID[folder.ID] + 1
+			stack = append(stack, child)
+		}
+	}
+	sort.SliceStable(folders, func(i, j int) bool {
+		return depthByID[folders[i].ID] > depthByID[folders[j].ID]
+	})
+
+	pathPrefix := filepath.Join("files", strconv.FormatInt(userID, 10), root.Path) + string(filepath.Separator)
+	rows, err := s.DB.QueryContext(ctx, `SELECT id, user_id, size, storage_path
+FROM files
+WHERE user_id = ? AND status = 'ready' AND substr(storage_path, 1, length(?)) = ?
+ORDER BY id`, userID, pathPrefix, pathPrefix)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var file FolderTreeFile
+		if err := rows.Scan(&file.ID, &file.UserID, &file.Size, &file.StoragePath); err != nil {
+			return nil, nil, nil, err
+		}
+		fileIDs = append(fileIDs, file.ID)
+		files = append(files, file)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, nil, err
+	}
+	return fileIDs, files, folders, nil
+}
+
 // EnsureFolderPath 按 mkdir -p 语义为缺失的路径段创建目录记录，保证上传目录与导航一致。
 // EnsureFolderPath creates missing folder records for each path segment (mkdir -p semantics) so uploads stay consistent with navigation.
 func (s *Store) EnsureFolderPath(ctx context.Context, userID int64, path string) error {
@@ -2758,6 +2829,101 @@ func (s *Store) DeleteFolder(ctx context.Context, id, userID int64) (bool, error
 	}
 	count, err := result.RowsAffected()
 	return count == 1, err
+}
+
+// DeleteFolderTree soft-deletes the ready files and removes all folders in a tree in one transaction.
+func (s *Store) DeleteFolderTree(ctx context.Context, fileIDs []int64, folderIDs []int64, userID int64) ([]string, error) {
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	rollback := func(err error) ([]string, error) {
+		_ = tx.Rollback()
+		return nil, err
+	}
+	if len(fileIDs) == 0 && len(folderIDs) == 0 {
+		return rollback(ErrNotFound)
+	}
+
+	type deletion struct {
+		id    int64
+		owner int64
+		size  int64
+		path  string
+	}
+	deletions := make([]deletion, 0, len(fileIDs))
+	seenFiles := make(map[int64]struct{}, len(fileIDs))
+	for _, fileID := range fileIDs {
+		if _, exists := seenFiles[fileID]; exists {
+			continue
+		}
+		seenFiles[fileID] = struct{}{}
+		var item deletion
+		var status string
+		if err := tx.QueryRowContext(ctx, "SELECT user_id, size, storage_path, status FROM files WHERE id = ? AND user_id = ?", fileID, userID).Scan(&item.owner, &item.size, &item.path, &status); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return rollback(ErrNotFound)
+			}
+			return rollback(err)
+		}
+		if status != "ready" {
+			return rollback(ErrNotFound)
+		}
+		item.id = fileID
+		deletions = append(deletions, item)
+	}
+
+	seenFolders := make(map[int64]struct{}, len(folderIDs))
+	orderedFolderIDs := make([]int64, 0, len(folderIDs))
+	for _, folderID := range folderIDs {
+		if _, exists := seenFolders[folderID]; exists {
+			continue
+		}
+		seenFolders[folderID] = struct{}{}
+		var exists int
+		if err := tx.QueryRowContext(ctx, "SELECT 1 FROM folders WHERE id = ? AND user_id = ?", folderID, userID).Scan(&exists); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return rollback(ErrNotFound)
+			}
+			return rollback(err)
+		}
+		orderedFolderIDs = append(orderedFolderIDs, folderID)
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	usedByOwner := make(map[int64]int64)
+	for _, item := range deletions {
+		if _, err := tx.ExecContext(ctx, "UPDATE files SET status = 'deleted', deleted_at = ? WHERE id = ? AND user_id = ? AND status = 'ready'", now, item.id, userID); err != nil {
+			return rollback(err)
+		}
+		usedByOwner[item.owner] += item.size
+	}
+	for owner, size := range usedByOwner {
+		if _, err := tx.ExecContext(ctx, "UPDATE users SET used_bytes = MAX(0, used_bytes - ?), updated_at = ? WHERE id = ?", size, now, owner); err != nil {
+			return rollback(err)
+		}
+	}
+	for _, folderID := range orderedFolderIDs {
+		result, err := tx.ExecContext(ctx, "DELETE FROM folders WHERE id = ? AND user_id = ?", folderID, userID)
+		if err != nil {
+			return rollback(err)
+		}
+		count, err := result.RowsAffected()
+		if err != nil {
+			return rollback(err)
+		}
+		if count != 1 {
+			return rollback(ErrNotFound)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	paths := make([]string, 0, len(deletions))
+	for _, item := range deletions {
+		paths = append(paths, item.path)
+	}
+	return paths, nil
 }
 
 // CheckFoldersDeletable 检查目录是否为空并返回不可删除的目录；逐个检查全部请求目录。
