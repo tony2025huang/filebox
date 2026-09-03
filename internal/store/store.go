@@ -2760,6 +2760,35 @@ func (s *Store) DeleteFolder(ctx context.Context, id, userID int64) (bool, error
 	return count == 1, err
 }
 
+// CheckFoldersDeletable 检查目录是否为空并返回不可删除的目录；逐个检查全部请求目录。
+// CheckFoldersDeletable checks every requested folder and returns the non-empty ones.
+func (s *Store) CheckFoldersDeletable(ctx context.Context, userID int64, ids []int64) ([]Folder, error) {
+	nonEmpty := make([]Folder, 0)
+	for _, id := range ids {
+		folder, err := s.GetFolderByID(ctx, id, userID)
+		if err != nil {
+			return nil, err
+		}
+		pathPrefix := filepath.Join("files", strconv.FormatInt(userID, 10), folder.Path) + string(filepath.Separator)
+		var fileCount int
+		if err := s.DB.QueryRowContext(ctx, "SELECT COUNT(id) FROM files WHERE user_id = ? AND status != 'deleted' AND substr(storage_path, 1, length(?)) = ?", userID, pathPrefix, pathPrefix).Scan(&fileCount); err != nil {
+			return nil, err
+		}
+		if fileCount > 0 {
+			nonEmpty = append(nonEmpty, folder)
+			continue
+		}
+		var childCount int
+		if err := s.DB.QueryRowContext(ctx, "SELECT COUNT(id) FROM folders WHERE user_id = ? AND parent_id = ?", userID, id).Scan(&childCount); err != nil {
+			return nil, err
+		}
+		if childCount > 0 {
+			nonEmpty = append(nonEmpty, folder)
+		}
+	}
+	return nonEmpty, nil
+}
+
 func escapeLike(value string) string {
 	value = strings.ReplaceAll(value, `\`, `\\`)
 	value = strings.ReplaceAll(value, "%", `\%`)

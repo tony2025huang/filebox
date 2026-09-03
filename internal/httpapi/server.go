@@ -2566,18 +2566,19 @@ func (s *Server) batchDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var input struct {
-		IDs []int64 `json:"ids"`
+		IDs       []int64 `json:"ids"`
+		FolderIDs []int64 `json:"folder_ids"`
 	}
 	if !decodeJSON(w, r, &input) {
 		return
 	}
-	if len(input.IDs) == 0 {
+	if len(input.IDs) == 0 && len(input.FolderIDs) == 0 {
 		writeErrorData(w, http.StatusBadRequest, "请至少选择一个文件", map[string]string{"code": "BATCH_DELETE_EMPTY"})
 		return
 	}
 	// 限制批量操作数量，避免单次请求消耗过多资源。
 	// Cap batch size to avoid excessive resource use from a single request.
-	if len(input.IDs) > 500 {
+	if len(input.IDs)+len(input.FolderIDs) > 500 {
 		writeErrorData(w, http.StatusBadRequest, "批量操作数量超出上限（最多 500 个）", map[string]string{"code": "BATCH_LIMIT_EXCEEDED"})
 		return
 	}
@@ -2587,7 +2588,13 @@ func (s *Server) batchDelete(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	targetIDs := make([]string, 0, len(input.IDs))
+	for _, id := range input.FolderIDs {
+		if id < 1 {
+			writeErrorData(w, http.StatusBadRequest, "文件编号无效", map[string]string{"code": "INVALID_FILE_ID"})
+			return
+		}
+	}
+	targetIDs := make([]string, 0, len(input.IDs)+len(input.FolderIDs))
 	seen := make(map[int64]struct{}, len(input.IDs))
 	for _, id := range input.IDs {
 		if _, exists := seen[id]; exists {
@@ -2596,29 +2603,80 @@ func (s *Server) batchDelete(w http.ResponseWriter, r *http.Request) {
 		seen[id] = struct{}{}
 		targetIDs = append(targetIDs, strconv.FormatInt(id, 10))
 	}
+	seenFolders := make(map[int64]struct{}, len(input.FolderIDs))
+	for _, id := range input.FolderIDs {
+		if _, exists := seenFolders[id]; exists {
+			continue
+		}
+		seenFolders[id] = struct{}{}
+		targetIDs = append(targetIDs, "d"+strconv.FormatInt(id, 10))
+	}
 	target := strings.Join(targetIDs, ",")
 	auditResult, auditReason := "failure", "batch"
 	defer func() {
 		s.serviceEvent(r, "delete", user.Username, "target=%s result=%s reason=batch", target, auditResult)
 		s.recordAudit(r, &user.ID, user.Username, "delete", target, auditResult, auditReason)
 	}()
-	paths, err := s.store.BatchDeleteFiles(r.Context(), input.IDs, user.ID, user.Role == "admin")
-	if errors.Is(err, store.ErrNotFound) {
-		writeError(w, http.StatusNotFound, "文件不存在")
-		return
+	if len(input.FolderIDs) > 0 {
+		nonEmpty, err := s.store.CheckFoldersDeletable(r.Context(), user.ID, input.FolderIDs)
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "目录不存在")
+			return
+		}
+		if err != nil {
+			log.Printf("check batch-delete folders: %v", err)
+			writeError(w, http.StatusInternalServerError, "检查目录失败")
+			return
+		}
+		if len(nonEmpty) > 0 {
+			names := make([]string, 0, len(nonEmpty))
+			for _, folder := range nonEmpty {
+				names = append(names, folder.Name)
+			}
+			writeErrorData(w, http.StatusBadRequest, "以下目录非空，无法删除："+strings.Join(names, "、")+"（请先清空目录内容）", map[string]string{"code": "FOLDER_NOT_EMPTY"})
+			return
+		}
 	}
-	if err != nil {
-		log.Printf("batch delete files: %v", err)
-		writeError(w, http.StatusInternalServerError, "删除文件失败")
-		return
+	paths := make([]string, 0)
+	if len(input.IDs) > 0 {
+		var err error
+		paths, err = s.store.BatchDeleteFiles(r.Context(), input.IDs, user.ID, user.Role == "admin")
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "文件不存在")
+			return
+		}
+		if err != nil {
+			log.Printf("batch delete files: %v", err)
+			writeError(w, http.StatusInternalServerError, "删除文件失败")
+			return
+		}
 	}
 	for _, path := range paths {
 		if err := os.Remove(filepath.Join(s.config.DataDir, path)); err != nil && !errors.Is(err, os.ErrNotExist) {
 			log.Printf("remove batch-deleted file content: %v", err)
 		}
 	}
+	foldersDeleted := 0
+	for _, id := range input.FolderIDs {
+		folder, err := s.store.GetFolderByID(r.Context(), id, user.ID)
+		if err != nil {
+			log.Printf("load batch-deleted folder %d: %v", id, err)
+			continue
+		}
+		deleted, err := s.store.DeleteFolder(r.Context(), id, user.ID)
+		if err != nil {
+			log.Printf("delete batch folder %d: %v", id, err)
+			continue
+		}
+		if !deleted {
+			continue
+		}
+		foldersDeleted++
+		s.serviceEvent(r, "folder_delete", user.Username, "target=%s result=success", folder.Path)
+		s.recordAudit(r, &user.ID, user.Username, "folder_delete", folder.Path, "success", "folder_delete")
+	}
 	auditResult = "success"
-	writeData(w, http.StatusOK, "文件已删除", map[string]any{"deleted": len(paths)})
+	writeData(w, http.StatusOK, "已删除", map[string]any{"deleted": len(paths), "foldersDeleted": foldersDeleted})
 }
 
 func uniqueZipEntryName(name string, used map[string]struct{}) string {

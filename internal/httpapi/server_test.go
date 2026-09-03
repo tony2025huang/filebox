@@ -1050,6 +1050,60 @@ func uploadTestFile(t *testing.T, handler http.Handler, token, name, mimeType st
 	return responseData(t, complete)
 }
 
+func TestBatchDeleteFilesAndFoldersPrechecksNonEmptyFolders(t *testing.T) {
+	db, handler := newTestServer(t)
+	token := testAdminToken(t, handler)
+
+	emptyFolderResponse := testJSONRequest(t, handler, http.MethodPost, "/api/folders", token, `{"name":"empty-folder"}`)
+	if emptyFolderResponse.Code != http.StatusCreated {
+		t.Fatalf("create empty folder = %d: %s", emptyFolderResponse.Code, emptyFolderResponse.Body.String())
+	}
+	emptyFolderID := int64(responseData(t, emptyFolderResponse)["id"].(float64))
+	nonEmptyFolderResponse := testJSONRequest(t, handler, http.MethodPost, "/api/folders", token, `{"name":"non-empty-folder"}`)
+	if nonEmptyFolderResponse.Code != http.StatusCreated {
+		t.Fatalf("create non-empty folder = %d: %s", nonEmptyFolderResponse.Code, nonEmptyFolderResponse.Body.String())
+	}
+	nonEmptyFolderData := responseData(t, nonEmptyFolderResponse)
+	nonEmptyFolderID := int64(nonEmptyFolderData["id"].(float64))
+	nonEmptyFolderPath := nonEmptyFolderData["path"].(string)
+
+	init := initUpload(t, handler, token, "mixed-delete.txt", 7, 0, nonEmptyFolderPath)
+	taskID := init["taskId"].(string)
+	if chunk := testBinaryRequest(t, handler, http.MethodPut, "/api/files/"+taskID+"/chunks/0", token, []byte("content")); chunk.Code != http.StatusOK {
+		t.Fatalf("upload mixed-delete file chunk = %d: %s", chunk.Code, chunk.Body.String())
+	}
+	complete := testJSONRequest(t, handler, http.MethodPost, "/api/files/"+taskID+"/complete", token, `{}`)
+	if complete.Code != http.StatusOK {
+		t.Fatalf("complete mixed-delete file = %d: %s", complete.Code, complete.Body.String())
+	}
+	fileID := int64(responseData(t, complete)["id"].(float64))
+
+	rejected := testJSONRequest(t, handler, http.MethodPost, "/api/files/batch-delete", token, `{"ids":[`+strconv.FormatInt(fileID, 10)+`],"folder_ids":[`+strconv.FormatInt(nonEmptyFolderID, 10)+`]}`)
+	if rejected.Code != http.StatusBadRequest || responseData(t, rejected)["code"] != "FOLDER_NOT_EMPTY" {
+		t.Fatalf("reject non-empty mixed delete = %d: %s", rejected.Code, rejected.Body.String())
+	}
+	remaining := testJSONRequest(t, handler, http.MethodGet, "/api/files?dir="+url.QueryEscape(nonEmptyFolderPath), token, "")
+	if remaining.Code != http.StatusOK || responseData(t, remaining)["total"] != float64(1) {
+		t.Fatalf("file after rejected mixed delete = %d: %s", remaining.Code, remaining.Body.String())
+	}
+
+	deleted := testJSONRequest(t, handler, http.MethodPost, "/api/files/batch-delete", token, `{"ids":[`+strconv.FormatInt(fileID, 10)+`],"folder_ids":[`+strconv.FormatInt(emptyFolderID, 10)+`]}`)
+	if deleted.Code != http.StatusOK {
+		t.Fatalf("successful mixed delete = %d: %s", deleted.Code, deleted.Body.String())
+	}
+	deletedData := responseData(t, deleted)
+	if deletedData["deleted"] != float64(1) || deletedData["foldersDeleted"] != float64(1) {
+		t.Fatalf("successful mixed delete response = %s", deleted.Body.String())
+	}
+	if _, err := db.GetFolderByID(context.Background(), emptyFolderID, 1); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("empty folder after mixed delete = %v, want not found", err)
+	}
+	deletedFile, err := db.FindFile(context.Background(), fileID)
+	if err != nil || deletedFile.Status != "deleted" {
+		t.Fatalf("file after mixed delete = %+v, %v; want deleted", deletedFile, err)
+	}
+}
+
 func TestSharingLifecycleAndAtomicDownloadLimit(t *testing.T) {
 	db, handler := newTestServer(t)
 	token := testAdminToken(t, handler)
