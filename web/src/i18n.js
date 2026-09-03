@@ -258,6 +258,16 @@ Object.assign(zhCN, { 'files.folder': '目录' })
 Object.assign(zhTW, { 'files.folder': '目錄' })
 Object.assign(en, { 'files.folder': 'Folder' })
 
+Object.assign(zhCN, {
+  'files.uploadFolderConfirmTitle': '上传文件夹', 'files.folderUploadTitle': '上传文件夹', 'files.uploadFolderConfirmCount': '将上传 {count} 个文件', 'files.uploadFolderConfirmSize': '总大小：{size}', 'files.uploadFolderTarget': '目标位置：{dir}', 'files.folderEmpty': '所选文件夹内没有可上传的文件'
+})
+Object.assign(zhTW, {
+  'files.uploadFolderConfirmTitle': '上傳資料夾', 'files.folderUploadTitle': '上傳資料夾', 'files.uploadFolderConfirmCount': '將上傳 {count} 個檔案', 'files.uploadFolderConfirmSize': '總大小：{size}', 'files.uploadFolderTarget': '目標位置：{dir}', 'files.folderEmpty': '所選資料夾內沒有可上傳的檔案'
+})
+Object.assign(en, {
+  'files.uploadFolderConfirmTitle': 'Upload folder', 'files.folderUploadTitle': 'Upload folder', 'files.uploadFolderConfirmCount': 'Upload {count} files', 'files.uploadFolderConfirmSize': 'Total size: {size}', 'files.uploadFolderTarget': 'Target location: {dir}', 'files.folderEmpty': 'The selected folder contains no uploadable files'
+})
+
 export const dictionaries = { 'zh-CN': zhCN, 'zh-TW': zhTW, en }
 export const currentLocale = ref('zh-CN')
 export const systemLocale = ref('zh-CN')
