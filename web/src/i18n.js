@@ -331,13 +331,16 @@ Object.assign(en, { 'sync.fileDetail': 'View file details', 'sync.file': 'File',
 // v021: batch deletion treats files and folders as one atomic selection.
 Object.assign(zhCN, {
   'confirm.deleteSelection': '确定删除选中的 {files} 个文件和 {folders} 个目录吗？目录必须为空，否则本次删除将整体失败。',
+  'confirm.deleteNonEmptyFolders': '{message}\n\n确定要连同目录内全部内容一起删除吗？此操作不可恢复。',
   'notice.deleteSelectionDone': '已删除 {files} 个文件和 {folders} 个目录'
 })
 Object.assign(zhTW, {
   'confirm.deleteSelection': '確定刪除選取的 {files} 個檔案和 {folders} 個目錄嗎？目錄必須為空，否則本次刪除將整體失敗。',
+  'confirm.deleteNonEmptyFolders': '{message}\n\n確定要連同目錄內全部內容一起刪除嗎？此操作無法復原。',
   'notice.deleteSelectionDone': '已刪除 {files} 個檔案和 {folders} 個目錄'
 })
 Object.assign(en, {
   'confirm.deleteSelection': 'Delete the selected {files} files and {folders} folders? Folders must be empty; otherwise the entire deletion fails.',
+  'confirm.deleteNonEmptyFolders': '{message}\n\nDelete the folders along with ALL their contents? This cannot be undone.',
   'notice.deleteSelectionDone': '{files} files and {folders} folders deleted'
 })

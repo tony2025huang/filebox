@@ -180,7 +180,20 @@ async function batchDelete() {
   batchDeleting.value = true
   error.value = ''
   try {
-    await api('/api/files/batch-delete', { method: 'POST', body: JSON.stringify({ ids: fileIds, folder_ids: folderIds }) })
+    try {
+      await api('/api/files/batch-delete', { method: 'POST', body: JSON.stringify({ ids: fileIds, folder_ids: folderIds }) })
+    } catch (err) {
+      if (err?.data?.code !== 'FOLDER_NOT_EMPTY') throw err
+      const folderMessage = Array.isArray(err.data?.folders) && err.data.folders.length
+        ? err.data.folders.join('、')
+        : err.message
+      const confirmed = await askConfirm(t('confirm.deleteNonEmptyFolders', { message: folderMessage }))
+      if (!confirmed) {
+        error.value = err.message
+        return
+      }
+      await api('/api/files/batch-delete', { method: 'POST', body: JSON.stringify({ ids: fileIds, folder_ids: folderIds, force: true }) })
+    }
     selectedIds.clear()
     selectedFolderIds.clear()
     notice.value = fileIds.length && folderIds.length
