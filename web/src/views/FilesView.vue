@@ -10,7 +10,7 @@
       <div v-if="readOnly" class="alert read-only-notice">{{ t('readOnly.notice') }}</div>
       <div class="dir-bar"><div class="breadcrumb"><button class="breadcrumb-link" :class="{ active: !currentDir }" @click="navigateDir('')">{{ t('files.root') }}</button><template v-for="(seg, i) in breadcrumbs" :key="seg"><span class="breadcrumb-sep">/</span><button class="breadcrumb-link" :class="{ active: i === breadcrumbs.length - 1 }" @click="navigateDir(breadcrumbPath(i))">{{ seg }}</button></template></div><div class="dir-actions"><button v-if="!readOnly" class="secondary-button" @click="openNewFolder"><FolderPlus :size="17" /> {{ t('files.newFolder') }}</button></div></div>
       <div v-if="!readOnly" class="upload-zone" :class="{ dragging }" @dragover.prevent="dragging = true" @dragleave.prevent="dragging = false" @drop.prevent="handleDrop"><UploadCloud :size="26" /><div><strong>{{ t('files.dropTitle') }}</strong><span>{{ t('files.dropCopy') }}</span></div><button class="secondary-button" @click="fileInput?.click()"><Upload :size="17" /> {{ t('files.choose') }}</button><button class="secondary-button" @click="folderInput?.click()"><FolderUp :size="17" /> {{ t('files.uploadFolder') }}</button><input ref="fileInput" type="file" multiple hidden @change="handleInput" /><input ref="folderInput" type="file" webkitdirectory directory multiple hidden @change="handleFolderInput" /></div>
-      <div class="toolbar"><div class="search-box"><Search :size="17" /><input v-model="searchInput" :placeholder="t('files.searchPlaceholder')" @keyup.enter="search" /><button v-if="searchInput" :title="t('files.clearSearch')" @click="searchInput = ''; search()"><X :size="15" /></button></div><button v-if="selectedFolderIds.size && !readOnly" class="secondary-button batch-delete-button" :disabled="batchDeletingFolders" @click="batchDeleteFolders"><Trash2 :size="16" /> {{ t('files.batchDeleteFolders', { count: selectedFolderIds.size }) }}</button><button v-if="selectedFolderIds.size && !readOnly" class="secondary-button" :disabled="folderSaving" @click="openBatchRename"><Pencil :size="16" /> {{ t('files.batchRenameFolders', { count: selectedFolderIds.size }) }}</button><button v-if="selectedIds.size" class="secondary-button batch-download-button" :disabled="batchDownloading || batchSharing || batchDeleting" @click="batchDownload"><Archive :size="16" /> {{ t('files.batchDownload', { count: selectedIds.size }) }}</button><button v-if="selectedIds.size && !readOnly" class="secondary-button batch-share-button" :disabled="batchDownloading || batchSharing || batchDeleting" @click="openBatchShare"><Share2 :size="16" /> {{ t('files.batchShare', { count: selectedIds.size }) }}</button><button v-if="selectedIds.size && !readOnly" class="secondary-button batch-delete-button" :disabled="batchDownloading || batchSharing || batchDeleting" @click="batchDelete"><Trash2 :size="16" /> {{ t('files.batchDelete', { count: selectedIds.size }) }}</button><button v-if="batchDownloading" class="icon-button" :title="t('common.cancel')" @click="cancelBatchDownload"><X :size="16" /></button><label class="check-label md5-toggle"><input v-model="showMd5" type="checkbox" @change="persistMd5" /> {{ t('files.showMd5') }}</label><button class="refresh-button" :title="t('files.refresh')" @click="loadFiles"><RefreshCw :size="17" :class="{ spin: loading }" /></button><span class="result-count">{{ t('common.files', { count: total }) }}</span></div>
+      <div class="toolbar"><div class="search-box"><Search :size="17" /><input v-model="searchInput" :placeholder="t('files.searchPlaceholder')" @keyup.enter="search" /><button v-if="searchInput" :title="t('files.clearSearch')" @click="searchInput = ''; search()"><X :size="15" /></button></div><button v-if="selectedFolderIds.size && !readOnly" class="secondary-button" :disabled="folderSaving" @click="openBatchRename"><Pencil :size="16" /> {{ t('files.batchRenameFolders', { count: selectedFolderIds.size }) }}</button><button v-if="selectedIds.size" class="secondary-button batch-download-button" :disabled="batchDownloading || batchSharing || batchDeleting" @click="batchDownload"><Archive :size="16" /> {{ t('files.batchDownload', { count: selectedIds.size }) }}</button><button v-if="selectedIds.size && !readOnly" class="secondary-button batch-share-button" :disabled="batchDownloading || batchSharing || batchDeleting" @click="openBatchShare"><Share2 :size="16" /> {{ t('files.batchShare', { count: selectedIds.size }) }}</button><button v-if="(selectedIds.size || selectedFolderIds.size) && !readOnly" class="secondary-button batch-delete-button" :disabled="batchDownloading || batchSharing || batchDeleting" @click="batchDelete"><Trash2 :size="16" /> {{ t('files.batchDelete', { count: selectedIds.size + selectedFolderIds.size }) }}</button><button v-if="batchDownloading" class="icon-button" :title="t('common.cancel')" @click="cancelBatchDownload"><X :size="16" /></button><label class="check-label md5-toggle"><input v-model="showMd5" type="checkbox" @change="persistMd5" /> {{ t('files.showMd5') }}</label><button class="refresh-button" :title="t('files.refresh')" @click="loadFiles"><RefreshCw :size="17" :class="{ spin: loading }" /></button><span class="result-count">{{ t('common.files', { count: total }) }}</span></div>
       <div v-if="notice" class="alert success">{{ notice }}</div><div v-if="error" class="alert error">{{ error }}</div>
       <div class="file-table-wrap"><table class="file-table"><thead><tr><th class="select-col"><input type="checkbox" :checked="allSelected" :aria-label="t('files.selectAll')" @change="toggleSelectAll" /></th><th>{{ t('files.name') }}</th><th>{{ t('files.size') }}</th><th>{{ t('files.type') }}</th><th>{{ t('files.integrity') }}</th><th>{{ t('files.uploadedAt') }}</th><th></th></tr></thead><tbody><template v-for="folder in childFolders" :key="'d' + folder.id"><tr class="folder-table-row" :class="{ 'row-selected': selectedFolderIds.has(folder.id) }"><td class="select-col"><input type="checkbox" :checked="selectedFolderIds.has(folder.id)" :aria-label="t('files.selectFolder', { name: folder.name })" @change="toggleFolderSelect(folder.id)" /></td><td><button type="button" class="folder-table-entry" :title="folder.path" @click="navigateDir(folder.path)"><span class="file-icon"><Folder :size="17" /></span><strong>{{ folder.name }}</strong></button></td><td>-</td><td><span class="mime-label folder-mime">{{ t('files.folder') }}</span></td><td>-</td><td>-</td><td><div v-if="!readOnly" class="row-actions"><button class="icon-button" :title="t('files.renameFolder')" @click="openRenameFolder(folder)"><Pencil :size="15" /></button><button class="icon-button danger-icon" :title="t('files.deleteFolder')" @click="removeFolder(folder)"><Trash2 :size="15" /></button></div></td></tr></template><tr v-for="file in files" :key="file.id" :class="{ 'row-selected': selectedIds.has(file.id) }"><td class="select-col"><input type="checkbox" :checked="selectedIds.has(file.id)" :aria-label="t('files.selectFile', { name: file.name })" @change="toggleSelect(file.id)" /></td><td><div class="file-title"><span class="file-icon"><component :is="fileIcon(file.mime, file.name)" :size="17" /></span><strong>{{ file.name }}</strong><span v-if="isShared(file)" class="shared-mark" :title="t('files.shared')"><Share2 :size="14" /></span></div></td><td>{{ formatBytes(file.size) }}</td><td><span class="mime-label" :class="{ 'preview-mime': canPreview(file.mime) }">{{ shortMime(file.mime) }}</span></td><td><code v-if="showMd5" class="md5-cell" :title="`MD5 ${file.md5}\nSHA-256 ${file.sha256}`">{{ file.md5 }}</code><span v-else class="hash-label" :title="`MD5 ${file.md5}\nSHA-256 ${file.sha256}`"><CheckCircle2 :size="15" /> {{ t('files.hashes') }}</span></td><td>{{ formatDate(file.createdAt) }}</td><td><div class="row-actions"><button v-if="canPreview(file.mime)" class="icon-button" :title="t('files.preview')" @click="openPreview(file)"><Eye :size="17" /></button><button v-if="!readOnly" class="icon-button" :title="t('files.share')" @click="openShare(file)"><Share2 :size="17" /></button><button class="icon-button" :title="t('files.download')" @click="download(file)"><Download :size="17" /></button><button v-if="!readOnly" class="icon-button danger-icon" :title="t('files.delete')" @click="remove(file)"><Trash2 :size="17" /></button></div></td></tr></tbody></table><div v-if="!loading && !files.length" class="empty-state"><FolderOpen :size="34" /><strong>{{ keyword ? t('files.noMatch') : t('files.noFiles') }}</strong><span>{{ keyword ? t('files.noMatchCopy') : t('files.noFilesCopy') }}</span></div><div v-if="loading" class="empty-state"><LoaderCircle :size="28" class="spin" /><span>{{ t('files.loading') }}</span></div></div>
       <div v-if="total > pageSize" class="pagination"><button class="secondary-button" :disabled="page === 1" @click="page--; loadFiles()"><ChevronLeft :size="16" /> {{ t('common.previous') }}</button><span>{{ t('common.page', { page }) }} / {{ totalPages }}</span><button class="secondary-button" :disabled="page * pageSize >= total" @click="page++; loadFiles()">{{ t('common.next') }} <ChevronRight :size="16" /></button><label class="page-size-label">{{ t('common.pageSize') }}<select v-model.number="pageSize" @change="changePageSize"><option :value="10">10</option><option :value="20">20</option><option :value="50">50</option><option :value="100">100</option></select></label><template v-if="totalPages > 7"><input v-model="pageInput" class="jump-input" type="number" min="1" :max="totalPages" :placeholder="t('common.pageInput')" @keyup.enter="jumpPage" /><button class="secondary-button" @click="jumpPage">{{ t('common.jump') }}</button></template></div><BrandFooter />
@@ -61,26 +61,9 @@ const selectedUploadIds = reactive(new Set())
 const selectedDownloadIds = reactive(new Set())
 const uploadBatchBusy = ref(false)
 const downloadBatchBusy = ref(false)
-const batchDeletingFolders = ref(false)
 const batchRenameQueue = ref([])
 const batchRenameTotal = ref(0)
 function toggleFolderSelect(id) { if (selectedFolderIds.has(id)) selectedFolderIds.delete(id); else selectedFolderIds.add(id) }
-async function batchDeleteFolders() {
-  if (readOnly.value || !selectedFolderIds.size) return
-  if (!(await askConfirm(t('confirm.deleteFolders', { count: selectedFolderIds.size })))) return
-  batchDeletingFolders.value = true
-  let failed = 0
-  try {
-    for (const id of [...selectedFolderIds]) {
-      try { await api(`/api/folders/${id}`, { method: 'DELETE' }) } catch { failed++ }
-      selectedFolderIds.delete(id)
-    }
-    // v019 #7：非空目录后端拒绝删除，失败数量单独提示，避免"已删除"误导。
-    // v019 #7: non-empty folders are rejected by the backend; surface the failed count instead of a misleading success.
-    notice.value = failed ? t('notice.foldersNotEmpty', { count: failed }) : t('notice.foldersDeleted')
-    loadFolders(); loadFiles()
-  } catch (err) { error.value = err.message } finally { batchDeletingFolders.value = false }
-}
 // openBatchRename/renameNextSelectedFolder 批量重命名目录（v019 #7）：逐个复用重命名弹窗，全部完成后刷新。
 // openBatchRename/renameNextSelectedFolder rename selected folders one by one (v019 #7), reusing the rename dialog.
 function openBatchRename() {
@@ -182,20 +165,31 @@ async function batchDownload() {
 }
 function cancelBatchDownload() { if (batchDownloadItem) terminateDownload(batchDownloadItem); else batchDownloadController?.abort() }
 function cancelDownload(item) { terminateDownload(item) }
-// batchDelete 确认并删除选中文件，随后刷新配额和当前目录列表。
-// batchDelete confirms and removes the selected files, then refreshes quota and the current directory.
+// batchDelete confirms and removes the selected files and folders, then refreshes quota and the current directory.
 async function batchDelete() {
   if (readOnly.value) { error.value = t('readOnly.error'); return }
-  const ids = [...selectedIds]
-  if (!ids.length) return
-  if (!(await askConfirm(t('confirm.deleteFiles', { count: ids.length })))) return
+  const fileIds = [...selectedIds]
+  const folderIds = [...selectedFolderIds]
+  if (!fileIds.length && !folderIds.length) return
+  const confirmation = fileIds.length && folderIds.length
+    ? t('confirm.deleteSelection', { files: fileIds.length, folders: folderIds.length })
+    : fileIds.length
+      ? t('confirm.deleteFiles', { count: fileIds.length })
+      : t('confirm.deleteFolders', { count: folderIds.length })
+  if (!(await askConfirm(confirmation))) return
   batchDeleting.value = true
   error.value = ''
   try {
-    await api('/api/files/batch-delete', { method: 'POST', body: JSON.stringify({ ids }) })
+    await api('/api/files/batch-delete', { method: 'POST', body: JSON.stringify({ ids: fileIds, folder_ids: folderIds }) })
     selectedIds.clear()
-    notice.value = t('notice.filesDeleted', { count: ids.length })
+    selectedFolderIds.clear()
+    notice.value = fileIds.length && folderIds.length
+      ? t('notice.deleteSelectionDone', { files: fileIds.length, folders: folderIds.length })
+      : fileIds.length
+        ? t('notice.filesDeleted', { count: fileIds.length })
+        : t('notice.foldersDeleted')
     await loadMe()
+    await loadFolders()
     await loadFiles()
   } catch (err) {
     error.value = err.message
