@@ -1341,7 +1341,6 @@ func remoteJoin(base, relative string) string {
 
 func remoteRelative(base, target string) string {
 	base = pathpkg.Clean(base)
-	target = pathpkg.Clean(target)
 	if base == "." {
 		return strings.TrimPrefix(target, "./")
 	}
@@ -1508,15 +1507,75 @@ func (s *Server) executeSyncPush(ctx context.Context, task store.SyncTask, syste
 
 func safeSyncFileName(value string) (string, error) {
 	value = strings.TrimSpace(value)
-	if value == "" || value == "." || value == ".." || strings.ContainsAny(value, "/\\\x00") || len([]byte(value)) > 255 {
+	if err := validateSyncPathSegment(value); err != nil {
 		return "", errors.New("invalid file name")
+	}
+	return value, nil
+}
+
+const maxSyncRelativePathLength = 4096
+
+func validateSyncPathSegment(value string) error {
+	if value == "" || value == "." || value == ".." || strings.ContainsAny(value, "/\\\x00") || len([]byte(value)) > 255 {
+		return errors.New("invalid sync path segment")
 	}
 	for _, char := range value {
 		if unicode.IsControl(char) || strings.ContainsRune(`<>:"|?*`, char) {
-			return "", errors.New("invalid file name")
+			return errors.New("invalid sync path segment")
 		}
 	}
-	return value, nil
+	return nil
+}
+
+// sanitizeSyncRelativeSegments validates untrusted remote paths before any path join can normalize them.
+func sanitizeSyncRelativeSegments(relPath string) (string, error) {
+	if relPath == "" {
+		return "", nil
+	}
+	if len([]byte(relPath)) > maxSyncRelativePathLength || strings.HasPrefix(relPath, "/") || strings.HasPrefix(relPath, "\\") || filepath.IsAbs(relPath) || filepath.VolumeName(relPath) != "" {
+		return "", errors.New("invalid sync relative path")
+	}
+	if strings.Contains(relPath, "\\") {
+		return "", errors.New("invalid sync relative path")
+	}
+	parts := strings.Split(relPath, "/")
+	for _, part := range parts {
+		if err := validateSyncPathSegment(part); err != nil {
+			return "", errors.New("invalid sync relative path")
+		}
+	}
+	return strings.Join(parts, "/"), nil
+}
+
+func ensurePathUnder(root, target string) error {
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		return err
+	}
+	targetAbs, err := filepath.Abs(target)
+	if err != nil {
+		return err
+	}
+	relative, err := filepath.Rel(filepath.Clean(rootAbs), filepath.Clean(targetAbs))
+	if err != nil {
+		return err
+	}
+	if filepath.IsAbs(relative) || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return errors.New("path escapes data directory")
+	}
+	return nil
+}
+
+func ensureSyncStoragePath(dataDir string, userID int64, storagePath string) error {
+	storagePath = filepath.ToSlash(storagePath)
+	storagePrefix := pathpkg.Join("files", strconv.FormatInt(userID, 10))
+	if storagePath != storagePrefix && !strings.HasPrefix(storagePath, storagePrefix+"/") {
+		return errors.New("invalid storage path")
+	}
+	if _, err := sanitizeSyncRelativeSegments(storagePath); err != nil {
+		return errors.New("invalid storage path")
+	}
+	return ensurePathUnder(dataDir, filepath.Join(dataDir, filepath.FromSlash(storagePath)))
 }
 
 func newSyncTaskID() string {
@@ -1561,16 +1620,27 @@ func (s *Server) executeSyncPull(ctx context.Context, task store.SyncTask, syste
 	}
 	process := func(remotePath string, remoteInfo os.FileInfo) error {
 		if remoteInfo.IsDir() {
+			if info.IsDir() {
+				relative := remoteRelative(task.SourcePath, remotePath)
+				if relative == "" || relative == "." || relative == remotePath {
+					return nil
+				}
+				if _, pathErr := sanitizeSyncRelativeSegments(relative); pathErr != nil {
+					return pathErr
+				}
+			}
 			return nil
 		}
 		s.syncProgressSet(task.ID, func(p *syncRunProgress) { p.CurrentFile = remoteInfo.Name() })
 		relative := pathpkg.Base(remotePath)
 		if info.IsDir() {
 			relative = remoteRelative(task.SourcePath, remotePath)
-			if relative == "." || relative == remotePath || strings.HasPrefix(relative, "../") {
-				return errors.New("invalid remote file path")
-			}
 		}
+		safeRelative, relativeErr := sanitizeSyncRelativeSegments(relative)
+		if relativeErr != nil {
+			return relativeErr
+		}
+		relative = safeRelative
 		parts := strings.Split(relative, "/")
 		name, nameErr := safeSyncFileName(parts[len(parts)-1])
 		if nameErr != nil {
@@ -1584,6 +1654,9 @@ func (s *Server) executeSyncPull(ctx context.Context, task store.SyncTask, syste
 			return folderErr
 		}
 		storageDir := filepath.Join("files", strconv.FormatInt(task.UserID, 10), filepath.FromSlash(localDir))
+		if storageErr := ensureSyncStoragePath(s.config.DataDir, task.UserID, storageDir); storageErr != nil {
+			return storageErr
+		}
 		mimeType := mime.TypeByExtension(strings.ToLower(filepath.Ext(name)))
 		if mimeType == "" {
 			mimeType = "application/octet-stream"
@@ -1661,7 +1734,13 @@ func (s *Server) executeSyncPull(ctx context.Context, task store.SyncTask, syste
 		}
 		file := store.File{UserID: task.UserID, Name: name, StoredName: name, Size: remoteInfo.Size(), Mime: mimeType, SHA256: shaHex, MD5: md5Hex, StoragePath: storageDir}
 		if _, completeErr := s.store.CompleteUploadWithPlacement(ctx, uploadTask, file, func(storagePath string, replace bool) error {
+			if err := ensureSyncStoragePath(s.config.DataDir, task.UserID, storagePath); err != nil {
+				return err
+			}
 			finalPath := filepath.Join(s.config.DataDir, filepath.FromSlash(storagePath))
+			if err := ensurePathUnder(s.config.DataDir, finalPath); err != nil {
+				return err
+			}
 			if err := os.MkdirAll(filepath.Dir(finalPath), 0o755); err != nil {
 				return err
 			}

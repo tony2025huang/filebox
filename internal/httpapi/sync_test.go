@@ -71,6 +71,73 @@ func TestFileBoxRemoteClientRejectsMalformedBrowseEntry(t *testing.T) {
 	}
 }
 
+func TestSFTPPullRejectsTraversalInIntermediateDirectory(t *testing.T) {
+	dataDir := t.TempDir()
+	relative := remoteRelative("source", "source/reports/../escape.txt")
+	if _, err := sanitizeSyncRelativeSegments(relative); err == nil {
+		t.Fatal("traversal in intermediate directory unexpectedly accepted")
+	}
+	outside := filepath.Join(dataDir, "files", "1", "..", "..", "..", "escape.txt")
+	if err := ensurePathUnder(dataDir, outside); err == nil {
+		t.Fatalf("traversal target unexpectedly contained: %s", outside)
+	}
+	if _, err := os.Stat(outside); !os.IsNotExist(err) {
+		t.Fatalf("unexpected file outside data root: %v", err)
+	}
+}
+
+func TestSFTPPullRejectsBackslashIntermediateDirectory(t *testing.T) {
+	if _, err := sanitizeSyncRelativeSegments(`reports\archive\escape.txt`); err == nil {
+		t.Fatal("backslash intermediate directory unexpectedly accepted")
+	}
+}
+
+func TestSyncPullFinalPathStaysUnderDataDir(t *testing.T) {
+	dataDir := t.TempDir()
+	inside := filepath.Join(dataDir, "files", "1", "safe.txt")
+	if err := ensurePathUnder(dataDir, inside); err != nil {
+		t.Fatalf("normal final path rejected: %v", err)
+	}
+	outside := filepath.Join(dataDir, "..", "escape.txt")
+	if err := ensurePathUnder(dataDir, outside); err == nil {
+		t.Fatalf("final path outside data root accepted: %s", outside)
+	}
+}
+
+func TestWalkFileBoxEntriesRejectsDotDotDirectory(t *testing.T) {
+	details := []string{}
+	processed := false
+	descended := false
+	if err := walkFileBoxEntries([]map[string]any{
+		{"name": "..", "isDir": true, "path": "escape"},
+	}, "safe", func(remoteBrowseEntry, string) error {
+		processed = true
+		return nil
+	}, func(string, string) error {
+		descended = true
+		return nil
+	}, &details); err != nil {
+		t.Fatal(err)
+	}
+	if processed || descended || len(details) != 1 {
+		t.Fatalf("dot-dot directory handling processed=%t descended=%t details=%v", processed, descended, details)
+	}
+}
+
+func TestFileBoxPullRejectsBackslashIntermediateDirectory(t *testing.T) {
+	if _, err := sanitizeSyncRelativeSegments(`docs\private\secret.txt`); err == nil {
+		t.Fatal("backslash intermediate directory unexpectedly accepted")
+	}
+}
+
+func TestFileBoxPullFinalPathStaysUnderDataDir(t *testing.T) {
+	dataDir := t.TempDir()
+	outside := filepath.Join(dataDir, "files", "1", "..", "..", "..", "escape.txt")
+	if err := ensurePathUnder(dataDir, outside); err == nil {
+		t.Fatalf("filebox final path outside data root accepted: %s", outside)
+	}
+}
+
 // TestFileBoxDownloadUsesDataDirectoryTemp verifies FileBox pull staging stays on the data volume.
 // TestFileBoxDownloadUsesDataDirectoryTemp 验证 FileBox 拉取暂存文件位于数据目录所在卷。
 func TestFileBoxDownloadUsesDataDirectoryTemp(t *testing.T) {

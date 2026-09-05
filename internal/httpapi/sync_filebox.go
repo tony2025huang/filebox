@@ -260,13 +260,21 @@ func (c *fileBoxRemoteClient) findFile(ctx context.Context, dir, name string) (*
 // walkFileBoxEntries 解析远端目录条目并跳过字段类型错误的响应。
 // walkFileBoxEntries parses remote directory entries and skips responses with invalid field types.
 func walkFileBoxEntries(entries []map[string]any, relative string, process func(remoteBrowseEntry, string) error, descend func(string, string) error, detail *[]string) error {
+	safeRelative, err := sanitizeSyncRelativeSegments(relative)
+	if err != nil {
+		return err
+	}
 	for _, entry := range entries {
 		name, ok := entry["name"].(string)
 		if !ok {
 			*detail = append(*detail, "remote entry skipped: invalid name")
 			continue
 		}
-		childRelative := pathpkg.Join(relative, name)
+		if err := validateSyncPathSegment(name); err != nil {
+			*detail = append(*detail, "remote entry skipped: invalid name")
+			continue
+		}
+		childRelative := pathpkg.Join(safeRelative, name)
 		isDir, ok := entry["isDir"].(bool)
 		if !ok {
 			*detail = append(*detail, childRelative+": remote entry has invalid isDir")
@@ -528,6 +536,11 @@ func (s *Server) executeSyncPullFileBox(ctx context.Context, task store.SyncTask
 				return nil
 			}
 		}
+		safeRelative, relativeErr := sanitizeSyncRelativeSegments(relative)
+		if relativeErr != nil {
+			return relativeErr
+		}
+		relative = safeRelative
 		parts := strings.Split(relative, "/")
 		name, nameErr := safeSyncFileName(parts[len(parts)-1])
 		if nameErr != nil {
@@ -541,6 +554,9 @@ func (s *Server) executeSyncPullFileBox(ctx context.Context, task store.SyncTask
 			return folderErr
 		}
 		storageDir := filepath.Join("files", strconv.FormatInt(task.UserID, 10), filepath.FromSlash(localDir))
+		if storageErr := ensureSyncStoragePath(s.config.DataDir, task.UserID, storageDir); storageErr != nil {
+			return storageErr
+		}
 		if task.ConflictPolicy == "skip" {
 			if _, conflictErr := s.store.FindUploadConflict(ctx, task.UserID, storageDir, name); conflictErr == nil {
 				result.detail = append(result.detail, relative+": skipped (exists)")
@@ -582,7 +598,13 @@ func (s *Server) executeSyncPullFileBox(ctx context.Context, task store.SyncTask
 		}
 		file := store.File{UserID: task.UserID, Name: name, StoredName: name, Size: size, Mime: mimeType, SHA256: shaHex, MD5: md5Hex, StoragePath: storageDir}
 		if _, completeErr := s.store.CompleteUploadWithPlacement(ctx, uploadTask, file, func(storagePath string, replace bool) error {
+			if err := ensureSyncStoragePath(s.config.DataDir, task.UserID, storagePath); err != nil {
+				return err
+			}
 			finalPath := filepath.Join(s.config.DataDir, filepath.FromSlash(storagePath))
+			if err := ensurePathUnder(s.config.DataDir, finalPath); err != nil {
+				return err
+			}
 			if err := os.MkdirAll(filepath.Dir(finalPath), 0o755); err != nil {
 				return err
 			}
