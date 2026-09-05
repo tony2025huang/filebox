@@ -1,5 +1,10 @@
 # Requirement Change Log
 
+## 2026-09-05 - v024.2 品牌页脚：登录定位与备案合规行自适应
+
+- 【业务确认】LoginView 将 `BrandFooter` 移出 `.login-form-wrap`、作为 `.login-panel` 的直接子元素；登录面板改为纵向 flex 居中布局（`.login-form-wrap { margin: auto 0 }`），页脚与表单同宽并靠近底部锚定，表单下方保留有意义的间距；通过 `clamp` 内边距与既有 800px 断点做桌面/移动自适应，不使用固定高度/宽度，也不会把输入控件移出屏幕或造成溢出。
+- 【业务确认】BrandFooter 重构为「标题/描述（独立层级）+ 合规行」结构：版权、ICP、公安备案文本作为单一横向合规行，窄屏自动换行并保持居中与可读间距；响应式规则位于 scoped CSS 内，避免被全局样式破坏；品牌数据/API 未改动。
+
 ## 2026-09-05 - v024.1 加固：HSTS 示例、根目录忽略与收集凭据复制
 
 - 【业务确认】`deploy/nginx.conf.example` 的 443 TLS server 块新增保守 HSTS：`add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;`；注释明确仅在确认整域（含全部子域）均已启用 HTTPS 后适用，且不加入 `preload`。80 重定向块不受影响。

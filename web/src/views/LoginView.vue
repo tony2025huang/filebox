@@ -38,8 +38,8 @@
           <button v-else-if="brand.registerEnabled && !registerMode" type="button" class="secondary-button login-switch" @click="registerMode = true">{{ t('login.registerCopy') }}</button>
           <button v-else-if="registerMode" type="button" class="secondary-button login-switch" @click="registerMode = false">{{ t('login.hasAccount') }}</button>
         </form>
-        <BrandFooter />
       </div>
+      <BrandFooter />
     </section>
   </main>
 </template>

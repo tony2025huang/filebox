@@ -1,6 +1,11 @@
 # FileBox Requirement State
 
-Updated: 2026-09-05 (v024.1：HSTS 示例/根目录忽略/收集凭据复制)
+Updated: 2026-09-05 (v024.2：登录页脚锚定与备案合规行自适应)
+
+| Requirement | State | Notes |
+|---|---|---|
+| v024.2 login brand footer anchoring | done | 【业务确认】LoginView moves `BrandFooter` out of `.login-form-wrap` to be a direct child of `.login-panel`; the panel becomes a centered flex column (`.login-form-wrap { margin: auto 0 }`) and the footer is constrained to the form width and anchored lower, giving meaningful separation below the form. Responsive via clamp padding and the existing 800px breakpoint; no fixed heights/widths, inputs stay on-screen. |
+| v024.2 compliance row responsive | done | 【业务确认】BrandFooter is split into a heading block (title/description) and a single horizontal compliance row (copyright/ICP/police) that uses `flex-wrap` centered with readable gaps on narrow widths; responsive behavior lives in the scoped CSS so it is not defeated by global styles; brand data/API unchanged. |
 
 | Requirement | State | Notes |
 |---|---|---|
