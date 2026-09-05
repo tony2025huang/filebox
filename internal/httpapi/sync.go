@@ -2,8 +2,6 @@ package httpapi
 
 import (
 	"context"
-	"crypto/aes"
-	"crypto/cipher"
 	"crypto/md5"
 	"crypto/rand"
 	"crypto/sha256"
@@ -381,25 +379,12 @@ func (s *Server) getSyncSystemSecret(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	secret := ""
-	if item.AuthSecret != "" {
-		secret, err = s.decryptSyncSecret(item.AuthSecret)
-		if err != nil {
-			log.Printf("decrypt sync remote system secret id=%d: %v", item.ID, err)
-			s.serviceEvent(r, "sync_system_secret_view", currentUser(r.Context()).Username, "target=%d result=failure reason=decrypt", item.ID)
-			writeError(w, http.StatusInternalServerError, "读取凭据失败")
-			return
-		}
-	}
-	passphrase := ""
-	if item.AuthPassphrase != "" {
-		passphrase, err = s.decryptSyncSecret(item.AuthPassphrase)
-		if err != nil {
-			log.Printf("decrypt sync remote system passphrase id=%d: %v", item.ID, err)
-			s.serviceEvent(r, "sync_system_secret_view", currentUser(r.Context()).Username, "target=%d result=failure reason=decrypt", item.ID)
-			writeError(w, http.StatusInternalServerError, "读取凭据失败")
-			return
-		}
+	secret, passphrase, err := s.decryptSyncCredentials(r.Context(), item)
+	if err != nil {
+		log.Printf("decrypt sync remote system credentials id=%d: %v", item.ID, err)
+		s.serviceEvent(r, "sync_system_secret_view", currentUser(r.Context()).Username, "target=%d result=failure reason=decrypt", item.ID)
+		writeError(w, http.StatusInternalServerError, "读取凭据失败")
+		return
 	}
 
 	user := currentUser(r.Context())
@@ -1072,38 +1057,47 @@ func latestCronOccurrence(schedule cron.Schedule, baseline, now time.Time) (time
 }
 
 func (s *Server) encryptSyncSecret(secret string) (string, error) {
-	key := sha256.Sum256(s.config.JWTSecret)
-	block, err := aes.NewCipher(key[:])
-	if err != nil {
-		return "", err
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return "", err
-	}
-	nonce := make([]byte, gcm.NonceSize())
-	if _, err := rand.Read(nonce); err != nil {
-		return "", err
-	}
-	return base64.RawURLEncoding.EncodeToString(gcm.Seal(nonce, nonce, []byte(secret), nil)), nil
+	return s.encryptSensitiveSecret(secret)
 }
 
 func (s *Server) decryptSyncSecret(value string) (string, error) {
-	sealed, err := base64.RawURLEncoding.DecodeString(value)
-	if err != nil {
-		return "", err
+	plain, _, err := s.decryptSensitiveSecret(value)
+	return plain, err
+}
+
+func (s *Server) decryptSyncCredentials(ctx context.Context, item store.RemoteSystem) (secret, passphrase string, err error) {
+	secretLegacy := false
+	passphraseLegacy := false
+	if item.AuthSecret != "" {
+		secret, secretLegacy, err = s.decryptSensitiveSecret(item.AuthSecret)
+		if err != nil {
+			return "", "", err
+		}
 	}
-	key := sha256.Sum256(s.config.JWTSecret)
-	block, err := aes.NewCipher(key[:])
-	if err != nil {
-		return "", err
+	if item.AuthPassphrase != "" {
+		passphrase, passphraseLegacy, err = s.decryptSensitiveSecret(item.AuthPassphrase)
+		if err != nil {
+			return "", "", err
+		}
 	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil || len(sealed) < gcm.NonceSize() {
-		return "", errors.New("invalid encrypted secret")
+	if len(s.config.EncryptionKey) == 32 && (secretLegacy || passphraseLegacy) {
+		if secretLegacy {
+			item.AuthSecret, err = s.encryptSyncSecret(secret)
+			if err != nil {
+				return "", "", err
+			}
+		}
+		if passphraseLegacy {
+			item.AuthPassphrase, err = s.encryptSyncSecret(passphrase)
+			if err != nil {
+				return "", "", err
+			}
+		}
+		if updateErr := s.store.UpdateRemoteSystem(ctx, item, item.UserID, false); updateErr != nil {
+			log.Printf("persist migrated sync credentials for system id=%d: %v", item.ID, updateErr)
+		}
 	}
-	plain, err := gcm.Open(nil, sealed[:gcm.NonceSize()], sealed[gcm.NonceSize():], nil)
-	return string(plain), err
+	return secret, passphrase, nil
 }
 
 // hostKeyCallbackFor 返回按配置指纹校验的 HostKeyCallback；未配置指纹时回退 InsecureIgnoreHostKey 并打警告日志（兼容既有数据）。
@@ -1150,7 +1144,7 @@ func hostKeyFingerprintMatches(got, want string) bool {
 }
 
 func (s *Server) openSFTP(ctx context.Context, item store.RemoteSystem) (*sftp.Client, func(), error) {
-	secret, err := s.decryptSyncSecret(item.AuthSecret)
+	secret, passphrase, err := s.decryptSyncCredentials(ctx, item)
 	if err != nil {
 		return nil, func() {}, errors.New("invalid credentials")
 	}
@@ -1158,13 +1152,6 @@ func (s *Server) openSFTP(ctx context.Context, item store.RemoteSystem) (*sftp.C
 	if item.AuthType == "password" {
 		auth = append(auth, ssh.Password(secret))
 	} else {
-		passphrase := ""
-		if item.AuthPassphrase != "" {
-			passphrase, err = s.decryptSyncSecret(item.AuthPassphrase)
-			if err != nil {
-				return nil, func() {}, errors.New("invalid credentials")
-			}
-		}
 		var signer ssh.Signer
 		if passphrase == "" {
 			signer, err = ssh.ParsePrivateKey([]byte(secret))

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/base64"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -310,6 +311,34 @@ func TestJWTSecretValidation(t *testing.T) {
 	}
 	if _, _, err := resolveJWTSecret(shortDir, false, false, "", true); err == nil || !strings.Contains(err.Error(), "regenerate or fix") {
 		t.Fatalf("resolveJWTSecret accepted short secrets.json JWT secret or omitted repair guidance: %v", err)
+	}
+}
+
+func TestEncryptionKeyValidationAndResolution(t *testing.T) {
+	key := make([]byte, staticEncryptionKeyBytes)
+	for index := range key {
+		key[index] = byte(index + 1)
+	}
+	encoded := base64.StdEncoding.EncodeToString(key)
+	resolved, source, err := resolveEncryptionKey(t.TempDir(), true, false, encoded)
+	if err != nil || source != "flag-or-env" || string(resolved) != string(key) {
+		t.Fatalf("resolveEncryptionKey(flag) = %x, %q, %v", resolved, source, err)
+	}
+	if _, _, err := resolveEncryptionKey(t.TempDir(), true, false, "too-short"); err == nil {
+		t.Fatal("resolveEncryptionKey accepted malformed base64")
+	}
+
+	dataDir := t.TempDir()
+	secretFile := filepath.Join(dataDir, "config", "secrets.json")
+	if err := os.MkdirAll(filepath.Dir(secretFile), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeSecretsFile(secretFile, secretsFilePayload{JWTSecret: "legacy-jwt-secret-1234", EncryptionKey: encoded}); err != nil {
+		t.Fatal(err)
+	}
+	resolved, source, err = resolveEncryptionKey(dataDir, false, false, "")
+	if err != nil || source != "secrets.json" || string(resolved) != string(key) {
+		t.Fatalf("resolveEncryptionKey(file) = %x, %q, %v", resolved, source, err)
 	}
 }
 

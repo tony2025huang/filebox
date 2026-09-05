@@ -15,6 +15,7 @@ Updated: 2026-09-02 (v020：11 项用户反馈优化全部交付)
 | v020 sync detail modal width | done | `.wide-modal` 1100px→`min(1280px,96vw)`, log table min-width 1160px; task-edit modal keeps 1100px via `sync-task-modal`; commit `b685856`. |
 | v020 log failure reason localization | done | Backend reasons enumerated; trilingual `logReason.*` key sets aligned to 38 identical keys (share*5, ipLocked/totpFailed, readOnly/settingsFailed/invalidRequest/deleteFailed/writeFailed/batch); node-verified; commits `ef9d083` (+`bdf1eee` mapping). |
 | v020 transfers icon direction | done | ArrowLeftRight → ArrowUpDown on the topbar transfers button; commit `6d75e1b`. |
+| v023 independent static encryption key migration | done | 【业务确认】`--encryption-key`/`FILEBOX_ENCRYPTION_KEY`/`config/secrets.json` support strict Base64-encoded 32-byte AES-256 keys; versioned envelopes use the independent key, legacy JWT-derived ciphertext falls back and lazily migrates on successful TOTP/sync reads; absent key keeps legacy behavior with a warning. |
 
 | Requirement | State | Notes |
 |---|---|---|

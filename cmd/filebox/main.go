@@ -122,6 +122,7 @@ func runServe(args []string) error {
 	minFreeSpace := flags.Int64("min-free-space", envNonNegativeInt64("FILEBOX_MIN_FREE_SPACE", 2*1024*1024*1024), "minimum free disk space in bytes; 0 disables upload protection")
 	registerEnabled := flags.Bool("register-enabled", envBool("FILEBOX_REGISTER_ENABLED", false), "enable public registration")
 	jwtSecret := flags.String("jwt-secret", envOr("FILEBOX_JWT_SECRET", "filebox-development-secret-change-me"), "JWT signing secret")
+	encryptionKey := flags.String("encryption-key", envOr("FILEBOX_ENCRYPTION_KEY", ""), "base64-encoded 32-byte static encryption key")
 	adminUser := flags.String("admin-user", envOr("FILEBOX_ADMIN_USER", "admin"), "initial administrator username")
 	adminPass := flags.String("admin-pass", envOr("FILEBOX_ADMIN_PASS", "admin123"), "initial administrator password")
 	trustedProxiesValue := flags.String("trusted-proxies", envOr("FILEBOX_TRUSTED_PROXIES", ""), "trusted proxy IPs or CIDRs, comma-separated")
@@ -142,14 +143,21 @@ func runServe(args []string) error {
 	if secretErr != nil {
 		return secretErr
 	}
+	resolvedEncryptionKey, encryptionKeySource, encryptionKeyErr := resolveEncryptionKey(*dataDir, flagWasSet(flags, "encryption-key"), envSet("FILEBOX_ENCRYPTION_KEY"), *encryptionKey)
+	if encryptionKeyErr != nil {
+		return encryptionKeyErr
+	}
 	// 安全提示：未显式设置敏感配置时使用内置默认值，仅适合本地测试。
 	// Security notice: without explicit sensitive settings, built-in defaults are used, which are only safe for local testing.
-	warnings := make([]string, 0, 2)
+	warnings := make([]string, 0, 3)
 	if resolvedJWTSecret == "filebox-development-secret-change-me" {
 		warnings = append(warnings, "JWT signing secret: using the built-in development value; set --jwt-secret or FILEBOX_JWT_SECRET to a strong random value")
 	}
 	if !envSet("FILEBOX_ADMIN_PASS") && !flagWasSet(flags, "admin-pass") && *adminPass == "admin123" {
 		warnings = append(warnings, "admin password: using the default 'admin123'; set --admin-pass or FILEBOX_ADMIN_PASS to a strong value before exposing this service")
+	}
+	if len(resolvedEncryptionKey) == 0 {
+		warnings = append(warnings, "static encryption key: not configured; TOTP secrets and sync credentials use the legacy JWT-derived key; set --encryption-key or FILEBOX_ENCRYPTION_KEY to enable independent encryption")
 	}
 	warnProductionDefaults(warnings)
 
@@ -158,7 +166,7 @@ func runServe(args []string) error {
 		return err
 	}
 	defer logger.Close()
-	logger.Event("startup", "operator=system ip=- version=%s addr=%s data=%s log_enabled=%t log_dir=%s log_retention_days=%d jwt_secret_source=%s", version, *addr, *dataDir, *logging.enabled, *logging.dir, *logging.retentionDays, secretSource)
+	logger.Event("startup", "operator=system ip=- version=%s addr=%s data=%s log_enabled=%t log_dir=%s log_retention_days=%d jwt_secret_source=%s encryption_key_source=%s", version, *addr, *dataDir, *logging.enabled, *logging.dir, *logging.retentionDays, secretSource, encryptionKeySource)
 
 	db, err := store.Open(*dataDir)
 	if err != nil {
@@ -191,6 +199,7 @@ func runServe(args []string) error {
 		MinFreeSpace:    *minFreeSpace,
 		RegisterEnabled: *registerEnabled,
 		JWTSecret:       []byte(resolvedJWTSecret),
+		EncryptionKey:   resolvedEncryptionKey,
 		JWTExpiry:       7 * 24 * time.Hour,
 		TrustedProxies:  trustedProxies,
 		Logger:          logger,
@@ -478,7 +487,8 @@ func copyFile(source, target string) error {
 // secretsFilePayload 是 <dataDir>/config/secrets.json 的磁盘格式。
 // secretsFilePayload is the on-disk format of <dataDir>/config/secrets.json.
 type secretsFilePayload struct {
-	JWTSecret string `json:"jwtSecret"`
+	JWTSecret     string `json:"jwtSecret"`
+	EncryptionKey string `json:"encryptionKey,omitempty"`
 }
 
 func readSecretsFile(path string) (secretsFilePayload, error) {
@@ -527,6 +537,48 @@ func validateJWTSecret(secret string) error {
 		return fmt.Errorf("JWT secret must be at least %d bytes (got %d)", minJWTSecretBytes, len([]byte(secret)))
 	}
 	return nil
+}
+
+const staticEncryptionKeyBytes = 32
+
+func decodeEncryptionKey(value string) ([]byte, error) {
+	if value == "" {
+		return nil, errors.New("static encryption key must not be empty")
+	}
+	decoded, err := base64.StdEncoding.Strict().DecodeString(value)
+	if err != nil {
+		return nil, errors.New("static encryption key must be standard base64")
+	}
+	if len(decoded) != staticEncryptionKeyBytes {
+		return nil, fmt.Errorf("static encryption key must decode to exactly %d bytes", staticEncryptionKeyBytes)
+	}
+	return decoded, nil
+}
+
+func resolveEncryptionKey(dataDir string, flagSet, envSet bool, explicitValue string) ([]byte, string, error) {
+	if flagSet || envSet {
+		key, err := decodeEncryptionKey(explicitValue)
+		if err != nil {
+			return nil, "", fmt.Errorf("invalid static encryption key: %w", err)
+		}
+		return key, "flag-or-env", nil
+	}
+	secretFile := filepath.Join(dataDir, "config", "secrets.json")
+	payload, err := readSecretsFile(secretFile)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, "", nil
+	}
+	if err != nil {
+		return nil, "", err
+	}
+	if payload.EncryptionKey == "" {
+		return nil, "", nil
+	}
+	key, err := decodeEncryptionKey(payload.EncryptionKey)
+	if err != nil {
+		return nil, "", fmt.Errorf("invalid static encryption key in %s: %w", secretFile, err)
+	}
+	return key, "secrets.json", nil
 }
 
 // resolveJWTSecret 按优先级解析 JWT 签名密钥：
@@ -669,12 +721,19 @@ type backupManifest struct {
 // keysPayload 是归档内 keys.json 的格式；带口令备份时 jwtSecret 为 AES-GCM 密文。
 // keysPayload is the keys.json format inside the archive; with a passphrase, jwtSecret holds AES-GCM ciphertext.
 type keysPayload struct {
-	JWTSecret   string `json:"jwtSecret"`
-	Encrypted   bool   `json:"encrypted"`
-	Fingerprint string `json:"fingerprint"`
-	Note        string `json:"note"`
-	CreatedAt   string `json:"createdAt"`
-	Salt        string `json:"salt,omitempty"`
+	JWTSecret                string `json:"jwtSecret"`
+	EncryptionKey            string `json:"encryptionKey,omitempty"`
+	Encrypted                bool   `json:"encrypted"`
+	Fingerprint              string `json:"fingerprint"`
+	EncryptionKeyFingerprint string `json:"encryptionKeyFingerprint,omitempty"`
+	Note                     string `json:"note"`
+	CreatedAt                string `json:"createdAt"`
+	Salt                     string `json:"salt,omitempty"`
+}
+
+type backupKeyMaterial struct {
+	JWTSecret     string `json:"jwtSecret"`
+	EncryptionKey string `json:"encryptionKey,omitempty"`
 }
 
 type archiveEntry struct {
@@ -779,6 +838,7 @@ func runAdminBackup(args []string) int {
 	outPath := flags.String("out", "", "output backup archive path (.tar.gz)")
 	passphraseFile := flags.String("passphrase-file", "", "file containing the passphrase used to encrypt keys.json")
 	jwtSecretFlag := flags.String("jwt-secret", "", "JWT signing secret override (falls back to FILEBOX_JWT_SECRET then config/secrets.json)")
+	encryptionKeyFlag := flags.String("encryption-key", "", "base64-encoded 32-byte static encryption key override")
 	logging := addLoggingFlags(flags)
 	if err := flags.Parse(args); err != nil {
 		return 2
@@ -820,7 +880,16 @@ func runAdminBackup(args []string) int {
 			return 1
 		}
 	}
-	manifest, err := buildBackupArchive(*dataDir, *outPath, secret, passphrase)
+	staticExplicit := *encryptionKeyFlag
+	if !flagWasSet(flags, "encryption-key") {
+		staticExplicit = os.Getenv("FILEBOX_ENCRYPTION_KEY")
+	}
+	encryptionKey, _, err := resolveEncryptionKey(*dataDir, flagWasSet(flags, "encryption-key"), envSet("FILEBOX_ENCRYPTION_KEY"), staticExplicit)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		return 1
+	}
+	manifest, err := buildBackupArchive(*dataDir, *outPath, secret, passphrase, encryptionKey)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "backup failed: %v\n", err)
 		return 1
@@ -836,15 +905,15 @@ func runAdminBackup(args []string) int {
 		// G12: plaintext backups need a prominent warning — the archive holds the raw JWT
 		// secret, so losing the archive means losing every credential derived from it.
 		fmt.Fprintf(os.Stderr, "\n!!! WARNING: keys.json is stored in PLAINTEXT inside the archive !!!\n")
-		fmt.Fprintf(os.Stderr, "!!! The archive contains your raw JWT signing secret (jwt fingerprint %s) !!!\n", manifest.JWTFingerprint)
-		fmt.Fprintf(os.Stderr, "!!! Anyone with this archive can forge sessions and decrypt sync credentials. !!!\n")
+		fmt.Fprintf(os.Stderr, "!!! The archive contains raw key material (jwt fingerprint %s). !!!\n", manifest.JWTFingerprint)
+		fmt.Fprintf(os.Stderr, "!!! Anyone with this archive can forge sessions and decrypt stored credentials. !!!\n")
 		fmt.Fprintf(os.Stderr, "!!! PRODUCTION MUST use --passphrase-file to encrypt keys.json and keep the archive on a secure channel. !!!\n")
 		fmt.Fprintf(os.Stderr, "!!! The manifest marks this archive as unencrypted (keysEncrypted=false). !!!\n\n")
 	}
 	return 0
 }
 
-func buildBackupArchive(dataDir, outPath, secret, passphrase string) (backupManifest, error) {
+func buildBackupArchive(dataDir, outPath, secret, passphrase string, encryptionKeys ...[]byte) (backupManifest, error) {
 	if err := checkpointDatabase(dataDir); err != nil {
 		return backupManifest{}, err
 	}
@@ -854,18 +923,32 @@ func buildBackupArchive(dataDir, outPath, secret, passphrase string) (backupMani
 		SHA256:         make(map[string]string),
 		JWTFingerprint: secretFingerprint(secret),
 	}
+	staticKey := []byte(nil)
+	if len(encryptionKeys) > 0 {
+		staticKey = encryptionKeys[0]
+	}
 	keys := keysPayload{
 		JWTSecret:   secret,
 		Fingerprint: manifest.JWTFingerprint,
-		Note:        "TOTP 与同步系统凭据由 SHA-256(jwtSecret) 派生 AES-GCM 密钥加密；恢复时必须使用与备份一致的 jwtSecret",
+		Note:        "TOTP 与同步系统凭据使用独立静态密钥；旧密文仍由 SHA-256(jwtSecret) 派生密钥兼容解密",
 		CreatedAt:   manifest.CreatedAt,
 	}
+	if len(staticKey) > 0 {
+		keys.EncryptionKey = base64.StdEncoding.EncodeToString(staticKey)
+		keys.EncryptionKeyFingerprint = secretFingerprint(string(staticKey))
+	}
 	if passphrase != "" {
-		encrypted, salt, err := encryptSecret(secret, passphrase)
+		material, err := json.Marshal(backupKeyMaterial{JWTSecret: secret, EncryptionKey: keys.EncryptionKey})
+		if err != nil {
+			return manifest, fmt.Errorf("encode keys.json: %w", err)
+		}
+		encrypted, salt, err := encryptSecret(string(material), passphrase)
 		if err != nil {
 			return manifest, fmt.Errorf("encrypt keys.json: %w", err)
 		}
 		keys.JWTSecret = encrypted
+		keys.EncryptionKey = ""
+		keys.EncryptionKeyFingerprint = ""
 		keys.Encrypted = true
 		keys.Salt = salt
 		manifest.KeysEncrypted = true
@@ -1194,6 +1277,7 @@ func runAdminRestore(args []string) int {
 		return 1
 	}
 	archiveKey := keys.JWTSecret
+	archiveEncryptionKey := keys.EncryptionKey
 	if keys.Encrypted {
 		passphrase := ""
 		if strings.TrimSpace(*passphraseFile) != "" {
@@ -1208,15 +1292,30 @@ func runAdminRestore(args []string) int {
 			fmt.Fprintln(os.Stderr, "keys.json is encrypted; provide --passphrase-file")
 			return 1
 		}
-		archiveKey, err = decryptSecret(keys.JWTSecret, keys.Salt, passphrase)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "%v\n", err)
+		decryptedKeys, decryptErr := decryptSecret(keys.JWTSecret, keys.Salt, passphrase)
+		if decryptErr != nil {
+			fmt.Fprintf(os.Stderr, "%v\n", decryptErr)
 			return 1
+		}
+		var material backupKeyMaterial
+		if json.Unmarshal([]byte(decryptedKeys), &material) == nil && material.JWTSecret != "" {
+			archiveKey = material.JWTSecret
+			archiveEncryptionKey = material.EncryptionKey
+		} else {
+			// Format v1 archives encrypted only the legacy JWT secret.
+			archiveKey = decryptedKeys
+			archiveEncryptionKey = ""
 		}
 	}
 	if secretFingerprint(archiveKey) != manifest.JWTFingerprint {
 		fmt.Fprintln(os.Stderr, "decrypted key fingerprint mismatch")
 		return 1
+	}
+	if archiveEncryptionKey != "" {
+		if _, err := decodeEncryptionKey(archiveEncryptionKey); err != nil {
+			fmt.Fprintf(os.Stderr, "invalid static encryption key in keys.json: %v\n", err)
+			return 1
+		}
 	}
 	existingKey, err := existingJWTSecret(target)
 	if err != nil {
@@ -1278,7 +1377,7 @@ func runAdminRestore(args []string) int {
 		fmt.Fprintf(os.Stderr, "create config directory: %v\n", err)
 		return 1
 	}
-	if err := writeSecretsFile(secretFile, secretsFilePayload{JWTSecret: archiveKey}); err != nil {
+	if err := writeSecretsFile(secretFile, secretsFilePayload{JWTSecret: archiveKey, EncryptionKey: archiveEncryptionKey}); err != nil {
 		fmt.Fprintf(os.Stderr, "write secrets.json: %v\n", err)
 		return 1
 	}
@@ -1626,7 +1725,7 @@ func printAdminUsage(writer io.Writer) {
 	fmt.Fprintln(writer, "       filebox admin reset-password --data=./data --username=admin --generate")
 	fmt.Fprintln(writer, "       filebox admin clear-ip-acl --data=./data --username=admin")
 	fmt.Fprintln(writer, "       filebox admin migrate-v010-paths --data=./data   # v010 yy/mm → v011 yy-mm")
-	fmt.Fprintln(writer, "       filebox admin backup --data=./data --out=backup.tar.gz [--passphrase-file=FILE]")
+	fmt.Fprintln(writer, "       filebox admin backup --data=./data --out=backup.tar.gz [--passphrase-file=FILE] [--encryption-key=BASE64]")
 	fmt.Fprintln(writer, "       filebox admin restore --data=./data --in=backup.tar.gz [--passphrase-file=FILE] [--force --yes]")
 }
 

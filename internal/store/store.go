@@ -983,6 +983,23 @@ func (s *Store) SetTOTP(ctx context.Context, id int64, secret string, enabled bo
 	return nil
 }
 
+// ReencryptTOTPSecret replaces only the encrypted secret, preserving enabled
+// state and the last-used counter during lazy key migration.
+func (s *Store) ReencryptTOTPSecret(ctx context.Context, id int64, secret string) error {
+	result, err := s.DB.ExecContext(ctx, "UPDATE users SET totp_secret = ?, updated_at = ? WHERE id = ?", nullableString(secret), time.Now().UTC().Format(time.RFC3339), id)
+	if err != nil {
+		return err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if count == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // ActivateTOTP enables an already stored secret without discarding replay state.
 // ActivateTOTP 启用已有密钥，同时保留动态码防重放状态。
 func (s *Store) ActivateTOTP(ctx context.Context, id int64) error {

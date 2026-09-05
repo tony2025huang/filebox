@@ -115,7 +115,9 @@ filebox locks clear --data=./data --user=2
 filebox locks clear --data=./data --all
 ```
 
-For production, run `make build` and then `make start`; Windows can run `bin/filebox.exe`, while Linux uses `make build-linux`. Production deployments must set a strong random `FILEBOX_JWT_SECRET` and use an HTTPS reverse proxy.
+For production, run `make build` and then `make start`; Windows can run `bin/filebox.exe`, while Linux uses `make build-linux`. Production deployments must set a strong random `FILEBOX_JWT_SECRET` and use an HTTPS reverse proxy. An independent static encryption key is also recommended so TOTP secrets and sync credentials do not depend on the JWT key.
+
+Configure the independent key with `--encryption-key` or `FILEBOX_ENCRYPTION_KEY`, or store it as `encryptionKey` in `<dataDir>/config/secrets.json`; command-line flags take precedence over environment variables, which take precedence over the file. The value must be strict standard Base64 decoding to exactly 32 bytes, generated from a cryptographically secure random source; do not use a password, the JWT secret, or a short string. Without it, the service starts with a clear warning and retains the legacy `SHA256(JWTSecret)`-derived encryption behavior. With it, new values use a versioned AES-256-GCM envelope and successfully read legacy values are lazily migrated. `--passphrase-file` protects both key materials in backups.
 
 ## Service logs
 
@@ -222,6 +224,7 @@ Each flag reads its `FILEBOX_*` environment variable as the default; an explicit
 | `--max-file-size` | `FILEBOX_MAX_FILE_SIZE` | `107374182400` (100 GiB) | Backend per-file size limit |
 | `--min-free-space` | `FILEBOX_MIN_FREE_SPACE` | `2147483648` (2 GiB) | Minimum free space at upload initialization; `0` disables protection |
 | `--jwt-secret` | `FILEBOX_JWT_SECRET` | `filebox-development-secret-change-me` | HS256 signing key; replace in production |
+| `--encryption-key` | `FILEBOX_ENCRYPTION_KEY` | empty | Independent static encryption key; strict standard Base64 decoding to exactly 32 bytes |
 | `--register-enabled` | `FILEBOX_REGISTER_ENABLED` | `false` | First-deployment seed for the registration switch; the persisted `registerEnabled` admin setting controls later restarts |
 | `--admin-user` | `FILEBOX_ADMIN_USER` | `admin` | Initial administrator username |
 | `--admin-pass` | `FILEBOX_ADMIN_PASS` | `admin123` | Initial administrator password; forced change on first login |

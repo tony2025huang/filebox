@@ -47,7 +47,7 @@ func (s *Server) openFileBox(ctx context.Context, item store.RemoteSystem) (*fil
 	if item.Kind != "filebox" {
 		return nil, errors.New("remote system is not filebox kind")
 	}
-	secret, err := s.decryptSyncSecret(item.AuthSecret)
+	secret, _, err := s.decryptSyncCredentials(ctx, item)
 	if err != nil {
 		return nil, errors.New("invalid credentials")
 	}

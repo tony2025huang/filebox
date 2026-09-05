@@ -4,15 +4,12 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
-	"crypto/aes"
-	"crypto/cipher"
 	"crypto/hmac"
 	"crypto/md5"
 	"crypto/rand"
 	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/base32"
-	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -58,6 +55,7 @@ type Config struct {
 	MinFreeSpace    int64
 	RegisterEnabled bool
 	JWTSecret       []byte
+	EncryptionKey   []byte
 	JWTExpiry       time.Duration
 	TrustedProxies  []*net.IPNet
 	Logger          *srvlog.Logger
@@ -1037,7 +1035,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		if user.TOTPEnabled {
 			data["totpRequired"] = true
 		} else {
-			secret, err := s.decryptTOTPSecret(user.TOTPSecret)
+			secret, err := s.decryptTOTPSecretForUser(r.Context(), user)
 			if err != nil {
 				writeError(w, http.StatusInternalServerError, "登录失败")
 				return
@@ -1303,7 +1301,7 @@ func (s *Server) totp(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "用户名或密码错误")
 		return
 	}
-	secret, err := s.decryptTOTPSecret(user.TOTPSecret)
+	secret, err := s.decryptTOTPSecretForUser(r.Context(), user)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "登录失败")
 		return
@@ -1371,7 +1369,7 @@ func (s *Server) totpQRCode(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
-	secret, err := s.decryptTOTPSecret(user.TOTPSecret)
+	secret, err := s.decryptTOTPSecretForUser(r.Context(), user)
 	if err != nil {
 		http.Error(w, "qrcode unavailable", http.StatusInternalServerError)
 		return
@@ -1387,39 +1385,28 @@ func (s *Server) totpQRCode(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) encryptTOTPSecret(secret string) (string, error) {
-	key := sha256.Sum256(s.config.JWTSecret)
-	block, err := aes.NewCipher(key[:])
-	if err != nil {
-		return "", err
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return "", err
-	}
-	nonce := make([]byte, gcm.NonceSize())
-	if _, err := rand.Read(nonce); err != nil {
-		return "", err
-	}
-	sealed := gcm.Seal(nonce, nonce, []byte(secret), nil)
-	return base64.RawURLEncoding.EncodeToString(sealed), nil
+	return s.encryptSensitiveSecret(secret)
 }
 
 func (s *Server) decryptTOTPSecret(value string) (string, error) {
-	sealed, err := base64.RawURLEncoding.DecodeString(value)
+	secret, _, err := s.decryptSensitiveSecret(value)
+	return secret, err
+}
+
+func (s *Server) decryptTOTPSecretForUser(ctx context.Context, user store.User) (string, error) {
+	secret, legacy, err := s.decryptSensitiveSecret(user.TOTPSecret)
 	if err != nil {
 		return "", err
 	}
-	key := sha256.Sum256(s.config.JWTSecret)
-	block, err := aes.NewCipher(key[:])
-	if err != nil {
-		return "", err
+	if legacy && len(s.config.EncryptionKey) == 32 {
+		migrated, encryptErr := s.encryptTOTPSecret(secret)
+		if encryptErr != nil {
+			log.Printf("migrate TOTP secret for user id=%d: %v", user.ID, encryptErr)
+		} else if updateErr := s.store.ReencryptTOTPSecret(ctx, user.ID, migrated); updateErr != nil {
+			log.Printf("persist migrated TOTP secret for user id=%d: %v", user.ID, updateErr)
+		}
 	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil || len(sealed) < gcm.NonceSize() {
-		return "", errors.New("invalid encrypted secret")
-	}
-	secret, err := gcm.Open(nil, sealed[:gcm.NonceSize()], sealed[gcm.NonceSize():], nil)
-	return string(secret), err
+	return secret, nil
 }
 
 func totpURL(username, secret string) string {

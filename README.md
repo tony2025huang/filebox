@@ -115,7 +115,9 @@ filebox locks clear --data=./data --user=2
 filebox locks clear --data=./data --all
 ```
 
-生产构建：`make build` 后使用 `make start`；Windows 可运行 `bin/filebox.exe`，Linux 使用 `make build-linux`。生产环境必须设置强随机 `FILEBOX_JWT_SECRET`，并通过 HTTPS 反向代理。
+生产构建：`make build` 后使用 `make start`；Windows 可运行 `bin/filebox.exe`，Linux 使用 `make build-linux`。生产环境必须设置强随机 `FILEBOX_JWT_SECRET`，并通过 HTTPS 反向代理。建议同时配置独立静态加密密钥，避免 TOTP secret 与同步凭据继续依赖 JWT 密钥。
+
+独立静态加密密钥通过 `--encryption-key` 或 `FILEBOX_ENCRYPTION_KEY` 配置，也可写入 `<dataDir>/config/secrets.json` 的 `encryptionKey` 字段；命令行参数优先于环境变量，环境变量优先于该文件。密钥必须是严格标准 Base64，解码后恰好 32 字节（使用密码学安全随机源生成，不能使用密码、JWT secret 或短字符串）。未配置时服务不会拒绝启动，但会发出清晰警告并继续使用旧的 `SHA256(JWTSecret)` 派生密钥；配置后新值使用版本化 AES-256-GCM 信封，旧值在成功读取时惰性迁移。备份使用 `--passphrase-file` 时会一起保护两种密钥材料。
 
 ## 服务日志
 
@@ -222,6 +224,7 @@ v011 起存储结构由 `data/files/<user_id>/<yy>/<mm>/<name>` 改为 `data/fil
 | `--max-file-size` | `FILEBOX_MAX_FILE_SIZE` | `107374182400`（100 GiB） | 后端单文件大小上限 |
 | `--min-free-space` | `FILEBOX_MIN_FREE_SPACE` | `2147483648`（2 GiB） | 上传初始化要求的最小可用空间；`0` 关闭保护 |
 | `--jwt-secret` | `FILEBOX_JWT_SECRET` | `filebox-development-secret-change-me` | JWT HS256 签名密钥；生产必须替换 |
+| `--encryption-key` | `FILEBOX_ENCRYPTION_KEY` | 空 | 独立静态加密密钥；严格标准 Base64，解码后必须为 32 字节 |
 | `--register-enabled` | `FILEBOX_REGISTER_ENABLED` | `false` | 注册开关首次部署种子；此后以管理后台 `registerEnabled` 设置为准 |
 | `--admin-user` | `FILEBOX_ADMIN_USER` | `admin` | 首次创建的管理员用户名 |
 | `--admin-pass` | `FILEBOX_ADMIN_PASS` | `admin123` | 首次创建的管理员密码；首次登录必须修改 |

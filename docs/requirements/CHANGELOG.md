@@ -1,5 +1,12 @@
 # Requirement Change Log
 
+## 2026-09-04 - v023 独立静态加密密钥兼容迁移
+
+- 【业务确认】新增独立静态 AES-256-GCM 密钥配置：`--encryption-key`、`FILEBOX_ENCRYPTION_KEY` 或 `config/secrets.json` 的 `encryptionKey`，严格标准 Base64 解码后必须为 32 字节。
+- 【业务确认】TOTP secret 与同步凭据的新写入使用带 magic/version/key-slot 的版本化信封；旧版无版本 `SHA256(JWTSecret)` 派生密文继续可读，成功读取后在具备安全写路径时惰性重加密并持久化。
+- 【业务确认】未配置独立密钥不阻断已有部署，继续旧行为并输出启动警告；错误密钥、错误版本或认证失败只返回通用解密错误，不记录明文或密钥。
+- 【业务确认】备份口令模式同时保护 JWT 与独立密钥材料，并保持旧版仅含 JWT 的归档恢复兼容。
+
 ## 2026-09-02 - v020（用户反馈优化批次，11 项）
 
 任务书：`docs/CODEX_TASK_v020.md`；codex 分批实施（每批 1 项、独立提交推送，前端 `npm run build`/后端 `go test ./...` 验证；缺陷 4 由并发 codex 执行者提交、内容已核验）；日期 2026-09-02。
