@@ -1,9 +1,14 @@
 # FileBox Requirement State
 
-Updated: 2026-09-05 (v023：SFTP TOFU 主机密钥策略完成)
+Updated: 2026-09-05 (v024：文件夹上传单次确认并恢复传输状态速率)
 
 | Requirement | State | Notes |
 |---|---|---|
+| v024 folder upload single application confirmation | done | Folder picker/drop path shows the app-owned custom folder confirmation and marks the batch `folderConfirmed`; the >50-file generic bulk confirm is suppressed for that path (`needsBulkConfirm` pure helper + node tests). Plain file batches still get exactly one bulk confirmation. |
+| v024 many-file upload reliability | done | Busy-wait/interval gates replaced with bounded fair `FairStartGate` (max 3 concurrent file starts, FIFO); paused/failed/terminated waiters yield; chunk workers keep the global cap; queue waits are no longer reported as network failures. |
+| v024 visible per-file and overall rate | done | Active upload rows show transferred/total + live per-file rate (EMA of per-second loadedBytes deltas); overall rate sums active upload + download rates. |
+| v024 active/done separation with distinct results | done | Successful uploads move to the Done tab labelled success; failures show a distinct failure label and stay retryable; terminated uploads are kept as cancelled records with a distinct label and clear action. |
+
 | v020 delete/revoke confirm → custom modal | done | All 12 `window.confirm` call sites replaced: FilesView queue-based `askConfirm` (60s timeout=cancel) + modal-backdrop/modal-panel; Shares/Collections/Sync/Admin adopt the same pattern; zero `window.confirm` left in web/src; commits `ccc6272`/`54477fe`. |
 | v020 batch-download error cause + timestamped ZIP | done | ZIP build/read failures classified (ENOSPC/EDQUOT→disk full, EACCES/EPERM/EROFS→not writable, else→IO error; `code=ZIP_CREATE_FAILED`+`reason`; raw error only logged); archive named `filebox-batch-YYYYMMDD-HHMMSS.zip` on server and client; injectable `createBatchTempFile` + regression tests; commit `3ee19ce`. |
 | v020 transfer batch control | done | Drawer selection/select-all per upload & download section with pause/resume/terminate-selected and "all" actions; upload terminate calls `DELETE /api/upload-tasks/{taskId}`; downloads gain pause (AbortController) + Range resume (206/200); commit `cec1382`. |
