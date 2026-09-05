@@ -1,6 +1,13 @@
 # FileBox Requirement State
 
-Updated: 2026-09-05 (v024：收集随机/手动/无密码模式 + FilesView 传输体验)
+Updated: 2026-09-05 (v024.1：HSTS 示例/根目录忽略/收集凭据复制)
+
+| Requirement | State | Notes |
+|---|---|---|
+| v024.1 nginx HSTS example | done | 【业务确认】Conservative one-year `Strict-Transport-Security` (`max-age=31536000; includeSubDomains`) added only to the 443 TLS server block of `deploy/nginx.conf.example`; commented safe only after every subdomain serves HTTPS; no `preload`. |
+| v024.1 collection result default copy | done | 【业务确认】Default sharing no longer embeds the password in a URL: the result dialog shows the clean link and the one-time password; the primary copy action copies localized `链接：<url>\n密码：<password>` (trilingual `collectionCredentialText` pure helper + node tests assert the password never appears in the URL). `#password=` fragment remains only as backward-compatible API behavior and is not rendered as the default copy target; plaintext is cleared from memory when the dialog closes. |
+| v024.1 workspace-root .gitignore | done | Created `C:\Users\huangcp\dsh-project\.gitignore` — the root is not a Git repo, so it is reported separately and not committed to filebox — ignoring `.test-data/` (tokens/TOTP/DB/logs), `.tools/`, `filebox-demo/`; no existing test data removed. |
+
 
 | Requirement | State | Notes |
 |---|---|---|

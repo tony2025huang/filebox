@@ -17,6 +17,12 @@ server {
     ssl_certificate_key /etc/letsencrypt/live/filebox.example.com/privkey.pem;
     ssl_protocols TLSv1.2 TLSv1.3;
 
+    # HSTS: conservative one-year window. Safe only AFTER every subdomain of
+    # this zone serves HTTPS — includeSubDomains makes compliant browsers refuse
+    # plain-HTTP subdomains entirely. Do NOT add the "preload" directive unless
+    # the whole zone is verified HTTPS-ready.
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+
     root /var/www/filebox/dist;
     client_max_body_size 0;
     proxy_request_buffering off;

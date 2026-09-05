@@ -1,5 +1,12 @@
 # Requirement Change Log
 
+## 2026-09-05 - v024.1 加固：HSTS 示例、根目录忽略与收集凭据复制
+
+- 【业务确认】`deploy/nginx.conf.example` 的 443 TLS server 块新增保守 HSTS：`add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;`；注释明确仅在确认整域（含全部子域）均已启用 HTTPS 后适用，且不加入 `preload`。80 重定向块不受影响。
+- 【业务确认】收集创建/编辑结果弹窗默认分享不再把密码嵌入 URL：只展示干净链接与一次性访问密码；主复制操作按当前语言复制 `链接：<cleanUrl>\n密码：<password>`（zh-CN/zh-TW/en 三语前缀，`collectionCredentialText` 纯函数 + node 测试覆盖，且断言密码不会出现在链接 fragment 中）。`#password=` fragment 便捷链接仅保留为后端 API 兼容行为，不再作为默认结果/复制目标渲染（移除 `passwordConvenienceLabel` 相关 UI 与 `absolutePasswordUrl` 前端函数）。
+- 【业务确认】密码仍在创建/更换成功的弹窗内一次性展示，关闭弹窗即从内存态清空；列表/详情/DB 不持久化明文。
+- 根目录 `C:\Users\huangcp\dsh-project\.gitignore`（根目录目前不是 git 仓库，故单独报告、不随 filebox 仓库提交）：忽略 `.test-data/`（真实 token/TOTP secret/DB/日志）、`.tools/`、`filebox-demo/`，防止未来 `git init` 时误提交；不删除任何现有测试数据。
+
 ## 2026-09-05 - v024 收集创建/编辑支持随机/手动/无密码模式
 
 - 【业务确认】创建收集默认「自动生成密码」：服务端以 crypto/rand 生成 14 位无歧义字母表（不含 0/O/1/l/I）的安全密码，bcrypt 存哈希；响应一次性返回明文 `password` 与仅 fragment 携带的 `passwordUrl`（`/u/<token>#password=…`），DB/列表/详情此后只返回 `passwordProtected`。
