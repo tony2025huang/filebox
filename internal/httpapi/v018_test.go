@@ -106,6 +106,9 @@ func TestPaginationCapsPageSize(t *testing.T) {
 	if page, size := pagination(req("page=2&pageSize=20")); page != 2 || size != 20 {
 		t.Fatalf("pagination = %d/%d, want 2/20", page, size)
 	}
+	if page, size := pagination(req("page=9223372036854775807&pageSize=100")); page != maxPage || size != 100 {
+		t.Fatalf("large pagination = %d/%d, want %d/100", page, size, maxPage)
+	}
 }
 
 // TestNextSyncRunTime 验证周期任务下次执行时间计算（v018 #5）。

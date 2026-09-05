@@ -488,6 +488,40 @@ func TestBatchDownloadsReportMissingSourceContent(t *testing.T) {
 	}
 }
 
+func TestCleanupBatchDownloadTempFiles(t *testing.T) {
+	tmpDir := t.TempDir()
+	now := time.Now()
+	oldBatch := filepath.Join(tmpDir, "batch-download-old.zip")
+	oldGroup := filepath.Join(tmpDir, "batch-share-group-old.zip")
+	newBatch := filepath.Join(tmpDir, "batch-download-new.zip")
+	other := filepath.Join(tmpDir, "unrelated.zip")
+	for _, path := range []string{oldBatch, oldGroup, newBatch, other} {
+		if err := os.WriteFile(path, []byte("zip"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	oldTime := now.Add(-25 * time.Hour)
+	if err := os.Chtimes(oldBatch, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(oldGroup, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+	if err := cleanupBatchDownloadTempFiles(tmpDir, now); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{oldBatch, oldGroup} {
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("old temp file %q was not removed: %v", path, err)
+		}
+	}
+	for _, path := range []string{newBatch, other} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("non-expired/unrelated file %q changed: %v", path, err)
+		}
+	}
+}
+
 // TestDeleteUploadTaskReleasesQuotaAndTemporaryChunks verifies cancellation removes the pending reservation and tmp directory.
 // TestDeleteUploadTaskReleasesQuotaAndTemporaryChunks 验证取消任务会释放 pending 配额并清理临时目录。
 func TestDeleteUploadTaskReleasesQuotaAndTemporaryChunks(t *testing.T) {
@@ -600,6 +634,14 @@ func TestSecurityHeadersIncludeFrameProtection(t *testing.T) {
 	}
 	if !strings.Contains(recorder.Header().Get("Content-Security-Policy"), "frame-ancestors 'none'") {
 		t.Fatalf("CSP missing frame-ancestors protection: %q", recorder.Header().Get("Content-Security-Policy"))
+	}
+}
+
+func TestLoginUnknownUserUsesUniformFailure(t *testing.T) {
+	_, handler := newTestServer(t)
+	recorder := testJSONRequest(t, handler, http.MethodPost, "/api/auth/login", "", `{"username":"missing-login-user","password":"AnyPassword123!"}`)
+	if recorder.Code != http.StatusUnauthorized || !strings.Contains(recorder.Body.String(), "用户名或密码错误") {
+		t.Fatalf("unknown user login = %d: %s", recorder.Code, recorder.Body.String())
 	}
 }
 

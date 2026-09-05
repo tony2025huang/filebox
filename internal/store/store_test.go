@@ -301,6 +301,31 @@ func TestListUsersIncludesFolderAndReadyFileCounts(t *testing.T) {
 	}
 }
 
+func TestListUsersEscapesLikeWildcards(t *testing.T) {
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.EnsureAdmin("admin", "admin123", 1024); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	for _, username := range []string{"literal%user", "literalXuser", "literal_user", "literalXuser2"} {
+		if err := db.CreateUser(ctx, username, "hash", "user", 1024); err != nil {
+			t.Fatal(err)
+		}
+	}
+	users, total, err := db.ListUsers(ctx, "%", 1, 20)
+	if err != nil || total != 1 || len(users) != 1 || users[0].Username != "literal%user" {
+		t.Fatalf("percent search = %#v, total=%d, err=%v", users, total, err)
+	}
+	users, total, err = db.ListUsers(ctx, "_", 1, 20)
+	if err != nil || total != 1 || len(users) != 1 || users[0].Username != "literal_user" {
+		t.Fatalf("underscore search = %#v, total=%d, err=%v", users, total, err)
+	}
+}
+
 func TestBatchDeleteFilesIsAtomicAndUpdatesQuota(t *testing.T) {
 	db, err := Open(t.TempDir())
 	if err != nil {

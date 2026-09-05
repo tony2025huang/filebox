@@ -3,6 +3,8 @@ package httpapi
 import (
 	"context"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -68,5 +70,70 @@ func TestShareGroupDownloadsRejectExpiredGroup(t *testing.T) {
 	download := testJSONRequest(t, handler, http.MethodGet, "/api/shared-groups/expired-download-group/download/"+strconv.FormatInt(fileID, 10), "", "")
 	if download.Code != http.StatusForbidden {
 		t.Fatalf("expired share group download = %d: %s", download.Code, download.Body.String())
+	}
+}
+
+func TestShareGroupDownloadDoesNotConsumeWhenFileMissing(t *testing.T) {
+	db, handler := newTestServer(t)
+	fileID := createTestShareGroup(t, db, time.Now().UTC().Add(time.Hour).Format(time.RFC3339), "missing-member-group")
+
+	download := testJSONRequest(t, handler, http.MethodGet, "/api/shared-groups/missing-member-group/download/"+strconv.FormatInt(fileID, 10), "", "")
+	if download.Code != http.StatusNotFound {
+		t.Fatalf("missing member download = %d: %s", download.Code, download.Body.String())
+	}
+	group, err := db.GetShareGroupByToken(context.Background(), "missing-member-group")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if group.DownloadCount != 0 {
+		t.Fatalf("missing member consumed download count = %d, want 0", group.DownloadCount)
+	}
+}
+
+func TestShareGroupZipBatchRefundsOnFailure(t *testing.T) {
+	db, handler := newTestServer(t)
+	user, err := db.GetUserByUsername("admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	fileIDs := make([]int64, 0, 2)
+	for _, name := range []string{"present.txt", "missing.txt"} {
+		storagePath := filepath.Join("files", strconv.FormatInt(user.ID, 10), name)
+		result, insertErr := db.DB.Exec("INSERT INTO files(user_id, name, stored_name, size, mime, sha256, md5, status, storage_path, created_at) VALUES(?, ?, ?, 7, 'text/plain', 'sha', 'md5', 'ready', ?, ?)", user.ID, name, name, storagePath, now)
+		if insertErr != nil {
+			t.Fatal(insertErr)
+		}
+		id, idErr := result.LastInsertId()
+		if idErr != nil {
+			t.Fatal(idErr)
+		}
+		fileIDs = append(fileIDs, id)
+	}
+	presentPath := filepath.Join(db.DataDir, "files", strconv.FormatInt(user.ID, 10), "present.txt")
+	if err := os.MkdirAll(filepath.Dir(presentPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(presentPath, []byte("present"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(db.DataDir, "tmp"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := db.CreateShareGroup(context.Background(), user.ID, "batch-refund-group", fileIDs, time.Now().UTC().Add(time.Hour).Format(time.RFC3339), 2); err != nil {
+		t.Fatal(err)
+	}
+
+	body := `{"ids":[` + strconv.FormatInt(fileIDs[0], 10) + "," + strconv.FormatInt(fileIDs[1], 10) + `]}`
+	download := testJSONRequest(t, handler, http.MethodPost, "/api/shared-groups/batch-refund-group/batch-download", "", body)
+	if download.Code != http.StatusNotFound {
+		t.Fatalf("failed share-group batch download = %d: %s", download.Code, download.Body.String())
+	}
+	group, err := db.GetShareGroupByToken(context.Background(), "batch-refund-group")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if group.DownloadCount != 0 {
+		t.Fatalf("failed share-group batch consumed download count = %d, want 0", group.DownloadCount)
 	}
 }

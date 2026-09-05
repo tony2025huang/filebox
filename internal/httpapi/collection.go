@@ -111,7 +111,7 @@ func (s *Server) listCollections(w http.ResponseWriter, r *http.Request) {
 	}
 	page, pageSize := pagination(r)
 	total := len(result)
-	start := (page - 1) * pageSize
+	start := int(int64(page-1) * int64(pageSize))
 	if start >= total {
 		start = total
 	}

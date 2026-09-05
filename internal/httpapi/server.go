@@ -78,6 +78,11 @@ type Server struct {
 }
 
 const uploadChunkIdleTimeout = 30 * time.Second
+const batchDownloadTempMaxAge = 24 * time.Hour
+const batchDownloadTempCleanupInterval = time.Hour
+const maxPage = 1_000_000
+
+var loginDummyPasswordHash = []byte("$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy")
 
 // requestBodyWithIdleTimeout closes a stalled upload body and resets the timer after each read.
 // requestBodyWithIdleTimeout 在每次读到数据后重置计时，长时间无数据时关闭上传请求体。
@@ -333,7 +338,55 @@ func NewServer(db *store.Store, config Config) *Server {
 	if config.JWTExpiry <= 0 {
 		config.JWTExpiry = 7 * 24 * time.Hour
 	}
-	return &Server{store: db, config: config, rateLimiter: rateLimiter{buckets: make(map[int64]*rate.Limiter), lastSeen: make(map[int64]time.Time), publicBuckets: make(map[string]*rate.Limiter), publicLastSeen: make(map[string]time.Time)}, findUploadConflict: db.FindUploadConflict, syncLocks: make(map[int64]*sync.Mutex), syncProgress: make(map[int64]*syncRunProgress)}
+	server := &Server{store: db, config: config, rateLimiter: rateLimiter{buckets: make(map[int64]*rate.Limiter), lastSeen: make(map[int64]time.Time), publicBuckets: make(map[string]*rate.Limiter), publicLastSeen: make(map[string]time.Time)}, findUploadConflict: db.FindUploadConflict, syncLocks: make(map[int64]*sync.Mutex), syncProgress: make(map[int64]*syncRunProgress)}
+	server.startBatchDownloadTempCleanup()
+	return server
+}
+
+func (s *Server) startBatchDownloadTempCleanup() {
+	if err := cleanupBatchDownloadTempFiles(filepath.Join(s.config.DataDir, "tmp"), time.Now()); err != nil {
+		log.Printf("cleanup batch download temp files: %v", err)
+	}
+	go func() {
+		ticker := time.NewTicker(batchDownloadTempCleanupInterval)
+		defer ticker.Stop()
+		for now := range ticker.C {
+			if err := cleanupBatchDownloadTempFiles(filepath.Join(s.config.DataDir, "tmp"), now); err != nil {
+				log.Printf("cleanup batch download temp files: %v", err)
+			}
+		}
+	}()
+}
+
+func cleanupBatchDownloadTempFiles(tmpDir string, now time.Time) error {
+	entries, err := os.ReadDir(tmpDir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	cutoff := now.Add(-batchDownloadTempMaxAge)
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || (!strings.HasPrefix(name, "batch-download-") && !strings.HasPrefix(name, "batch-share-group-")) || !strings.HasSuffix(name, ".zip") {
+			continue
+		}
+		info, infoErr := entry.Info()
+		if errors.Is(infoErr, os.ErrNotExist) {
+			continue
+		}
+		if infoErr != nil {
+			return infoErr
+		}
+		if !info.ModTime().Before(cutoff) {
+			continue
+		}
+		if removeErr := os.Remove(filepath.Join(tmpDir, name)); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+			return removeErr
+		}
+	}
+	return nil
 }
 
 func (s *Server) Handler() http.Handler {
@@ -926,6 +979,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	}
 	user, err := s.store.GetUserByUsername(username)
 	if errors.Is(err, store.ErrNotFound) {
+		_ = bcrypt.CompareHashAndPassword(loginDummyPasswordHash, []byte(input.Password))
 		loginReason = "user_not_found"
 		s.recordIPFailure(r, settings)
 		s.recordAudit(r, nil, username, "login", "", "failure", "user_not_found")
@@ -2919,7 +2973,7 @@ func (s *Server) listShares(w http.ResponseWriter, r *http.Request) {
 	}
 	page, pageSize := pagination(r)
 	total := len(items)
-	start := (page - 1) * pageSize
+	start := int(int64(page-1) * int64(pageSize))
 	if start >= total {
 		start = total
 	}
@@ -4582,6 +4636,9 @@ func randomID() (string, error) {
 
 func pagination(r *http.Request) (int, int) {
 	page := parsePositive(r.URL.Query().Get("page"), 1)
+	if page > maxPage {
+		page = maxPage
+	}
 	pageSize := parsePositive(r.URL.Query().Get("pageSize"), 20)
 	if pageSize > 100 {
 		pageSize = 100

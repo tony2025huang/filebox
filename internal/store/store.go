@@ -1368,12 +1368,13 @@ func (s *Store) DeleteUser(ctx context.Context, id int64) ([]string, error) {
 func (s *Store) ListUsers(ctx context.Context, keyword string, page, pageSize int) ([]User, int, error) {
 	// ListUsers 按用户名搜索并分页返回账户记录和总数。
 	// ListUsers searches by username and returns paginated accounts with the total count.
-	pattern := "%" + keyword + "%"
+	pageSize, offset := listPageOffset(page, pageSize)
+	pattern := "%" + escapeLike(keyword) + "%"
 	var total int
-	if err := s.DB.QueryRowContext(ctx, "SELECT COUNT(id) FROM users WHERE username LIKE ?", pattern).Scan(&total); err != nil {
+	if err := s.DB.QueryRowContext(ctx, "SELECT COUNT(id) FROM users WHERE username LIKE ? ESCAPE '\\'", pattern).Scan(&total); err != nil {
 		return nil, 0, err
 	}
-	rows, err := s.DB.QueryContext(ctx, "SELECT id, username, password_hash, role, language, quota_bytes, used_bytes, disabled, failed_attempts, COALESCE(locked_until, ''), COALESCE(must_change_password, 0), COALESCE(totp_secret, ''), COALESCE(totp_enabled, 0), COALESCE(last_used_totp, ''), COALESCE(ip_acl_enabled, 0), COALESCE(ip_whitelist, ''), COALESCE(read_only_from, ''), COALESCE(read_only_until, ''), created_at, updated_at, (SELECT COUNT(id) FROM folders WHERE folders.user_id = users.id), (SELECT COUNT(id) FROM files WHERE files.user_id = users.id AND files.status = 'ready') FROM users WHERE username LIKE ? ORDER BY id LIMIT ? OFFSET ?", pattern, pageSize, (page-1)*pageSize)
+	rows, err := s.DB.QueryContext(ctx, "SELECT id, username, password_hash, role, language, quota_bytes, used_bytes, disabled, failed_attempts, COALESCE(locked_until, ''), COALESCE(must_change_password, 0), COALESCE(totp_secret, ''), COALESCE(totp_enabled, 0), COALESCE(last_used_totp, ''), COALESCE(ip_acl_enabled, 0), COALESCE(ip_whitelist, ''), COALESCE(read_only_from, ''), COALESCE(read_only_until, ''), created_at, updated_at, (SELECT COUNT(id) FROM folders WHERE folders.user_id = users.id), (SELECT COUNT(id) FROM files WHERE files.user_id = users.id AND files.status = 'ready') FROM users WHERE username LIKE ? ESCAPE '\\' ORDER BY id LIMIT ? OFFSET ?", pattern, pageSize, offset)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -2962,6 +2963,22 @@ func escapeLike(value string) string {
 	return value
 }
 
+func listPageOffset(page, pageSize int) (int, int64) {
+	if page < 1 {
+		page = 1
+	}
+	if page > 1_000_000 {
+		page = 1_000_000
+	}
+	if pageSize < 1 {
+		pageSize = 20
+	}
+	if pageSize > 100 {
+		pageSize = 100
+	}
+	return pageSize, int64(page-1) * int64(pageSize)
+}
+
 func scanFile(row *sql.Row) (File, error) {
 	var file File
 	err := row.Scan(&file.ID, &file.UserID, &file.Name, &file.StoredName, &file.Size, &file.Mime, &file.SHA256, &file.MD5, &file.Status, &file.StoragePath, &file.CreatedAt, &file.DeletedAt)
@@ -2974,8 +2991,9 @@ func scanFile(row *sql.Row) (File, error) {
 func (s *Store) ListFiles(ctx context.Context, userID int64, admin bool, keyword, dir string, page, pageSize int) ([]File, int, error) {
 	// ListFiles 只返回 ready 文件；普通用户按所有权隔离，管理员可查看全部文件；dir 限定 storage_path 前缀（v011 目录过滤）。
 	// ListFiles returns ready files only; regular users are isolated by ownership while admins can view all files; dir filters by storage-path prefix.
-	pattern := "%" + keyword + "%"
-	where := "status = 'ready' AND name LIKE ?"
+	pageSize, offset := listPageOffset(page, pageSize)
+	pattern := "%" + escapeLike(keyword) + "%"
+	where := "status = 'ready' AND name LIKE ? ESCAPE '\\'"
 	args := []any{pattern}
 	if !admin {
 		where += " AND user_id = ?"
@@ -3012,7 +3030,7 @@ func (s *Store) ListFiles(ctx context.Context, userID int64, admin bool, keyword
 	if err := s.DB.QueryRowContext(ctx, "SELECT COUNT(id) FROM files WHERE "+where, countArgs...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
-	args = append(args, pageSize, (page-1)*pageSize)
+	args = append(args, pageSize, offset)
 	rows, err := s.DB.QueryContext(ctx, "SELECT id, user_id, name, stored_name, size, mime, sha256, md5, status, storage_path, created_at, COALESCE(deleted_at, '') FROM files WHERE "+where+" ORDER BY created_at DESC LIMIT ? OFFSET ?", args...)
 	if err != nil {
 		return nil, 0, err
@@ -3234,6 +3252,7 @@ func (s *Store) AddAuditLogWithShareOwner(ctx context.Context, userID, shareOwne
 func (s *Store) ListAuditLogs(ctx context.Context, userID *int64, action, result, keyword, from, to string, page, pageSize int) ([]AuditLog, int, error) {
 	// ListAuditLogs 支持按用户、操作、结果、关键字和时间范围筛选审计记录并分页返回。
 	// ListAuditLogs filters audit records by user, action, result, keyword, and time range, then returns a page.
+	pageSize, offset := listPageOffset(page, pageSize)
 	where := []string{"1 = 1"}
 	args := []any{}
 	if userID != nil {
@@ -3249,8 +3268,8 @@ func (s *Store) ListAuditLogs(ctx context.Context, userID *int64, action, result
 		args = append(args, result)
 	}
 	if keyword != "" {
-		where = append(where, "(username LIKE ? OR target LIKE ? OR ip LIKE ? OR reason LIKE ?)")
-		pattern := "%" + keyword + "%"
+		where = append(where, "(username LIKE ? ESCAPE '\\' OR target LIKE ? ESCAPE '\\' OR ip LIKE ? ESCAPE '\\' OR reason LIKE ? ESCAPE '\\')")
+		pattern := "%" + escapeLike(keyword) + "%"
 		args = append(args, pattern, pattern, pattern, pattern)
 	}
 	if from != "" {
@@ -3267,7 +3286,7 @@ func (s *Store) ListAuditLogs(ctx context.Context, userID *int64, action, result
 		return nil, 0, err
 	}
 	queryArgs := append([]any{}, args...)
-	queryArgs = append(queryArgs, pageSize, (page-1)*pageSize)
+	queryArgs = append(queryArgs, pageSize, offset)
 	rows, err := s.DB.QueryContext(ctx, "SELECT id, user_id, share_owner_id, username, action, target, ip, result, COALESCE(reason, ''), created_at FROM audit_logs WHERE "+condition+" ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?", queryArgs...)
 	if err != nil {
 		return nil, 0, err
@@ -3287,13 +3306,14 @@ func (s *Store) ListAuditLogs(ctx context.Context, userID *int64, action, result
 // ListShareAuditLogs returns download activity for an owner-scoped share token.
 // ListShareAuditLogs 返回归属分享 token 的下载活动。
 func (s *Store) ListShareAuditLogs(ctx context.Context, token string, ownerID int64, page, pageSize int) ([]AuditLog, int, error) {
+	pageSize, offset := listPageOffset(page, pageSize)
 	args := []any{token, ownerID}
 	condition := "action = 'share_download' AND target = ? AND share_owner_id = ?"
 	var total int
 	if err := s.DB.QueryRowContext(ctx, "SELECT COUNT(id) FROM audit_logs WHERE "+condition, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
-	queryArgs := append(args, pageSize, (page-1)*pageSize)
+	queryArgs := append(args, pageSize, offset)
 	rows, err := s.DB.QueryContext(ctx, "SELECT id, user_id, share_owner_id, username, action, target, ip, result, COALESCE(reason, ''), created_at FROM audit_logs WHERE "+condition+" ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?", queryArgs...)
 	if err != nil {
 		return nil, 0, err

@@ -5,6 +5,7 @@ package httpapi
 
 import (
 	"archive/zip"
+	"context"
 	"errors"
 	"io"
 	"log"
@@ -126,7 +127,7 @@ func (s *Server) listShareGroups(w http.ResponseWriter, r *http.Request) {
 	}
 	page, pageSize := pagination(r)
 	total := len(items)
-	start := (page - 1) * pageSize
+	start := int(int64(page-1) * int64(pageSize))
 	if start >= total {
 		start = total
 	}
@@ -250,6 +251,13 @@ func (s *Server) shareGroupDownload(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "分享链接已过期")
 		return
 	}
+	handle, err := os.Open(filepath.Join(s.config.DataDir, item.File.StoragePath))
+	if err != nil {
+		reason = "content_not_found"
+		writeError(w, http.StatusNotFound, "文件内容不存在")
+		return
+	}
+	defer handle.Close()
 	allowed, err := s.store.IncrementShareGroupDownloads(r.Context(), token, group.MaxDownloads, r.Header.Get("Range") != "")
 	if err != nil {
 		reason = "download_count_failed"
@@ -261,13 +269,6 @@ func (s *Server) shareGroupDownload(w http.ResponseWriter, r *http.Request) {
 		writeErrorData(w, http.StatusForbidden, "分享次数已用完", map[string]string{"code": "SHARE_DOWNLOAD_LIMIT"})
 		return
 	}
-	handle, err := os.Open(filepath.Join(s.config.DataDir, item.File.StoragePath))
-	if err != nil {
-		reason = "content_not_found"
-		writeError(w, http.StatusNotFound, "文件内容不存在")
-		return
-	}
-	defer handle.Close()
 	w.Header().Set("Content-Type", effectiveFileMIME(item.File))
 	w.Header().Set("Content-Disposition", contentDisposition(item.File.Name))
 	result, reason = "success", ""
@@ -363,6 +364,13 @@ func (s *Server) shareGroupBatchDownload(w http.ResponseWriter, r *http.Request)
 		writeErrorData(w, http.StatusForbidden, "分享次数已用完", map[string]string{"code": "SHARE_DOWNLOAD_LIMIT"})
 		return
 	}
+	defer func() {
+		if result != "success" {
+			if refundErr := s.store.RefundShareGroupDownloads(context.Background(), token, 1); refundErr != nil {
+				log.Printf("refund share-group download: %v", refundErr)
+			}
+		}
+	}()
 	temp, err := createBatchTempFile(filepath.Join(s.config.DataDir, "tmp"), "batch-share-group-*.zip")
 	if err != nil {
 		reason = "archive_failed"

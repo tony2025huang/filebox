@@ -268,6 +268,17 @@ WHERE token = ? AND revoked_at IS NULL AND expires_at > ? AND (max_downloads = 0
 	return count == 1, nil
 }
 
+// RefundShareGroupDownloads atomically returns slots reserved by a failed aggregate download.
+func (s *Store) RefundShareGroupDownloads(ctx context.Context, token string, count int64) error {
+	if count <= 0 {
+		return nil
+	}
+	_, err := s.DB.ExecContext(ctx, `UPDATE share_groups SET
+download_count = CASE WHEN download_count >= ? THEN download_count - ? ELSE 0 END
+WHERE token = ?`, count, count, token)
+	return err
+}
+
 // UpdateShareGroupExpiry 延长聚合分享有效期，且新截止时间不会缩短原有截止时间（#6）。
 // UpdateShareGroupExpiry extends an aggregate share without moving its expiry backwards (#6).
 func (s *Store) UpdateShareGroupExpiry(ctx context.Context, token string, newExpiresAt time.Time, ownerID int64) error {
