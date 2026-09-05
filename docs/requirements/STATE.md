@@ -1,6 +1,10 @@
 # FileBox Requirement State
 
-Updated: 2026-09-05 (v024：文件夹上传单次确认并恢复传输状态速率)
+Updated: 2026-09-05 (v024：收集随机/手动/无密码模式 + FilesView 传输体验)
+
+| Requirement | State | Notes |
+|---|---|---|
+| v024 collection random/manual/none password modes | done | Create defaults to server-generated random (crypto/rand, unambiguous alphabet), bcrypt-hashed, plaintext + `#password=` fragment convenience URL revealed exactly once; edit supports keep/random/manual/none; legacy clients without `passwordMode` keep old semantics and never see plaintext. |
 
 | Requirement | State | Notes |
 |---|---|---|

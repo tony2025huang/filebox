@@ -3,14 +3,17 @@ package httpapi
 import (
 	"context"
 	"crypto/md5"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"math/big"
 	"mime"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -29,6 +32,9 @@ type collectionCreateRequest struct {
 	MaxUploads     int    `json:"maxUploads"`
 	MaxFileBytes   int64  `json:"maxFileBytes"`
 	Password       string `json:"password"`
+	// PasswordMode 显式密码模式：""（遗留，等价于 password 非空即手动设置）、"random"（服务端生成）、"manual"、"none"。
+	// PasswordMode is the explicit password contract: "" legacy, "random", "manual", or "none".
+	PasswordMode string `json:"passwordMode"`
 }
 
 // collectionUpdateRequest 是收集编辑请求体；expiresAt 为绝对时间（RFC3339），0=不限沿用创建语义。
@@ -39,6 +45,9 @@ type collectionUpdateRequest struct {
 	MaxUploads   int     `json:"maxUploads"`
 	MaxFileBytes int64   `json:"maxFileBytes"`
 	Password     *string `json:"password"`
+	// PasswordMode 显式密码模式：""（遗留，password 指针语义）、"keep"（保持不变）、"random"、"manual"、"none"。
+	// PasswordMode is the explicit password contract: "" legacy, "keep", "random", "manual", or "none".
+	PasswordMode string `json:"passwordMode"`
 }
 
 type collectionUploadInitRequest struct {
@@ -76,7 +85,7 @@ func (s *Server) createCollection(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "收集链接参数无效")
 		return
 	}
-	passwordHash, err := hashCollectionPassword(input.Password)
+	revealPassword, passwordHash, err := planCollectionCreatePassword(input.PasswordMode, input.Password)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "收集链接密码无效")
 		return
@@ -103,6 +112,10 @@ func (s *Server) createCollection(w http.ResponseWriter, r *http.Request) {
 	result := publicCollection(collection, false)
 	result["token"] = collection.Token
 	result["url"] = "/u/" + collection.Token
+	if revealPassword != "" {
+		result["password"] = revealPassword
+		result["passwordUrl"] = collectionPasswordFragmentURL(collection.Token, revealPassword)
+	}
 	writeData(w, http.StatusCreated, "收集链接已创建", result)
 }
 
@@ -214,22 +227,10 @@ func (s *Server) updateCollection(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "收集链接参数无效")
 		return
 	}
-	var passwordHash *string
-	if input.Password != nil {
-		if _, ownerErr := s.store.GetUploadCollection(r.Context(), id, user.ID, user.Role == "admin"); errors.Is(ownerErr, store.ErrNotFound) {
-			writeError(w, http.StatusNotFound, "收集链接不存在")
-			return
-		} else if ownerErr != nil {
-			log.Printf("check collection password owner: %v", ownerErr)
-			writeError(w, http.StatusInternalServerError, "保存收集链接失败")
-			return
-		}
-		hash, hashErr := hashCollectionPassword(*input.Password)
-		if hashErr != nil {
-			writeError(w, http.StatusBadRequest, "收集链接密码无效")
-			return
-		}
-		passwordHash = &hash
+	revealPassword, passwordHash, err := planCollectionUpdatePassword(input.PasswordMode, input.Password)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "收集链接密码无效")
+		return
 	}
 	collection, err := s.store.UpdateUploadCollection(r.Context(), id, user.ID, user.Role == "admin", input.Name, input.ExpiresAt, input.MaxUploads, input.MaxFileBytes, passwordHash)
 	switch {
@@ -254,6 +255,10 @@ func (s *Server) updateCollection(w http.ResponseWriter, r *http.Request) {
 	s.recordAudit(r, &user.ID, user.Username, "collection_update", collection.Name, "success", "update")
 	result := publicCollection(collection, true)
 	result["url"] = "/u/" + collection.Token
+	if revealPassword != "" {
+		result["password"] = revealPassword
+		result["passwordUrl"] = collectionPasswordFragmentURL(collection.Token, revealPassword)
+	}
 	writeData(w, http.StatusOK, "收集链接已更新", result)
 }
 
@@ -434,6 +439,123 @@ func hashCollectionPassword(password string) (string, error) {
 		return "", err
 	}
 	return string(hash), nil
+}
+
+// Collection password-mode constants for the v024 explicit password contract.
+// passwordMode 为空时保持遗留行为（仅 password 字段），随机/手动/无密码为显式模式。
+const (
+	collectionPasswordModeRandom = "random"
+	collectionPasswordModeManual = "manual"
+	collectionPasswordModeNone   = "none"
+	collectionPasswordModeKeep   = "keep"
+)
+
+var (
+	errCollectionPasswordModeInvalid    = errors.New("invalid collection password mode")
+	errCollectionPasswordManualRequired = errors.New("manual collection password required")
+)
+
+// collectionPasswordChangeRequested reports whether an update intends to modify the
+// stored password. Legacy callers omit passwordMode and signal change via the
+// password pointer; explicit modes random/manual/none always request a change,
+// while keep never does.
+func collectionPasswordChangeRequested(mode string, password *string) bool {
+	switch mode {
+	case collectionPasswordModeKeep:
+		return false
+	case collectionPasswordModeRandom, collectionPasswordModeManual, collectionPasswordModeNone:
+		return true
+	}
+	return password != nil
+}
+
+// planCollectionCreatePassword resolves the create-time password plan.
+// Legacy callers (mode "") keep the old manual-or-none behavior and never receive
+// a plaintext reveal; explicit random/manual reveal the effective password once so
+// the owner can copy it and the password-bearing fragment link.
+func planCollectionCreatePassword(mode, password string) (reveal string, hash string, err error) {
+	switch mode {
+	case "":
+		hash, err = hashCollectionPassword(password)
+		return "", hash, err
+	case collectionPasswordModeRandom:
+		plain, randomErr := randomCollectionPassword()
+		if randomErr != nil {
+			return "", "", randomErr
+		}
+		hash, err = hashCollectionPassword(plain)
+		return plain, hash, err
+	case collectionPasswordModeManual:
+		if password == "" {
+			return "", "", errCollectionPasswordManualRequired
+		}
+		hash, err = hashCollectionPassword(password)
+		return password, hash, err
+	case collectionPasswordModeNone:
+		if password != "" {
+			return "", "", errCollectionPasswordModeInvalid
+		}
+		return "", "", nil
+	default:
+		return "", "", errCollectionPasswordModeInvalid
+	}
+}
+
+// planCollectionUpdatePassword resolves the update-time password plan.
+// Legacy mode "" keeps the pointer semantics (nil = no change, "" = clear).
+// "keep" never changes; random/manual set a new password and reveal it once;
+// "none" clears it.
+func planCollectionUpdatePassword(mode string, password *string) (reveal string, hashPtr *string, err error) {
+	switch mode {
+	case "":
+		if password == nil {
+			return "", nil, nil
+		}
+		hash, hashErr := hashCollectionPassword(*password)
+		return "", &hash, hashErr
+	case collectionPasswordModeKeep:
+		return "", nil, nil
+	case collectionPasswordModeRandom:
+		plain, randomErr := randomCollectionPassword()
+		if randomErr != nil {
+			return "", nil, randomErr
+		}
+		hash, hashErr := hashCollectionPassword(plain)
+		return plain, &hash, hashErr
+	case collectionPasswordModeManual:
+		if password == nil || *password == "" {
+			return "", nil, errCollectionPasswordManualRequired
+		}
+		hash, hashErr := hashCollectionPassword(*password)
+		return *password, &hash, hashErr
+	case collectionPasswordModeNone:
+		empty := ""
+		return "", &empty, nil
+	default:
+		return "", nil, errCollectionPasswordModeInvalid
+	}
+}
+
+// randomCollectionPassword returns a cryptographically secure, user-typable
+// password drawn from an unambiguous alphabet (no 0/O/1/l/I), 14 chars ≈ 81 bits.
+func randomCollectionPassword() (string, error) {
+	const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789"
+	result := make([]byte, 14)
+	for index := range result {
+		value, err := rand.Int(rand.Reader, big.NewInt(int64(len(alphabet))))
+		if err != nil {
+			return "", err
+		}
+		result[index] = alphabet[value.Int64()]
+	}
+	return string(result), nil
+}
+
+// collectionPasswordFragmentURL builds the owner-facing convenience URL that
+// carries the password in the URL fragment (#password=) only. Fragments never
+// leave the browser, so the password is not sent to the server in the request.
+func collectionPasswordFragmentURL(token, password string) string {
+	return "/u/" + token + "#password=" + url.QueryEscape(password)
 }
 
 // authorizeCollectionRequest validates the collection password when one is set.

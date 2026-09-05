@@ -1,5 +1,13 @@
 # Requirement Change Log
 
+## 2026-09-05 - v024 收集创建/编辑支持随机/手动/无密码模式
+
+- 【业务确认】创建收集默认「自动生成密码」：服务端以 crypto/rand 生成 14 位无歧义字母表（不含 0/O/1/l/I）的安全密码，bcrypt 存哈希；响应一次性返回明文 `password` 与仅 fragment 携带的 `passwordUrl`（`/u/<token>#password=…`），DB/列表/详情此后只返回 `passwordProtected`。
+- 【业务确认】三种显式模式契约：`passwordMode=random|manual|none`；manual 必须带非空 `password`；none 不允许同时传密码；非法模式 400。
+- 【业务确认】编辑（PUT）支持 `passwordMode=keep|random|manual|none`：keep/遗留空模式不改动；none 清除密码；random/manual 更换密码并仅在该次响应一次性揭示明文与 fragment 链接。
+- 【业务确认】`passwordMode` 缺省时保持旧语义（create 按 password 字段、update 按 password 指针）以兼容既有客户端；遗留路径绝不回显明文。
+- 前端：创建表单三模式单选（默认 random）+ manual 密码输入；结果弹窗一次性展示密码与「带密码链接」并提示仅此一次；列表项对受保护收集显示锁标记。
+
 ## 2026-09-05 - v024 FilesView 文件夹上传与传输体验修复
 
 - 【业务确认】文件夹上传只展示一次应用自绘确认：目录/拖放来源经自定义确认后，以 `skipBulkConfirm` 抑制 >50 文件的通用批量确认；纯文件批量仍保留一次通用确认（`needsBulkConfirm` 纯函数 + node 测试覆盖）。
