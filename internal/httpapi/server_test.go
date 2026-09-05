@@ -1283,7 +1283,7 @@ func TestSharePreviewLimitsLargeTextAndRange(t *testing.T) {
 	content := bytes.Repeat([]byte("preview content\n"), 4097)
 	file := uploadTestFile(t, handler, token, "large-preview.txt", "text/plain", content)
 	id := int64(file["id"].(float64))
-	created := testJSONRequest(t, handler, http.MethodPost, "/api/files/"+strconv.FormatInt(id, 10)+"/share", token, `{"expiresInHours":1,"maxDownloads":1}`)
+	created := testJSONRequest(t, handler, http.MethodPost, "/api/files/"+strconv.FormatInt(id, 10)+"/share", token, `{"expiresInHours":1,"maxDownloads":0}`)
 	if created.Code != http.StatusCreated {
 		t.Fatalf("create share status = %d: %s", created.Code, created.Body.String())
 	}
@@ -1310,7 +1310,7 @@ func TestSharePreviewLimitsLargeTextAndRange(t *testing.T) {
 	}
 }
 
-func TestSharePreviewDoesNotConsumeDownloadCount(t *testing.T) {
+func TestSharePreviewConsumesDownloadCount(t *testing.T) {
 	db, handler := newTestServer(t)
 	token := testAdminToken(t, handler)
 	file := uploadTestFile(t, handler, token, "preview.txt", "text/plain", []byte("preview content"))
@@ -1329,20 +1329,48 @@ func TestSharePreviewDoesNotConsumeDownloadCount(t *testing.T) {
 	}
 	meta := testJSONRequest(t, handler, http.MethodGet, "/api/files/shared/"+shareToken+"/meta", "", "")
 	metaData := responseData(t, meta)
-	if metaData["downloadAvailable"] != true {
-		t.Fatalf("preview consumed a download slot: %#v", metaData)
+	if metaData["downloadAvailable"] != false || metaData["downloadCount"] != float64(1) {
+		t.Fatalf("preview did not consume a download slot: %#v", metaData)
 	}
 	down := testBinaryRequest(t, handler, http.MethodGet, "/api/files/shared/"+shareToken+"/download", "", nil)
-	if down.Code != http.StatusOK || !bytes.Equal(down.Body.Bytes(), []byte("preview content")) {
-		t.Fatalf("share download after preview = %d, %q", down.Code, down.Body.String())
+	if down.Code != http.StatusForbidden {
+		t.Fatalf("share download after preview = %d, want 403", down.Code)
 	}
-	limited := testBinaryRequest(t, handler, http.MethodGet, "/api/files/shared/"+shareToken+"/download", "", nil)
-	if limited.Code != http.StatusForbidden {
-		t.Fatalf("limited share download status = %d", limited.Code)
+	secondPreview := testBinaryRequest(t, handler, http.MethodGet, "/api/files/shared/"+shareToken+"/preview", "", nil)
+	if secondPreview.Code != http.StatusForbidden {
+		t.Fatalf("second share preview status = %d, want 403", secondPreview.Code)
 	}
 	var previewResult string
-	if err := db.DB.QueryRow("SELECT result FROM audit_logs WHERE action = 'share_preview' ORDER BY id DESC LIMIT 1").Scan(&previewResult); err != nil || previewResult != "success" {
+	if err := db.DB.QueryRow("SELECT result FROM audit_logs WHERE action = 'share_preview' AND result = 'success' ORDER BY id DESC LIMIT 1").Scan(&previewResult); err != nil || previewResult != "success" {
 		t.Fatalf("share_preview audit = %q, %v", previewResult, err)
+	}
+}
+
+func TestSharePreviewNonWhitelistedMIMEIsBoundedAndCounted(t *testing.T) {
+	_, handler := newTestServer(t)
+	token := testAdminToken(t, handler)
+	file := uploadTestFile(t, handler, token, "preview.bin", "application/octet-stream", []byte("binary preview content"))
+	id := int64(file["id"].(float64))
+	created := testJSONRequest(t, handler, http.MethodPost, "/api/files/"+strconv.FormatInt(id, 10)+"/share", token, `{"expiresInHours":1,"maxDownloads":1}`)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create share status = %d: %s", created.Code, created.Body.String())
+	}
+	shareToken := responseData(t, created)["token"].(string)
+	preview := testBinaryRequest(t, handler, http.MethodGet, "/api/files/shared/"+shareToken+"/preview", "", nil)
+	if preview.Code != http.StatusOK || !bytes.Equal(preview.Body.Bytes(), []byte("binary preview content")) {
+		t.Fatalf("non-whitelisted share preview = %d, %q", preview.Code, preview.Body.String())
+	}
+	if disposition := preview.Header().Get("Content-Disposition"); !strings.HasPrefix(disposition, "attachment; filename=\"preview.bin\"") {
+		t.Fatalf("non-whitelisted preview disposition = %q", preview.Header().Get("Content-Disposition"))
+	}
+	meta := testJSONRequest(t, handler, http.MethodGet, "/api/files/shared/"+shareToken+"/meta", "", "")
+	metaData := responseData(t, meta)
+	if metaData["downloadAvailable"] != false || metaData["downloadCount"] != float64(1) {
+		t.Fatalf("non-whitelisted preview quota = %#v", metaData)
+	}
+	secondPreview := testBinaryRequest(t, handler, http.MethodGet, "/api/files/shared/"+shareToken+"/preview", "", nil)
+	if secondPreview.Code != http.StatusForbidden {
+		t.Fatalf("second non-whitelisted preview status = %d, want 403", secondPreview.Code)
 	}
 }
 

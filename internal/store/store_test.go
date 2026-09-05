@@ -522,6 +522,46 @@ func TestShareDownloadRangeWindowDeduplicatesContinuousRanges(t *testing.T) {
 	}
 }
 
+func TestIncrementShareDownloadsRangeDeniedAfterLimit(t *testing.T) {
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.EnsureAdmin("admin", "admin123", 1024*1024); err != nil {
+		t.Fatal(err)
+	}
+	user, err := db.GetUserByUsername("admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	result, err := db.DB.Exec("INSERT INTO files(user_id, name, stored_name, size, mime, sha256, md5, status, storage_path, created_at) VALUES(?, 'range-limit.txt', 'range-limit.txt', 1, 'text/plain', 'sha', 'md5', 'ready', ?, ?)", user.ID, "files/admin/range-limit.txt", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fileID, err := result.LastInsertId()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := db.CreateShare(ctx, fileID, user.ID, "range-limit", time.Now().UTC().Add(time.Hour), 1); err != nil {
+		t.Fatal(err)
+	}
+	allowed, err := db.IncrementShareDownloads(ctx, "range-limit", 1, true)
+	if err != nil || !allowed {
+		t.Fatalf("initial limited Range = %t, %v; want allowed", allowed, err)
+	}
+	allowed, err = db.IncrementShareDownloads(ctx, "range-limit", 1, true)
+	if err != nil || allowed {
+		t.Fatalf("Range after limit = %t, %v; want denied", allowed, err)
+	}
+	share, err := db.GetShareByToken(ctx, "range-limit")
+	if err != nil || share.DownloadCount != 1 {
+		t.Fatalf("limited Range count = %d, %v; want 1", share.DownloadCount, err)
+	}
+}
+
 func TestPruneSharesRemovesRevokedAndExpired(t *testing.T) {
 	db, err := Open(t.TempDir())
 	if err != nil {

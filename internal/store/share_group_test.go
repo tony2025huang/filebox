@@ -148,3 +148,43 @@ func TestShareGroupFileCountMatchesReadyMembers(t *testing.T) {
 		t.Fatalf("group files = %d, %v", len(files), err)
 	}
 }
+
+func TestIncrementShareGroupDownloadsRangeDeniedAfterLimit(t *testing.T) {
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.EnsureAdmin("admin", "admin123", 1024*1024); err != nil {
+		t.Fatal(err)
+	}
+	user, err := db.GetUserByUsername("admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	result, err := db.DB.Exec("INSERT INTO files(user_id, name, stored_name, size, mime, sha256, md5, status, storage_path, created_at) VALUES(?, 'group-range.txt', 'group-range.txt', 1, 'text/plain', 'sha', 'md5', 'ready', ?, ?)", user.ID, "files/admin/group-range.txt", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fileID, err := result.LastInsertId()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if _, _, err := db.CreateShareGroup(ctx, user.ID, "group-range-limit", []int64{fileID}, time.Now().UTC().Add(time.Hour).Format(time.RFC3339), 1); err != nil {
+		t.Fatal(err)
+	}
+	allowed, err := db.IncrementShareGroupDownloads(ctx, "group-range-limit", 1, true)
+	if err != nil || !allowed {
+		t.Fatalf("initial limited group Range = %t, %v; want allowed", allowed, err)
+	}
+	allowed, err = db.IncrementShareGroupDownloads(ctx, "group-range-limit", 1, true)
+	if err != nil || allowed {
+		t.Fatalf("group Range after limit = %t, %v; want denied", allowed, err)
+	}
+	group, err := db.GetShareGroupByToken(ctx, "group-range-limit")
+	if err != nil || group.DownloadCount != 1 {
+		t.Fatalf("limited group Range count = %d, %v; want 1", group.DownloadCount, err)
+	}
+}

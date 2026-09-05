@@ -3152,6 +3152,43 @@ func (s *Server) shareMeta(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// authorizeShareContent atomically consumes a share slot and classifies a rejected request.
+// authorizeShareContent 原子消耗分享次数，并对拒绝请求分类。
+func (s *Server) authorizeShareContent(ctx context.Context, token string, maxDownloads int64, rangeMode bool) (string, error) {
+	allowed, err := s.store.IncrementShareDownloads(ctx, token, maxDownloads, rangeMode)
+	if err != nil {
+		return "download_count_failed", err
+	}
+	if allowed {
+		return "", nil
+	}
+
+	current, currentErr := s.store.GetShareByTokenIncludingRevoked(ctx, token)
+	switch {
+	case currentErr == nil && current.RevokedAt != "":
+		return "share_revoked", nil
+	case currentErr == nil && !shareActive(current.ExpiresAt):
+		return "share_expired", nil
+	case currentErr == nil && current.MaxDownloads > 0 && current.DownloadCount >= int64(current.MaxDownloads):
+		return "share_limit", nil
+	default:
+		return "share_denied", nil
+	}
+}
+
+func writeShareAuthorizationError(w http.ResponseWriter, reason string) {
+	switch reason {
+	case "share_limit":
+		writeErrorData(w, http.StatusForbidden, "分享次数已用完", map[string]string{"code": "SHARE_DOWNLOAD_LIMIT"})
+	case "share_expired":
+		writeError(w, http.StatusForbidden, "分享链接已过期")
+	case "share_revoked":
+		writeError(w, http.StatusForbidden, "分享已撤销")
+	default:
+		writeError(w, http.StatusForbidden, "分享下载被拒绝")
+	}
+}
+
 // shareDownload consumes a share slot before streaming the ready file with Range support.
 // shareDownload 原子消耗分享次数后，以支持 Range 的方式流式输出 ready 文件。
 func (s *Server) shareDownload(w http.ResponseWriter, r *http.Request) {
@@ -3201,33 +3238,13 @@ func (s *Server) shareDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer handle.Close()
-	allowed, err := s.store.IncrementShareDownloads(r.Context(), token, int64(share.MaxDownloads), r.Header.Get("Range") != "")
+	reason, err = s.authorizeShareContent(r.Context(), token, int64(share.MaxDownloads), r.Header.Get("Range") != "")
 	if err != nil {
-		reason = "download_count_failed"
 		writeError(w, http.StatusInternalServerError, "分享下载失败")
 		return
 	}
-	if !allowed {
-		current, currentErr := s.store.GetShareByTokenIncludingRevoked(r.Context(), token)
-		switch {
-		case currentErr == nil && current.RevokedAt != "":
-			reason = "share_revoked"
-		case currentErr == nil && !shareActive(current.ExpiresAt):
-			reason = "share_expired"
-		case currentErr == nil && current.MaxDownloads > 0 && current.DownloadCount >= int64(current.MaxDownloads):
-			reason = "share_limit"
-		default:
-			reason = "share_denied"
-		}
-		if reason == "share_limit" {
-			writeErrorData(w, http.StatusForbidden, "分享次数已用完", map[string]string{"code": "SHARE_DOWNLOAD_LIMIT"})
-		} else if reason == "share_expired" {
-			writeError(w, http.StatusForbidden, "分享链接已过期")
-		} else if reason == "share_revoked" {
-			writeError(w, http.StatusForbidden, "分享已撤销")
-		} else {
-			writeError(w, http.StatusForbidden, "分享下载被拒绝")
-		}
+	if reason != "" {
+		writeShareAuthorizationError(w, reason)
 		return
 	}
 	w.Header().Set("Content-Type", effectiveFileMIME(file))
@@ -3236,8 +3253,8 @@ func (s *Server) shareDownload(w http.ResponseWriter, r *http.Request) {
 	http.ServeContent(w, r, file.Name, parseTime(file.CreatedAt), handle)
 }
 
-// sharePreview streams a shared file inline for preview without consuming a download slot.
-// sharePreview 以 inline 方式输出分享文件供预览，不消耗分享下载次数。
+// sharePreview streams a shared file inline for preview while consuming a share slot.
+// sharePreview 以 inline 方式输出分享文件供预览，同时消耗分享下载次数。
 func (s *Server) sharePreview(w http.ResponseWriter, r *http.Request) {
 	token := r.PathValue("token")
 	target := token
@@ -3284,6 +3301,15 @@ func (s *Server) sharePreview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer handle.Close()
+	reason, err = s.authorizeShareContent(r.Context(), token, int64(share.MaxDownloads), r.Header.Get("Range") != "")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "分享下载失败")
+		return
+	}
+	if reason != "" {
+		writeShareAuthorizationError(w, reason)
+		return
+	}
 	contentType := effectiveFileMIME(file)
 	w.Header().Set("Content-Type", contentType)
 	if previewMIMEAllowed(contentType) {

@@ -249,7 +249,7 @@ func (s *Store) IncrementShareGroupDownloads(ctx context.Context, token string, 
   last_download_at = ?
 WHERE token = ? AND revoked_at IS NULL AND expires_at > ?
   AND (max_downloads = 0 OR download_count < max_downloads
-    OR (last_download_at IS NOT NULL AND julianday(last_download_at) > julianday(?)))`, windowStart, nowValue, token, nowValue, windowStart)
+    OR (last_download_at IS NOT NULL AND julianday(last_download_at) > julianday(?) AND download_count < max_downloads))`, windowStart, nowValue, token, nowValue, windowStart)
 		if err != nil {
 			return false, err
 		}
