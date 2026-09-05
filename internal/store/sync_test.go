@@ -116,3 +116,45 @@ VALUES(?, 'sync-test', 'push', ?, 'filebox', '', 'sftp', '/', 'overwrite', 'once
 		t.Fatalf("missing sync log update error = %v, want ErrNotFound", err)
 	}
 }
+
+func TestRemoteSystemHostKeyTOFUAndExplicitReplacement(t *testing.T) {
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.EnsureAdmin("admin", "admin123", 1024); err != nil {
+		t.Fatal(err)
+	}
+	user, err := db.GetUserByUsername("admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, err := db.CreateRemoteSystem(context.Background(), RemoteSystem{UserID: user.ID, Name: "tofu", Kind: "sftp", Host: "sftp.example", Port: 22, Username: "sync", AuthType: "password", AuthSecret: "encrypted"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := "SHA256:first"
+	pinned, err := db.SetRemoteSystemFingerprintIfEmpty(context.Background(), item.ID, user.ID, first)
+	if err != nil || !pinned {
+		t.Fatalf("first fingerprint pin = %t, %v", pinned, err)
+	}
+	pinned, err = db.SetRemoteSystemFingerprintIfEmpty(context.Background(), item.ID, user.ID, "SHA256:second")
+	if err != nil || pinned {
+		t.Fatalf("second fingerprint pin = %t, %v; want no mutation", pinned, err)
+	}
+	current, err := db.GetRemoteSystem(context.Background(), item.ID, user.ID, false)
+	if err != nil || current.HostKeyFingerprint != first {
+		t.Fatalf("stored fingerprint = %q, %v; want %q", current.HostKeyFingerprint, err, first)
+	}
+	if err := db.UpdateRemoteSystemFingerprint(context.Background(), item.ID, user.ID, false, "SHA256:stale", "SHA256:second"); !errors.Is(err, ErrConflict) {
+		t.Fatalf("stale fingerprint update error = %v, want ErrConflict", err)
+	}
+	if err := db.UpdateRemoteSystemFingerprint(context.Background(), item.ID, user.ID, false, first, "SHA256:second"); err != nil {
+		t.Fatal(err)
+	}
+	current, err = db.GetRemoteSystem(context.Background(), item.ID, user.ID, false)
+	if err != nil || current.HostKeyFingerprint != "SHA256:second" {
+		t.Fatalf("updated fingerprint = %q, %v; want SHA256:second", current.HostKeyFingerprint, err)
+	}
+}

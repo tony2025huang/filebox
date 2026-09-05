@@ -162,11 +162,48 @@ async function deleteSystem(item) { if (!(await askConfirm(t('sync.confirmDelete
 // 成功后把 ok/失败与测试时间写回行内徽标；失败消息仅临时展示，不落库（避免保存敏感信息）。
 // testSystem probes a remote system's connectivity (#5) via POST /api/sync/systems/{id}/test,
 // updating the row badge with ok/failure and the tested time; the failure message stays transient.
-async function testSystem(item) { testingId.value = item.id; error.value = ''; try { const body = await api(`/api/sync/systems/${item.id}/test`, { method: 'POST' }); item.lastTestAt = body.data.testedAt; item.lastTestResult = body.data.ok ? 'success' : 'failure'; item.lastTestMessage = body.data.ok ? '' : body.data.message; notice.value = body.data.ok ? `${t('sync.testOk')} · ${formatDate(body.data.testedAt)}` : `${t('sync.testFailed')}: ${body.data.message}` } catch (err) { error.value = err.message } finally { testingId.value = 0 } }
 // openPathPicker 打开路径选择器：本地 FileBox 目录用 folders/files 接口，远端按目标系统类型浏览。
 // 方向判定：push 的源与 pull 的目标是本地 FileBox；另一端是远端（SFTP 或远端 FileBox）。
 // openPathPicker opens the path picker: local FileBox dirs use folders/files APIs; remote uses the system-kind browse.
 // Side logic: push's source and pull's target are local FileBox; the other side is remote (SFTP or a remote FileBox).
+// TOFU replacement is a separate owner-confirmed action and never part of ordinary edits.
+async function confirmHostKeyChange(systemId, err) {
+  if (err.data?.code !== 'HOST_KEY_CHANGED') return false
+  const confirmed = await askConfirm(t('sync.hostKeyConfirm', { expected: err.data.expectedFingerprint, observed: err.data.observedFingerprint }))
+  if (!confirmed) return false
+  const body = await api(`/api/sync/systems/${systemId}/host-key`, { method: 'POST', body: JSON.stringify({ expectedFingerprint: err.data.expectedFingerprint, observedFingerprint: err.data.observedFingerprint }) })
+  return body.data
+}
+async function testSystem(item) {
+  testingId.value = item.id
+  error.value = ''
+  try {
+    const body = await api(`/api/sync/systems/${item.id}/test`, { method: 'POST' })
+    item.lastTestAt = body.data.testedAt
+    item.lastTestResult = body.data.ok ? 'success' : 'failure'
+    item.lastTestMessage = body.data.ok ? '' : body.data.message
+    notice.value = body.data.ok ? `${t('sync.testOk')} · ${formatDate(body.data.testedAt)}` : `${t('sync.testFailed')}: ${body.data.message}`
+  } catch (err) {
+    if (err.data?.code === 'HOST_KEY_CHANGED') {
+      try {
+        const updated = await confirmHostKeyChange(item.id, err)
+        if (updated) {
+          Object.assign(item, updated)
+          await testSystem(item)
+        } else {
+          error.value = err.message
+        }
+      } catch (updateErr) {
+        error.value = updateErr.message
+      }
+    } else {
+      error.value = err.message
+    }
+  } finally {
+    testingId.value = 0
+  }
+}
+
 function openPathPicker(target) {
   // v014：本地与远端（SFTP/FileBox）统一支持选文件，两侧均 includeFiles=1；
   // 选中文件后 sourceKind 写入 file（chooseEntry 处理），目录选择仍写回 directory。
@@ -187,7 +224,7 @@ function openPathPicker(target) {
   pickerPathInput.value = picker.value.path
   browseRemote(picker.value.path)
 }
-async function browseRemote(path) { if (!picker.value) return; picker.value.path = path || '.'; pickerPathInput.value = picker.value.path; pickerFilter.value = ''; formError.value = ''; try { const query = `path=${encodeURIComponent(picker.value.path)}${picker.value.includeFiles ? '&includeFiles=1' : ''}`; remoteEntries.value = (await api(`/api/sync/systems/${taskForm.remoteSystemId}/browse?${query}`)).data.items || [] } catch (err) { formError.value = err.message } }
+async function browseRemote(path) { if (!picker.value) return; picker.value.path = path || '.'; pickerPathInput.value = picker.value.path; pickerFilter.value = ''; formError.value = ''; try { const query = `path=${encodeURIComponent(picker.value.path)}${picker.value.includeFiles ? '&includeFiles=1' : ''}`; remoteEntries.value = (await api(`/api/sync/systems/${taskForm.remoteSystemId}/browse?${query}`)).data.items || [] } catch (err) { if (err.data?.code === 'HOST_KEY_CHANGED') { try { if (await confirmHostKeyChange(taskForm.remoteSystemId, err)) { await browseRemote(path); return } } catch (updateErr) { formError.value = updateErr.message; return } } formError.value = err.message } }
 async function browseLocal(path) { if (!picker.value) return; picker.value.path = path || ''; pickerPathInput.value = picker.value.path; pickerFilter.value = ''; formError.value = ''; try { const query = `path=${encodeURIComponent(picker.value.path)}${picker.value.includeFiles ? '&includeFiles=1' : ''}`; const body = await api(`/api/sync/browse-filebox?${query}`); localFileEntries.value = (body.data?.items || []).filter(entry => !entry.isDir) } catch (err) { formError.value = err.message } }
 // parentRemotePath 归一化上级路径：`.` 表示用户 home（无上级），`foo`→`.`，`foo/bar`→`foo`，`/tmp`→`/`，`/`→无上级。
 // parentRemotePath normalizes the parent path: `.` is the user home (no parent), `foo`→`.`, `foo/bar`→`foo`, `/tmp`→`/`, `/`→no parent.
@@ -221,7 +258,19 @@ async function confirmPickerPath() {
     const query = `path=${encodeURIComponent(path)}${picker.value.includeFiles ? '&includeFiles=1' : ''}`
     await api(`/api/sync/systems/${taskForm.remoteSystemId}/browse?${query}`)
     choosePath(path === '.' ? '' : path)
-  } catch {
+  } catch (err) {
+    if (err.data?.code === 'HOST_KEY_CHANGED') {
+      try {
+        if (await confirmHostKeyChange(taskForm.remoteSystemId, err)) {
+          await api(`/api/sync/systems/${taskForm.remoteSystemId}/browse?${query}`)
+          choosePath(path === '.' ? '' : path)
+          return
+        }
+      } catch (updateErr) {
+        formError.value = updateErr.message
+        return
+      }
+    }
     formError.value = t('sync.invalidRemotePath')
   } finally {
     pickerPathSaving.value = false

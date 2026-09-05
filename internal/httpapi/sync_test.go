@@ -240,6 +240,121 @@ func TestHostKeyFingerprintCallback(t *testing.T) {
 	}
 }
 
+func TestSFTPTOFUFirstUseMatchMismatchAndExplicitUpdate(t *testing.T) {
+	db, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.EnsureAdmin("admin", "admin123", 1024); err != nil {
+		t.Fatal(err)
+	}
+	user, err := db.GetUserByUsername("admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := NewServer(db, Config{DataDir: db.DataDir, JWTSecret: []byte("test-secret")})
+	item, err := db.CreateRemoteSystem(context.Background(), store.RemoteSystem{UserID: user.ID, Name: "tofu", Kind: "sftp", Host: "sftp.example", Port: 22, Username: "sync", AuthType: "password", AuthSecret: "encrypted"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyOne, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicOne, err := ssh.NewPublicKey(&keyOne.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstCallback := server.hostKeyCallbackForSystem(context.Background(), item, "sftp.example:22")
+	if err := firstCallback("sftp.example", nil, publicOne); err != nil {
+		t.Fatalf("first-use callback = %v", err)
+	}
+	stored, err := db.GetRemoteSystem(context.Background(), item.ID, user.ID, false)
+	if err != nil || stored.HostKeyFingerprint != ssh.FingerprintSHA256(publicOne) {
+		t.Fatalf("first-use fingerprint = %q, %v", stored.HostKeyFingerprint, err)
+	}
+	matchingCallback := server.hostKeyCallbackForSystem(context.Background(), stored, "sftp.example:22")
+	if err := matchingCallback("sftp.example", nil, publicOne); err != nil {
+		t.Fatalf("matching callback = %v", err)
+	}
+	keyTwo, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicTwo, err := ssh.NewPublicKey(&keyTwo.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changedErr := matchingCallback("sftp.example", nil, publicTwo)
+	changedData, changed := hostKeyChangedData(changedErr)
+	if !changed || changedData["expectedFingerprint"] != stored.HostKeyFingerprint || changedData["observedFingerprint"] != ssh.FingerprintSHA256(publicTwo) {
+		t.Fatalf("mismatch error = %#v, data=%#v", changedErr, changedData)
+	}
+	unchanged, err := db.GetRemoteSystem(context.Background(), item.ID, user.ID, false)
+	if err != nil || unchanged.HostKeyFingerprint != stored.HostKeyFingerprint {
+		t.Fatalf("mismatch mutated fingerprint = %q, %v", unchanged.HostKeyFingerprint, err)
+	}
+	if err := db.UpdateRemoteSystemFingerprint(context.Background(), item.ID, user.ID, false, stored.HostKeyFingerprint, ssh.FingerprintSHA256(publicTwo)); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := db.GetRemoteSystem(context.Background(), item.ID, user.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := server.hostKeyCallbackForSystem(context.Background(), updated, "sftp.example:22")("sftp.example", nil, publicTwo); err != nil {
+		t.Fatalf("callback after explicit update = %v", err)
+	}
+}
+
+func TestSFTPHostKeyUpdateEndpointRequiresAuthAndOwner(t *testing.T) {
+	db, handler := newTestServer(t)
+	adminToken := testAdminToken(t, handler)
+	created := testJSONRequest(t, handler, http.MethodPost, "/api/sync/systems", adminToken, `{"name":"host-key","host":"sftp.example","port":22,"username":"sync","authType":"password","authSecret":"secret"}`)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create sync system = %d: %s", created.Code, created.Body.String())
+	}
+	id := int64(responseData(t, created)["id"].(float64))
+	path := "/api/sync/systems/" + strconv.FormatInt(id, 10) + "/host-key"
+	unauthenticated := testJSONRequest(t, handler, http.MethodPost, path, "", `{"expectedFingerprint":"SHA256:old","observedFingerprint":"SHA256:new"}`)
+	if unauthenticated.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated host-key update = %d: %s", unauthenticated.Code, unauthenticated.Body.String())
+	}
+	if _, err := db.DB.Exec("UPDATE remote_systems SET host_key_fingerprint = ? WHERE id = ?", "SHA256:old", id); err != nil {
+		t.Fatal(err)
+	}
+	updated := testJSONRequest(t, handler, http.MethodPost, path, adminToken, `{"expectedFingerprint":"SHA256:old","observedFingerprint":"SHA256:new"}`)
+	if updated.Code != http.StatusBadRequest {
+		t.Fatalf("invalid observed fingerprint = %d: %s", updated.Code, updated.Body.String())
+	}
+	expectedBytes := make([]byte, 32)
+	observedBytes := make([]byte, 32)
+	observedBytes[0] = 1
+	expectedFingerprint := "SHA256:" + base64.RawStdEncoding.EncodeToString(expectedBytes)
+	observedFingerprint := "SHA256:" + base64.RawStdEncoding.EncodeToString(observedBytes)
+	if _, err := db.DB.Exec("UPDATE remote_systems SET host_key_fingerprint = ? WHERE id = ?", expectedFingerprint, id); err != nil {
+		t.Fatal(err)
+	}
+	confirmed := testJSONRequest(t, handler, http.MethodPost, path, adminToken, `{"expectedFingerprint":"`+expectedFingerprint+`","observedFingerprint":"`+observedFingerprint+`"}`)
+	if confirmed.Code != http.StatusOK {
+		t.Fatalf("confirmed host-key update = %d: %s", confirmed.Code, confirmed.Body.String())
+	}
+	stored, err := db.GetRemoteSystem(context.Background(), id, 1, false)
+	if err != nil || stored.HostKeyFingerprint != observedFingerprint {
+		t.Fatalf("confirmed host-key fingerprint = %q, %v; want %q", stored.HostKeyFingerprint, err, observedFingerprint)
+	}
+	otherCreated := testJSONRequest(t, handler, http.MethodPost, "/api/admin/users", adminToken, `{"username":"host-key-other","password":"HostKeyOther123!","role":"user","quotaBytes":1048576}`)
+	if otherCreated.Code != http.StatusCreated {
+		t.Fatalf("create other user = %d: %s", otherCreated.Code, otherCreated.Body.String())
+	}
+	otherLogin := testJSONRequest(t, handler, http.MethodPost, "/api/auth/login", "", `{"username":"host-key-other","password":"HostKeyOther123!"}`)
+	otherToken := responseData(t, otherLogin)["token"].(string)
+	forbidden := testJSONRequest(t, handler, http.MethodPost, path, otherToken, `{"expectedFingerprint":"`+expectedFingerprint+`","observedFingerprint":"`+observedFingerprint+`"}`)
+	if forbidden.Code != http.StatusNotFound {
+		t.Fatalf("cross-owner host-key update = %d: %s", forbidden.Code, forbidden.Body.String())
+	}
+}
+
 func TestValidateSyncSystemInputHostKeyFingerprint(t *testing.T) {
 	bytes := make([]byte, 32)
 	validBase64 := "SHA256:" + base64.RawStdEncoding.EncodeToString(bytes)

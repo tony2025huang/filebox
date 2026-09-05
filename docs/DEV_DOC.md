@@ -201,6 +201,7 @@ settings   key, value                     -- 注册开关/默认配额/上传上
 - 管理接口额外校验 admin 角色
 - **审计日志（R-LOG）**：登录/上传/下载/分享操作全量记录（时间/用户/来源 IP/操作/结果/原因）；日志不记录密码、token、文件内容；留存周期可配，超期自动清理
 - **品牌资源（R-BRAND）**：logo/favicon 上传限制类型与大小（png/jpg/svg/ico ≤512KB）；固定文件名落盘防路径穿越；`/api/brand` 与品牌资源路由为公开只读接口（不泄露敏感信息）
+- **SFTP 主机密钥 TOFU（v023，业务确认）**：SFTP RemoteSystem 首次连接在没有 `hostKeyFingerprint` 时固定观察到的 SHA-256 指纹；后续握手严格匹配，失配拒绝并返回结构化 `HOST_KEY_CHANGED`（expected/observed 指纹）。普通编辑不得改变指纹；owner/admin 必须通过专用确认接口更新 expected 匹配的指纹后再重试。日志/审计只保留系统 ID、结果、原因和安全指纹元数据，不记录凭据或文件内容。
 
 ## 8. 限速与配额（已实现）
 

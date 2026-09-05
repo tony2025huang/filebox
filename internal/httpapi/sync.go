@@ -48,6 +48,30 @@ type syncSystemRequest struct {
 	HostKeyFingerprint string `json:"hostKeyFingerprint"`
 }
 
+type syncSystemHostKeyRequest struct {
+	ExpectedFingerprint string `json:"expectedFingerprint"`
+	ObservedFingerprint string `json:"observedFingerprint"`
+}
+
+type hostKeyChangedError struct {
+	ExpectedFingerprint string
+	ObservedFingerprint string
+}
+
+func (e *hostKeyChangedError) Error() string { return "host key fingerprint changed" }
+
+func hostKeyChangedData(err error) (map[string]any, bool) {
+	var changed *hostKeyChangedError
+	if !errors.As(err, &changed) {
+		return nil, false
+	}
+	return map[string]any{
+		"code":                "HOST_KEY_CHANGED",
+		"expectedFingerprint": changed.ExpectedFingerprint,
+		"observedFingerprint": changed.ObservedFingerprint,
+	}, true
+}
+
 type syncTaskRequest struct {
 	Name           string `json:"name"`
 	Direction      string `json:"direction"`
@@ -292,8 +316,8 @@ func (s *Server) updateSyncSystem(w http.ResponseWriter, r *http.Request) {
 	secret := existing.AuthSecret
 	passphrase := existing.AuthPassphrase
 	fingerprint := existing.HostKeyFingerprint
-	if input.HostKeyFingerprint != "" {
-		fingerprint = input.HostKeyFingerprint
+	if input.Kind == "filebox" {
+		fingerprint = ""
 	}
 	if input.AuthSecret != "__keep__" {
 		secret, err = s.encryptSyncSecret(input.AuthSecret)
@@ -328,6 +352,64 @@ func (s *Server) updateSyncSystem(w http.ResponseWriter, r *http.Request) {
 	}
 	s.serviceEvent(r, "sync_system_update", user.Username, "target=%d result=success", id)
 	writeData(w, http.StatusOK, "目标系统已更新", publicSyncSystem(updated))
+}
+
+func (s *Server) updateSyncSystemHostKey(w http.ResponseWriter, r *http.Request) {
+	user := currentUser(r.Context())
+	id, err := parseSyncID(r.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, "remote system not found")
+		return
+	}
+	if s.rejectReadOnly(w, r, user, "sync_system_host_key_update", r.PathValue("id")) {
+		return
+	}
+	existing, err := s.store.GetRemoteSystem(r.Context(), id, user.ID, user.Role == "admin")
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "remote system not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read remote system")
+		return
+	}
+	if existing.Kind != "sftp" {
+		writeError(w, http.StatusBadRequest, "host keys are supported only for SFTP systems")
+		return
+	}
+	var input syncSystemHostKeyRequest
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	input.ExpectedFingerprint = strings.TrimSpace(input.ExpectedFingerprint)
+	input.ObservedFingerprint = strings.TrimSpace(input.ObservedFingerprint)
+	if !validHostKeyFingerprint(input.ExpectedFingerprint) || !validHostKeyFingerprint(input.ObservedFingerprint) {
+		s.recordAudit(r, &user.ID, user.Username, "sync_host_key_update", strconv.FormatInt(id, 10), "failure", "invalid_fingerprint")
+		writeError(w, http.StatusBadRequest, "invalid host key fingerprint")
+		return
+	}
+	if input.ExpectedFingerprint != strings.TrimSpace(existing.HostKeyFingerprint) {
+		s.recordAudit(r, &user.ID, user.Username, "sync_host_key_update", strconv.FormatInt(id, 10), "failure", "stale_confirmation")
+		writeErrorData(w, http.StatusConflict, "host key changed; test the connection again", map[string]any{"code": "HOST_KEY_UPDATE_CONFLICT"})
+		return
+	}
+	if err := s.store.UpdateRemoteSystemFingerprint(r.Context(), id, user.ID, user.Role == "admin", input.ExpectedFingerprint, input.ObservedFingerprint); errors.Is(err, store.ErrConflict) {
+		s.recordAudit(r, &user.ID, user.Username, "sync_host_key_update", strconv.FormatInt(id, 10), "failure", "stale_confirmation")
+		writeErrorData(w, http.StatusConflict, "host key changed; test the connection again", map[string]any{"code": "HOST_KEY_UPDATE_CONFLICT"})
+		return
+	} else if err != nil {
+		log.Printf("update sync host key: %v", err)
+		writeError(w, http.StatusInternalServerError, "failed to update host key")
+		return
+	}
+	s.recordAudit(r, &user.ID, user.Username, "sync_host_key_update", strconv.FormatInt(id, 10), "success", "explicit_confirmation")
+	s.serviceEvent(r, "sync_host_key_update", user.Username, "target=%d expected=%s observed=%s result=success", id, input.ExpectedFingerprint, input.ObservedFingerprint)
+	updated, err := s.store.GetRemoteSystem(r.Context(), id, user.ID, user.Role == "admin")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read remote system")
+		return
+	}
+	writeData(w, http.StatusOK, "host key updated", publicSyncSystem(updated))
 }
 
 func (s *Server) deleteSyncSystem(w http.ResponseWriter, r *http.Request) {
@@ -412,6 +494,13 @@ func (s *Server) browseSyncSystem(w http.ResponseWriter, r *http.Request) {
 	includeFiles := r.URL.Query().Get("includeFiles") == "1" || r.URL.Query().Get("includeFiles") == "true"
 	items, err := s.browseRemoteEntries(r.Context(), item, remotePath, includeFiles)
 	if err != nil {
+		if data, changed := hostKeyChangedData(err); changed {
+			user := currentUser(r.Context())
+			s.recordAudit(r, &user.ID, user.Username, "sync_host_key", strconv.FormatInt(item.ID, 10), "failure", "changed")
+			s.serviceEvent(r, "sync_host_key", user.Username, "target=%d expected=%s observed=%s result=failure", item.ID, data["expectedFingerprint"], data["observedFingerprint"])
+			writeErrorData(w, http.StatusConflict, "SFTP host key changed; confirmation required", data)
+			return
+		}
 		writeError(w, http.StatusBadGateway, "读取远端目录失败")
 		return
 	}
@@ -455,6 +544,15 @@ func (s *Server) testSyncSystem(w http.ResponseWriter, r *http.Request) {
 	} else {
 		client, closeClient, openErr := s.openSFTP(r.Context(), item)
 		if openErr != nil {
+			if data, changed := hostKeyChangedData(openErr); changed {
+				if updateErr := s.store.UpdateRemoteSystemTest(r.Context(), item.ID, user.ID, user.Role == "admin", testedAt, "failure"); updateErr != nil {
+					log.Printf("update remote system test: %v", updateErr)
+				}
+				s.recordAudit(r, &user.ID, user.Username, "sync_host_key", strconv.FormatInt(item.ID, 10), "failure", "changed")
+				s.serviceEvent(r, "sync_host_key", user.Username, "target=%d expected=%s observed=%s result=failure", item.ID, data["expectedFingerprint"], data["observedFingerprint"])
+				writeErrorData(w, http.StatusConflict, "SFTP host key changed; confirmation required", data)
+				return
+			}
 			message = s.syncErrorDetail(openErr)
 		} else {
 			defer closeClient()
@@ -1100,17 +1198,18 @@ func (s *Server) decryptSyncCredentials(ctx context.Context, item store.RemoteSy
 	return secret, passphrase, nil
 }
 
-// hostKeyCallbackFor 返回按配置指纹校验的 HostKeyCallback；未配置指纹时回退 InsecureIgnoreHostKey 并打警告日志（兼容既有数据）。
-// hostKeyCallbackFor returns a HostKeyCallback that verifies the configured fingerprint, falling back to InsecureIgnoreHostKey with a warning when none is set.
+// hostKeyCallbackFor 返回按配置指纹校验的 HostKeyCallback；首次信任由 hostKeyCallbackForSystem 处理。
+// hostKeyCallbackFor returns a HostKeyCallback that verifies a configured fingerprint.
 func hostKeyCallbackFor(address, fingerprint string) ssh.HostKeyCallback {
 	if fingerprint == "" {
-		log.Printf("WARNING: connecting to %s without host key verification (no host_key_fingerprint configured)", address)
-		return ssh.InsecureIgnoreHostKey()
+		return func(hostname string, remote net.Addr, key ssh.PublicKey) error {
+			return errors.New("host key fingerprint is not configured")
+		}
 	}
 	return func(hostname string, remote net.Addr, key ssh.PublicKey) error {
 		got := ssh.FingerprintSHA256(key) // "SHA256:..."
 		if !hostKeyFingerprintMatches(got, fingerprint) {
-			return fmt.Errorf("host key fingerprint mismatch: got %s, want %s", got, fingerprint)
+			return &hostKeyChangedError{ExpectedFingerprint: fingerprint, ObservedFingerprint: got}
 		}
 		return nil
 	}
@@ -1121,6 +1220,40 @@ func hostKeyCallbackFor(address, fingerprint string) ssh.HostKeyCallback {
 // decodeFingerprintPayload decodes a SHA256 host-key fingerprint: hex first, then strict
 // base64 whose trailing padding bits must be zero (the last char of a 43-char raw encoding
 // may only use 4 of its 6 bits, so its low 2 bits must be 0).
+func validHostKeyFingerprint(value string) bool {
+	decoded, valid := decodeFingerprintPayload(value)
+	return valid && len(decoded) == sha256.Size
+}
+
+func (s *Server) hostKeyCallbackForSystem(ctx context.Context, item store.RemoteSystem, address string) ssh.HostKeyCallback {
+	expected := strings.TrimSpace(item.HostKeyFingerprint)
+	if expected != "" {
+		return hostKeyCallbackFor(address, expected)
+	}
+	return func(hostname string, remote net.Addr, key ssh.PublicKey) error {
+		observed := ssh.FingerprintSHA256(key)
+		pinned, err := s.store.SetRemoteSystemFingerprintIfEmpty(ctx, item.ID, item.UserID, observed)
+		if err != nil {
+			return errors.New("host key fingerprint could not be persisted")
+		}
+		if pinned {
+			log.Printf("sync host key first trust system=%d fingerprint=%s", item.ID, observed)
+			return nil
+		}
+		current, err := s.store.GetRemoteSystem(ctx, item.ID, item.UserID, false)
+		if err != nil {
+			return errors.New("host key fingerprint could not be verified")
+		}
+		currentExpected := strings.TrimSpace(current.HostKeyFingerprint)
+		if hostKeyFingerprintMatches(observed, currentExpected) {
+			return nil
+		}
+		changed := &hostKeyChangedError{ExpectedFingerprint: currentExpected, ObservedFingerprint: observed}
+		log.Printf("sync host key changed system=%d expected=%s observed=%s", item.ID, changed.ExpectedFingerprint, changed.ObservedFingerprint)
+		return changed
+	}
+}
+
 func decodeFingerprintPayload(value string) ([]byte, bool) {
 	value = strings.TrimPrefix(strings.TrimSpace(value), "SHA256:")
 	isHex := strings.Contains(value, ":") || (len(value) == sha256.Size*2 && strings.Trim(value, "0123456789abcdefABCDEF") == "")
@@ -1180,7 +1313,7 @@ func (s *Server) openSFTP(ctx context.Context, item store.RemoteSystem) (*sftp.C
 		case <-connectionDone:
 		}
 	}()
-	sshConfig := &ssh.ClientConfig{User: item.Username, Auth: auth, HostKeyCallback: hostKeyCallbackFor(address, strings.TrimSpace(item.HostKeyFingerprint)), Timeout: 15 * time.Second}
+	sshConfig := &ssh.ClientConfig{User: item.Username, Auth: auth, HostKeyCallback: s.hostKeyCallbackForSystem(ctx, item, address), Timeout: 15 * time.Second}
 	connection, channels, requests, err := ssh.NewClientConn(netConn, address, sshConfig)
 	if err != nil {
 		stopConnection()
@@ -1310,6 +1443,9 @@ func (s *Server) executeSyncTask(ctx context.Context, task store.SyncTask) store
 func (s *Server) syncErrorDetail(err error) string {
 	if err == nil {
 		return ""
+	}
+	if data, changed := hostKeyChangedData(err); changed {
+		return fmt.Sprintf("HOST_KEY_CHANGED expected=%s observed=%s", data["expectedFingerprint"], data["observedFingerprint"])
 	}
 	message := strings.ReplaceAll(strings.ReplaceAll(err.Error(), "\r", " "), "\n", " ")
 	if s.config.DataDir != "" {

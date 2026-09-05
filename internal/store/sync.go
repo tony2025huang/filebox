@@ -318,6 +318,43 @@ func (s *Store) UpdateRemoteSystem(ctx context.Context, item RemoteSystem, userI
 // UpdateRemoteSystemTest 持久化最近一次连通性测试结果（#5），仅记录 ok/failure 与测试时间。
 // UpdateRemoteSystemTest persists the latest connectivity-test outcome (#5); only the
 // ok/failure result and the tested time are stored.
+// SetRemoteSystemFingerprintIfEmpty pins the first observed SFTP host key.
+// The conditional update makes concurrent first-use connections converge on one fingerprint.
+func (s *Store) SetRemoteSystemFingerprintIfEmpty(ctx context.Context, id, userID int64, fingerprint string) (bool, error) {
+	result, err := s.DB.ExecContext(ctx, `UPDATE remote_systems
+SET host_key_fingerprint = ?
+WHERE id = ? AND user_id = ? AND kind = 'sftp'
+  AND (host_key_fingerprint IS NULL OR host_key_fingerprint = '')`, fingerprint, id, userID)
+	if err != nil {
+		return false, err
+	}
+	count, err := result.RowsAffected()
+	return count == 1, err
+}
+
+// UpdateRemoteSystemFingerprint replaces a pinned host key only when the expected
+// value still matches, preventing stale confirmations from overwriting a newer pin.
+func (s *Store) UpdateRemoteSystemFingerprint(ctx context.Context, id, userID int64, admin bool, expected, observed string) error {
+	where := "id = ? AND kind = 'sftp' AND host_key_fingerprint = ? AND user_id = ?"
+	args := []any{observed, id, expected, userID}
+	if admin {
+		where = "id = ? AND kind = 'sftp' AND host_key_fingerprint = ?"
+		args = []any{observed, id, expected}
+	}
+	result, err := s.DB.ExecContext(ctx, "UPDATE remote_systems SET host_key_fingerprint = ? WHERE "+where, args...)
+	if err != nil {
+		return err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if count != 1 {
+		return ErrConflict
+	}
+	return nil
+}
+
 func (s *Store) UpdateRemoteSystemTest(ctx context.Context, id, userID int64, admin bool, testedAt, result string) error {
 	where := "id = ? AND user_id = ?"
 	args := []any{testedAt, result, id, userID}

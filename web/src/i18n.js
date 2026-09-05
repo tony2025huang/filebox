@@ -278,6 +278,19 @@ Object.assign(en, {
   'files.transferActiveTab': 'In progress', 'files.transferDoneTab': 'Completed', 'files.transferEmptyActive': 'No transfers in progress', 'files.transferEmptyDone': 'No completed records', 'files.clearFinished': 'Clear completed', 'files.finishedSuccess': 'Success', 'files.finishedFailed': 'Failed', 'files.finishedCancelled': 'Cancelled'
 })
 
+Object.assign(zhCN, {
+  'sync.hostKeyChanged': '\u4e3b\u673a\u5bc6\u94a5\u53d8\u66f4\uff0c\u8bf7\u786e\u8ba4\u65b0\u6307\u7eb9\u540e\u91cd\u8bd5',
+  'sync.hostKeyConfirm': '\u8fdc\u7aef SFTP \u4e3b\u673a\u5bc6\u94a5\u4e0e\u5df2\u4fe1\u4efb\u6307\u7eb9\u4e0d\u4e00\u81f4\u3002\u9884\u671f\uff1a{expected}\uff1b\u89c2\u5bdf\uff1a{observed}\u3002\u786e\u8ba4\u540e\u66f4\u65b0\u6307\u7eb9\u5e76\u91cd\u8bd5\uff1f'
+})
+Object.assign(zhTW, {
+  'sync.hostKeyChanged': '\u4e3b\u6a5f\u5bc6\u9470\u5df2\u8b8a\u66f4\uff0c\u8acb\u78ba\u8a8d\u65b0\u6307\u7d0b\u5f8c\u91cd\u8a66',
+  'sync.hostKeyConfirm': '\u9060\u7aef SFTP \u4e3b\u6a5f\u5bc6\u9470\u8207\u5df2\u4fe1\u4efb\u6307\u7d0b\u4e0d\u4e00\u81f4\u3002\u9810\u671f\uff1a{expected}\uff1b\u89c0\u5bdf\uff1a{observed}\u3002\u78ba\u8a8d\u5f8c\u66f4\u65b0\u6307\u7d0b\u4e26\u91cd\u8a66\uff1f'
+})
+Object.assign(en, {
+  'sync.hostKeyChanged': 'SFTP host key changed; confirm the new fingerprint and retry',
+  'sync.hostKeyConfirm': 'The SFTP host key changed. Expected: {expected}; observed: {observed}. Update the pinned fingerprint and retry?'
+})
+
 export const dictionaries = { 'zh-CN': zhCN, 'zh-TW': zhTW, en }
 export const currentLocale = ref('zh-CN')
 export const systemLocale = ref('zh-CN')

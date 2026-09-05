@@ -1,5 +1,11 @@
 # Requirement Change Log
 
+## 2026-09-05 - v023 SFTP 主机密钥 TOFU 策略
+
+- 【业务确认】SFTP RemoteSystem 无指纹时首次握手自动固定观察到的 SHA-256 指纹；条件更新处理并发首次连接。
+- 【业务确认】已有指纹必须严格匹配；失配拒绝连接并返回 `HOST_KEY_CHANGED` 及安全的 expected/observed 指纹，不静默更新。
+- 【业务确认】owner/admin 通过专用接口明确确认后更新指纹并自动重试；普通编辑保留原指纹；审计和服务日志只记录安全元数据。
+
 ## 2026-09-04 - v023 独立静态加密密钥兼容迁移
 
 - 【业务确认】新增独立静态 AES-256-GCM 密钥配置：`--encryption-key`、`FILEBOX_ENCRYPTION_KEY` 或 `config/secrets.json` 的 `encryptionKey`，严格标准 Base64 解码后必须为 32 字节。
