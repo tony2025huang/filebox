@@ -170,6 +170,7 @@ type UploadCollection struct {
 	CreatedBy    int64  `json:"createdBy"`
 	Name         string `json:"name"`
 	Token        string `json:"token"`
+	PasswordHash string `json:"-"`
 	ExpiresAt    string `json:"expiresAt"`
 	MaxUploads   int    `json:"maxUploads"`
 	UploadCount  int    `json:"uploadCount"`
@@ -505,6 +506,7 @@ func (s *Store) migrateCollectionsSchema() error {
   created_by INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   name TEXT NOT NULL,
   token TEXT NOT NULL UNIQUE,
+  password_hash TEXT NOT NULL DEFAULT '',
   expires_at TEXT NOT NULL,
   max_uploads INTEGER NOT NULL DEFAULT 0,
   upload_count INTEGER NOT NULL DEFAULT 0,
@@ -527,6 +529,15 @@ CREATE INDEX IF NOT EXISTS idx_upload_collection_files_file ON upload_collection
 CREATE INDEX IF NOT EXISTS idx_upload_tasks_collection_queue ON upload_tasks(collection_id, status, created_at, id);`)
 	if err != nil {
 		return err
+	}
+	columns, err = tableColumns(s.DB, "upload_collections")
+	if err != nil {
+		return err
+	}
+	if !columns["password_hash"] {
+		if _, err := s.DB.Exec("ALTER TABLE upload_collections ADD COLUMN password_hash TEXT NOT NULL DEFAULT ''"); err != nil {
+			return err
+		}
 	}
 	return s.migrateLegacyCollectionTaskStates()
 }
@@ -2273,8 +2284,8 @@ func (s *Store) PruneAuditLogs(ctx context.Context, retentionDays int) (int64, e
 // CreateUploadCollection 创建新的公开上传收集链接。
 func (s *Store) CreateUploadCollection(ctx context.Context, collection UploadCollection) (UploadCollection, error) {
 	now := time.Now().UTC().Format(time.RFC3339)
-	result, err := s.DB.ExecContext(ctx, `INSERT INTO upload_collections(created_by, name, token, expires_at, max_uploads, upload_count, max_file_bytes, created_at, updated_at)
-VALUES(?, ?, ?, ?, ?, 0, ?, ?, ?)`, collection.CreatedBy, collection.Name, collection.Token, collection.ExpiresAt, collection.MaxUploads, collection.MaxFileBytes, now, now)
+	result, err := s.DB.ExecContext(ctx, `INSERT INTO upload_collections(created_by, name, token, password_hash, expires_at, max_uploads, upload_count, max_file_bytes, created_at, updated_at)
+VALUES(?, ?, ?, ?, ?, ?, 0, ?, ?, ?)`, collection.CreatedBy, collection.Name, collection.Token, collection.PasswordHash, collection.ExpiresAt, collection.MaxUploads, collection.MaxFileBytes, now, now)
 	if err != nil {
 		if isUniqueError(err) {
 			return UploadCollection{}, ErrConflict
@@ -2289,7 +2300,7 @@ VALUES(?, ?, ?, ?, ?, 0, ?, ?, ?)`, collection.CreatedBy, collection.Name, colle
 // GetUploadCollectionByToken loads a collection for anonymous token authentication.
 // GetUploadCollectionByToken 按公开 token 读取收集链接。
 func (s *Store) GetUploadCollectionByToken(ctx context.Context, token string) (UploadCollection, error) {
-	return scanUploadCollection(s.DB.QueryRowContext(ctx, `SELECT id, created_by, name, token, expires_at, max_uploads, upload_count, max_file_bytes, COALESCE(revoked_at, ''), created_at
+	return scanUploadCollection(s.DB.QueryRowContext(ctx, `SELECT id, created_by, name, token, COALESCE(password_hash, ''), expires_at, max_uploads, upload_count, max_file_bytes, COALESCE(revoked_at, ''), created_at
 FROM upload_collections WHERE token = ?`, token))
 }
 
@@ -2302,14 +2313,14 @@ func (s *Store) GetUploadCollection(ctx context.Context, id, userID int64, admin
 		where += " AND created_by = ?"
 		args = append(args, userID)
 	}
-	return scanUploadCollection(s.DB.QueryRowContext(ctx, `SELECT id, created_by, name, token, expires_at, max_uploads, upload_count, max_file_bytes, COALESCE(revoked_at, ''), created_at
+	return scanUploadCollection(s.DB.QueryRowContext(ctx, `SELECT id, created_by, name, token, COALESCE(password_hash, ''), expires_at, max_uploads, upload_count, max_file_bytes, COALESCE(revoked_at, ''), created_at
 FROM upload_collections WHERE `+where, args...))
 }
 
 // ListUploadCollections lists collections owned by a user.
 // ListUploadCollections 列出当前用户创建的收集链接。
 func (s *Store) ListUploadCollections(ctx context.Context, userID int64, admin bool) ([]UploadCollection, error) {
-	query := `SELECT id, created_by, name, token, expires_at, max_uploads, upload_count, max_file_bytes, COALESCE(revoked_at, ''), created_at
+	query := `SELECT id, created_by, name, token, COALESCE(password_hash, ''), expires_at, max_uploads, upload_count, max_file_bytes, COALESCE(revoked_at, ''), created_at
 FROM upload_collections`
 	args := []any{}
 	if !admin {
@@ -2325,7 +2336,7 @@ FROM upload_collections`
 	collections := make([]UploadCollection, 0)
 	for rows.Next() {
 		var collection UploadCollection
-		if err := rows.Scan(&collection.ID, &collection.CreatedBy, &collection.Name, &collection.Token, &collection.ExpiresAt, &collection.MaxUploads, &collection.UploadCount, &collection.MaxFileBytes, &collection.RevokedAt, &collection.CreatedAt); err != nil {
+		if err := rows.Scan(&collection.ID, &collection.CreatedBy, &collection.Name, &collection.Token, &collection.PasswordHash, &collection.ExpiresAt, &collection.MaxUploads, &collection.UploadCount, &collection.MaxFileBytes, &collection.RevokedAt, &collection.CreatedAt); err != nil {
 			return nil, err
 		}
 		collections = append(collections, collection)
@@ -2338,7 +2349,7 @@ FROM upload_collections`
 // UpdateUploadCollection atomically updates a collection (name/expiry/upload limit/single-file limit).
 // Revoked collections cannot be edited; lowering maxUploads below the current uploadCount is rejected;
 // the expiry must be in the future (which may re-activate an expired collection).
-func (s *Store) UpdateUploadCollection(ctx context.Context, id, userID int64, admin bool, name, expiresAt string, maxUploads int, maxFileBytes int64) (UploadCollection, error) {
+func (s *Store) UpdateUploadCollection(ctx context.Context, id, userID int64, admin bool, name, expiresAt string, maxUploads int, maxFileBytes int64, passwordHash *string) (UploadCollection, error) {
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return UploadCollection{}, err
@@ -2351,8 +2362,8 @@ func (s *Store) UpdateUploadCollection(ctx context.Context, id, userID int64, ad
 		args = append(args, userID)
 	}
 	var collection UploadCollection
-	err = tx.QueryRowContext(ctx, `SELECT id, created_by, name, token, expires_at, max_uploads, upload_count, max_file_bytes, COALESCE(revoked_at, ''), created_at
-FROM upload_collections WHERE `+where, args...).Scan(&collection.ID, &collection.CreatedBy, &collection.Name, &collection.Token, &collection.ExpiresAt, &collection.MaxUploads, &collection.UploadCount, &collection.MaxFileBytes, &collection.RevokedAt, &collection.CreatedAt)
+	err = tx.QueryRowContext(ctx, `SELECT id, created_by, name, token, COALESCE(password_hash, ''), expires_at, max_uploads, upload_count, max_file_bytes, COALESCE(revoked_at, ''), created_at
+FROM upload_collections WHERE `+where, args...).Scan(&collection.ID, &collection.CreatedBy, &collection.Name, &collection.Token, &collection.PasswordHash, &collection.ExpiresAt, &collection.MaxUploads, &collection.UploadCount, &collection.MaxFileBytes, &collection.RevokedAt, &collection.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return UploadCollection{}, ErrNotFound
 	}
@@ -2373,8 +2384,15 @@ FROM upload_collections WHERE `+where, args...).Scan(&collection.ID, &collection
 		return UploadCollection{}, ErrCollectionMaxUploadsBelow
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	result, err := tx.ExecContext(ctx, `UPDATE upload_collections SET name = ?, expires_at = ?, max_uploads = ?, max_file_bytes = ?, updated_at = ?
-WHERE id = ? AND revoked_at IS NULL`, name, expiresAt, maxUploads, maxFileBytes, now, id)
+	passwordUpdate := ""
+	updateArgs := []any{name, expiresAt, maxUploads, maxFileBytes}
+	if passwordHash != nil {
+		passwordUpdate = ", password_hash = ?"
+		updateArgs = append(updateArgs, *passwordHash)
+	}
+	updateArgs = append(updateArgs, now, id)
+	result, err := tx.ExecContext(ctx, `UPDATE upload_collections SET name = ?, expires_at = ?, max_uploads = ?, max_file_bytes = ?`+passwordUpdate+`, updated_at = ?
+WHERE id = ? AND revoked_at IS NULL`, updateArgs...)
 	if err != nil {
 		return UploadCollection{}, err
 	}
@@ -2390,6 +2408,9 @@ WHERE id = ? AND revoked_at IS NULL`, name, expiresAt, maxUploads, maxFileBytes,
 	collection.ExpiresAt = expiresAt
 	collection.MaxUploads = maxUploads
 	collection.MaxFileBytes = maxFileBytes
+	if passwordHash != nil {
+		collection.PasswordHash = *passwordHash
+	}
 	return collection, nil
 }
 
@@ -2415,7 +2436,7 @@ func (s *Store) RevokeUploadCollection(ctx context.Context, id, userID int64, ad
 
 func scanUploadCollection(row *sql.Row) (UploadCollection, error) {
 	var collection UploadCollection
-	err := row.Scan(&collection.ID, &collection.CreatedBy, &collection.Name, &collection.Token, &collection.ExpiresAt, &collection.MaxUploads, &collection.UploadCount, &collection.MaxFileBytes, &collection.RevokedAt, &collection.CreatedAt)
+	err := row.Scan(&collection.ID, &collection.CreatedBy, &collection.Name, &collection.Token, &collection.PasswordHash, &collection.ExpiresAt, &collection.MaxUploads, &collection.UploadCount, &collection.MaxFileBytes, &collection.RevokedAt, &collection.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return UploadCollection{}, ErrNotFound
 	}
@@ -2494,8 +2515,8 @@ func (s *Store) CreateCollectionUploadTaskWithState(ctx context.Context, task Up
 		return CollectionUploadTaskState{}, ErrNotFound
 	}
 	var collection UploadCollection
-	err = tx.QueryRowContext(ctx, `SELECT id, created_by, name, token, expires_at, max_uploads, upload_count, max_file_bytes, COALESCE(revoked_at, ''), created_at
-FROM upload_collections WHERE token = ?`, token).Scan(&collection.ID, &collection.CreatedBy, &collection.Name, &collection.Token, &collection.ExpiresAt, &collection.MaxUploads, &collection.UploadCount, &collection.MaxFileBytes, &collection.RevokedAt, &collection.CreatedAt)
+	err = tx.QueryRowContext(ctx, `SELECT id, created_by, name, token, COALESCE(password_hash, ''), expires_at, max_uploads, upload_count, max_file_bytes, COALESCE(revoked_at, ''), created_at
+FROM upload_collections WHERE token = ?`, token).Scan(&collection.ID, &collection.CreatedBy, &collection.Name, &collection.Token, &collection.PasswordHash, &collection.ExpiresAt, &collection.MaxUploads, &collection.UploadCount, &collection.MaxFileBytes, &collection.RevokedAt, &collection.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return CollectionUploadTaskState{}, ErrNotFound
 	}
@@ -2671,8 +2692,8 @@ func (s *Store) CreateCollectionFile(ctx context.Context, token string, fileID i
 	}
 	defer tx.Rollback()
 	var collection UploadCollection
-	err = tx.QueryRowContext(ctx, `SELECT id, created_by, name, token, expires_at, max_uploads, upload_count, max_file_bytes, COALESCE(revoked_at, ''), created_at
-FROM upload_collections WHERE token = ?`, token).Scan(&collection.ID, &collection.CreatedBy, &collection.Name, &collection.Token, &collection.ExpiresAt, &collection.MaxUploads, &collection.UploadCount, &collection.MaxFileBytes, &collection.RevokedAt, &collection.CreatedAt)
+	err = tx.QueryRowContext(ctx, `SELECT id, created_by, name, token, COALESCE(password_hash, ''), expires_at, max_uploads, upload_count, max_file_bytes, COALESCE(revoked_at, ''), created_at
+FROM upload_collections WHERE token = ?`, token).Scan(&collection.ID, &collection.CreatedBy, &collection.Name, &collection.Token, &collection.PasswordHash, &collection.ExpiresAt, &collection.MaxUploads, &collection.UploadCount, &collection.MaxFileBytes, &collection.RevokedAt, &collection.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return UploadCollectionFile{}, ErrNotFound
 	}

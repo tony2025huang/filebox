@@ -18,6 +18,8 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/crypto/bcrypt"
+
 	"filebox/internal/store"
 )
 
@@ -26,15 +28,17 @@ type collectionCreateRequest struct {
 	ExpiresInHours int    `json:"expiresInHours"`
 	MaxUploads     int    `json:"maxUploads"`
 	MaxFileBytes   int64  `json:"maxFileBytes"`
+	Password       string `json:"password"`
 }
 
 // collectionUpdateRequest 是收集编辑请求体；expiresAt 为绝对时间（RFC3339），0=不限沿用创建语义。
 // collectionUpdateRequest is the collection-edit body; expiresAt is an absolute RFC3339 time, 0 keeps the "unlimited" semantics.
 type collectionUpdateRequest struct {
-	Name         string `json:"name"`
-	ExpiresAt    string `json:"expiresAt"`
-	MaxUploads   int    `json:"maxUploads"`
-	MaxFileBytes int64  `json:"maxFileBytes"`
+	Name         string  `json:"name"`
+	ExpiresAt    string  `json:"expiresAt"`
+	MaxUploads   int     `json:"maxUploads"`
+	MaxFileBytes int64   `json:"maxFileBytes"`
+	Password     *string `json:"password"`
 }
 
 type collectionUploadInitRequest struct {
@@ -69,6 +73,11 @@ func (s *Server) createCollection(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "收集链接参数无效")
 		return
 	}
+	passwordHash, err := hashCollectionPassword(input.Password)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "收集链接密码无效")
+		return
+	}
 	token, err := randomShareToken()
 	if err != nil {
 		log.Printf("create collection token: %v", err)
@@ -77,8 +86,9 @@ func (s *Server) createCollection(w http.ResponseWriter, r *http.Request) {
 	}
 	collection, err := s.store.CreateUploadCollection(r.Context(), store.UploadCollection{
 		CreatedBy: user.ID, Name: input.Name, Token: token,
-		ExpiresAt:  time.Now().UTC().Add(time.Duration(input.ExpiresInHours) * time.Hour).Format(time.RFC3339),
-		MaxUploads: input.MaxUploads, MaxFileBytes: input.MaxFileBytes,
+		PasswordHash: passwordHash,
+		ExpiresAt:    time.Now().UTC().Add(time.Duration(input.ExpiresInHours) * time.Hour).Format(time.RFC3339),
+		MaxUploads:   input.MaxUploads, MaxFileBytes: input.MaxFileBytes,
 	})
 	if err != nil {
 		log.Printf("create collection: %v", err)
@@ -201,7 +211,24 @@ func (s *Server) updateCollection(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "收集链接参数无效")
 		return
 	}
-	collection, err := s.store.UpdateUploadCollection(r.Context(), id, user.ID, user.Role == "admin", input.Name, input.ExpiresAt, input.MaxUploads, input.MaxFileBytes)
+	var passwordHash *string
+	if input.Password != nil {
+		if _, ownerErr := s.store.GetUploadCollection(r.Context(), id, user.ID, user.Role == "admin"); errors.Is(ownerErr, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "收集链接不存在")
+			return
+		} else if ownerErr != nil {
+			log.Printf("check collection password owner: %v", ownerErr)
+			writeError(w, http.StatusInternalServerError, "保存收集链接失败")
+			return
+		}
+		hash, hashErr := hashCollectionPassword(*input.Password)
+		if hashErr != nil {
+			writeError(w, http.StatusBadRequest, "收集链接密码无效")
+			return
+		}
+		passwordHash = &hash
+	}
+	collection, err := s.store.UpdateUploadCollection(r.Context(), id, user.ID, user.Role == "admin", input.Name, input.ExpiresAt, input.MaxUploads, input.MaxFileBytes, passwordHash)
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		writeError(w, http.StatusNotFound, "收集链接不存在")
@@ -258,10 +285,6 @@ func (s *Server) deleteCollection(w http.ResponseWriter, r *http.Request) {
 // collectionMeta 向匿名访问者仅公开安全的收集元数据。
 func (s *Server) collectionMeta(w http.ResponseWriter, r *http.Request) {
 	token := r.PathValue("token")
-	if !s.rateLimiter.allowPublicRequest(s.requestIP(r), 30, 10) {
-		s.collectionFailure(w, r, token, "rate_limited", http.StatusTooManyRequests, "请求过于频繁，请稍后重试", nil)
-		return
-	}
 	collection, err := s.store.GetUploadCollectionByToken(r.Context(), token)
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "收集链接不存在")
@@ -270,6 +293,14 @@ func (s *Server) collectionMeta(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		log.Printf("collection meta: %v", err)
 		writeError(w, http.StatusInternalServerError, "读取收集链接失败")
+		return
+	}
+	if !s.authorizeCollectionRequest(r, collection) {
+		s.rejectCollectionPassword(w, r, collection)
+		return
+	}
+	if !s.allowCollectionRequest(r, collection) {
+		s.collectionFailure(w, r, maskedCollectionToken(collection.Token), "rate_limited", http.StatusTooManyRequests, "请求过于频繁，请稍后重试", nil)
 		return
 	}
 	result := publicCollection(collection, false)
@@ -284,6 +315,7 @@ func publicCollection(collection store.UploadCollection, includeToken bool) map[
 		"maxUploads": collection.MaxUploads, "uploadCount": collection.UploadCount,
 		"maxFileBytes": collection.MaxFileBytes, "status": status,
 		"uploadAllowed": status == "active", "remainingSeconds": remainingSeconds(collection.ExpiresAt),
+		"passwordProtected": collection.PasswordHash != "",
 	}
 	if includeToken {
 		result["token"] = collection.Token
@@ -331,12 +363,19 @@ func publicCollectionFiles(items []store.UploadCollectionFile) []map[string]any 
 }
 
 func (s *Server) loadCollectionTask(r *http.Request) (store.UploadCollection, store.User, store.UploadTask, error) {
+	return s.loadCollectionTaskWithAuth(r, true)
+}
+
+func (s *Server) loadCollectionTaskWithAuth(r *http.Request, authorize bool) (store.UploadCollection, store.User, store.UploadTask, error) {
 	collection, err := s.store.GetUploadCollectionByToken(r.Context(), r.PathValue("token"))
 	if err != nil {
 		return store.UploadCollection{}, store.User{}, store.UploadTask{}, err
 	}
 	if err := collectionTaskStateForAPI(collection); err != nil {
 		return store.UploadCollection{}, store.User{}, store.UploadTask{}, err
+	}
+	if authorize && !s.authorizeCollectionRequest(r, collection) {
+		return store.UploadCollection{}, store.User{}, store.UploadTask{}, errCollectionUnauthorized
 	}
 	taskID := r.PathValue("taskID")
 	if taskID == "" {
@@ -354,6 +393,53 @@ func (s *Server) loadCollectionTask(r *http.Request) (store.UploadCollection, st
 		return store.UploadCollection{}, store.User{}, store.UploadTask{}, err
 	}
 	return collection, user, task, nil
+}
+
+var errCollectionUnauthorized = errors.New("collection unauthorized")
+
+const collectionPasswordHeader = "X-Collection-Password"
+
+func hashCollectionPassword(password string) (string, error) {
+	if password == "" {
+		return "", nil
+	}
+	if len([]byte(password)) > 72 {
+		return "", errors.New("collection password too long")
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return "", err
+	}
+	return string(hash), nil
+}
+
+func (s *Server) authorizeCollectionRequest(r *http.Request, collection store.UploadCollection) bool {
+	if collection.PasswordHash == "" {
+		return true
+	}
+	password := r.Header.Get(collectionPasswordHeader)
+	if password == "" {
+		_ = bcrypt.CompareHashAndPassword(loginDummyPasswordHash, []byte("collection-password-missing"))
+	} else if bcrypt.CompareHashAndPassword([]byte(collection.PasswordHash), []byte(password)) == nil {
+		return true
+	}
+	// Count only failed password attempts. Successful requests must remain usable
+	// after a visitor has made a few incorrect attempts while the failed-attempt
+	// bucket still throttles brute-force guesses.
+	ip := s.requestIP(r)
+	_ = s.rateLimiter.allowPublicRequest(ip+"\x00"+collection.Token, 10, 5)
+	return false
+}
+
+func (s *Server) allowCollectionRequest(r *http.Request, collection store.UploadCollection) bool {
+	if collection.PasswordHash != "" {
+		return true
+	}
+	return s.rateLimiter.allowPublicRequest(s.requestIP(r), 30, 10)
+}
+
+func (s *Server) rejectCollectionPassword(w http.ResponseWriter, r *http.Request, collection store.UploadCollection) {
+	s.collectionFailure(w, r, maskedCollectionToken(collection.Token), "unauthorized", http.StatusUnauthorized, "收集链接访问未授权", map[string]string{"code": "COLLECTION_UNAUTHORIZED"})
 }
 
 func collectionStateForAPI(collection store.UploadCollection) error {
@@ -402,23 +488,14 @@ func maskedCollectionToken(token string) string {
 // collectionUploadInit 校验收集限制并创建匿名上传任务，支持目录内秒传。
 func (s *Server) collectionUploadInit(w http.ResponseWriter, r *http.Request) {
 	token := r.PathValue("token")
-	if !s.rateLimiter.allowPublicRequest(s.requestIP(r), 30, 10) {
-		s.collectionFailure(w, r, token, "rate_limited", http.StatusTooManyRequests, "请求过于频繁，请稍后重试", nil)
-		return
-	}
-	var input collectionUploadInitRequest
-	if !decodeJSON(w, r, &input) {
-		s.collectionFailure(w, r, token, "invalid_request", http.StatusBadRequest, "请求格式无效", nil)
-		return
-	}
 	collection, err := s.store.GetUploadCollectionByToken(r.Context(), token)
 	if errors.Is(err, store.ErrNotFound) {
-		s.collectionFailure(w, r, token, "not_found", http.StatusNotFound, "收集链接不存在", nil)
+		s.collectionFailure(w, r, maskedCollectionToken(token), "not_found", http.StatusNotFound, "收集链接不存在", nil)
 		return
 	}
 	if err != nil {
 		log.Printf("load collection for init: %v", err)
-		s.collectionFailure(w, r, token, "load_failed", http.StatusInternalServerError, "读取收集链接失败", nil)
+		s.collectionFailure(w, r, maskedCollectionToken(token), "load_failed", http.StatusInternalServerError, "读取收集链接失败", nil)
 		return
 	}
 	rejectState := func(stateErr error) {
@@ -433,6 +510,19 @@ func (s *Server) collectionUploadInit(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := collectionStateForAPI(collection); err != nil {
 		rejectState(err)
+		return
+	}
+	if !s.authorizeCollectionRequest(r, collection) {
+		s.rejectCollectionPassword(w, r, collection)
+		return
+	}
+	if !s.allowCollectionRequest(r, collection) {
+		s.collectionFailure(w, r, maskedCollectionToken(collection.Token), "rate_limited", http.StatusTooManyRequests, "请求过于频繁，请稍后重试", nil)
+		return
+	}
+	var input collectionUploadInitRequest
+	if !decodeJSON(w, r, &input) {
+		s.collectionFailure(w, r, token, "invalid_request", http.StatusBadRequest, "请求格式无效", nil)
 		return
 	}
 	name, err := validateUploadName(input.Name)
@@ -559,13 +649,13 @@ func (s *Server) collectionUploadInit(w http.ResponseWriter, r *http.Request) {
 // collectionUploadChunk writes one anonymous chunk after token/task validation.
 // collectionUploadChunk 在 token 和任务校验后写入一个匿名分片。
 func (s *Server) collectionUploadChunk(w http.ResponseWriter, r *http.Request) {
-	if !s.rateLimiter.allowPublicRequest(s.requestIP(r), 30, 10) {
-		s.collectionFailure(w, r, r.PathValue("token"), "rate_limited", http.StatusTooManyRequests, "请求过于频繁，请稍后重试", nil)
-		return
-	}
 	collection, owner, task, err := s.loadCollectionTask(r)
 	if err != nil {
 		s.writeCollectionTaskError(w, r, err)
+		return
+	}
+	if !s.allowCollectionRequest(r, collection) {
+		s.collectionFailure(w, r, maskedCollectionToken(collection.Token), "rate_limited", http.StatusTooManyRequests, "请求过于频繁，请稍后重试", nil)
 		return
 	}
 	indexValue := r.PathValue("index")
@@ -661,6 +751,14 @@ func (s *Server) collectionUploadChunk(w http.ResponseWriter, r *http.Request) {
 func (s *Server) writeCollectionTaskError(w http.ResponseWriter, r *http.Request, err error) {
 	reason, status, message, data := "task_not_found", http.StatusNotFound, "上传任务不存在", any(nil)
 	switch {
+	case errors.Is(err, errCollectionUnauthorized):
+		collection, lookupErr := s.store.GetUploadCollectionByToken(r.Context(), r.PathValue("token"))
+		if lookupErr == nil {
+			s.rejectCollectionPassword(w, r, collection)
+			return
+		}
+		reason, status, message = "unauthorized", http.StatusUnauthorized, "收集链接访问未授权"
+		data = map[string]string{"code": "COLLECTION_UNAUTHORIZED"}
 	case errors.Is(err, store.ErrCollectionExpired):
 		reason, status, message, data = "collection_expired", http.StatusForbidden, "收集链接已过期", map[string]string{"code": "COLLECTION_EXPIRED"}
 	case errors.Is(err, store.ErrCollectionRevoked):
@@ -677,10 +775,6 @@ func (s *Server) writeCollectionTaskError(w http.ResponseWriter, r *http.Request
 
 // collectionUploadTaskState returns only the anonymous task state for this collection token.
 func (s *Server) collectionUploadTaskState(w http.ResponseWriter, r *http.Request) {
-	if !s.rateLimiter.allowPublicRequest(s.requestIP(r), 30, 10) {
-		s.collectionFailure(w, r, r.PathValue("token"), "rate_limited", http.StatusTooManyRequests, "请求过于频繁，请稍后重试", nil)
-		return
-	}
 	collection, err := s.store.GetUploadCollectionByToken(r.Context(), r.PathValue("token"))
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "收集链接不存在")
@@ -693,6 +787,14 @@ func (s *Server) collectionUploadTaskState(w http.ResponseWriter, r *http.Reques
 	}
 	if err := collectionTaskStateForAPI(collection); err != nil {
 		s.writeCollectionTaskError(w, r, err)
+		return
+	}
+	if !s.authorizeCollectionRequest(r, collection) {
+		s.rejectCollectionPassword(w, r, collection)
+		return
+	}
+	if !s.allowCollectionRequest(r, collection) {
+		s.collectionFailure(w, r, maskedCollectionToken(collection.Token), "rate_limited", http.StatusTooManyRequests, "请求过于频繁，请稍后重试", nil)
 		return
 	}
 	state, err := s.store.GetCollectionUploadTaskState(r.Context(), collection.ID, r.PathValue("taskID"))
@@ -709,13 +811,13 @@ func (s *Server) collectionUploadTaskState(w http.ResponseWriter, r *http.Reques
 }
 
 func (s *Server) collectionUploadStatus(w http.ResponseWriter, r *http.Request) {
-	if !s.rateLimiter.allowPublicRequest(s.requestIP(r), 30, 10) {
-		s.collectionFailure(w, r, r.PathValue("token"), "rate_limited", http.StatusTooManyRequests, "请求过于频繁，请稍后重试", nil)
-		return
-	}
-	_, _, task, err := s.loadCollectionTask(r)
+	collection, _, task, err := s.loadCollectionTask(r)
 	if err != nil {
 		s.writeCollectionTaskError(w, r, err)
+		return
+	}
+	if !s.allowCollectionRequest(r, collection) {
+		s.collectionFailure(w, r, maskedCollectionToken(collection.Token), "rate_limited", http.StatusTooManyRequests, "请求过于频繁，请稍后重试", nil)
 		return
 	}
 	chunks, err := s.store.ListChunks(r.Context(), task.ID)
@@ -735,8 +837,26 @@ func (s *Server) collectionUploadStatus(w http.ResponseWriter, r *http.Request) 
 // collectionUploadComplete merges chunks, verifies hashes, and records the remark.
 // collectionUploadComplete 合并分片、校验哈希并记录上传备注。
 func (s *Server) collectionUploadComplete(w http.ResponseWriter, r *http.Request) {
-	if !s.rateLimiter.allowPublicRequest(s.requestIP(r), 30, 10) {
-		s.collectionFailure(w, r, r.PathValue("token"), "rate_limited", http.StatusTooManyRequests, "请求过于频繁，请稍后重试", nil)
+	collection, err := s.store.GetUploadCollectionByToken(r.Context(), r.PathValue("token"))
+	if errors.Is(err, store.ErrNotFound) {
+		s.collectionFailure(w, r, maskedCollectionToken(r.PathValue("token")), "not_found", http.StatusNotFound, "收集链接不存在", nil)
+		return
+	}
+	if err != nil {
+		log.Printf("load collection for complete: %v", err)
+		s.collectionFailure(w, r, maskedCollectionToken(r.PathValue("token")), "load_failed", http.StatusInternalServerError, "读取收集链接失败", nil)
+		return
+	}
+	if err := collectionTaskStateForAPI(collection); err != nil {
+		s.writeCollectionTaskError(w, r, err)
+		return
+	}
+	if !s.authorizeCollectionRequest(r, collection) {
+		s.rejectCollectionPassword(w, r, collection)
+		return
+	}
+	if !s.allowCollectionRequest(r, collection) {
+		s.collectionFailure(w, r, maskedCollectionToken(collection.Token), "rate_limited", http.StatusTooManyRequests, "请求过于频繁，请稍后重试", nil)
 		return
 	}
 	var input collectionUploadCompleteRequest
@@ -755,7 +875,7 @@ func (s *Server) collectionUploadComplete(w http.ResponseWriter, r *http.Request
 		r.URL.RawQuery = query.Encode()
 		preloaded = true
 	}
-	collection, owner, task, err := s.loadCollectionTask(r)
+	collection, owner, task, err := s.loadCollectionTaskWithAuth(r, false)
 	if err != nil {
 		s.writeCollectionTaskError(w, r, err)
 		return
