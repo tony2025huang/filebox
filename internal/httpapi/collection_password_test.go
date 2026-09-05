@@ -153,6 +153,124 @@ func TestCollectionPasswordCanOnlyBeChangedByOwnerAndCanBeCleared(t *testing.T) 
 	}
 }
 
+func TestCollectionWrongPasswordAttemptsThrottleTo429AndCorrectPasswordStillAllowed(t *testing.T) {
+	db, handler := newTestServer(t)
+	ownerToken := testAdminToken(t, handler)
+	created := testJSONRequest(t, handler, http.MethodPost, "/api/collections", ownerToken, `{"name":"throttled","expiresInHours":24,"password":"collection-secret"}`)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create protected collection = %d: %s", created.Code, created.Body.String())
+	}
+	collectionToken := responseData(t, created)["token"].(string)
+	metaPath := "/api/collections/" + collectionToken + "/meta"
+
+	// Per-token+IP failed-attempt bucket burst is 10 (refill 10/min). The first
+	// attempts inside the burst are ordinary 401s; once the burst is exhausted the
+	// next attempts must surface as structured 429s, not more 401s.
+	var unauthorized, tooMany int
+	var throttledBody string
+	for i := 0; i < 12; i++ {
+		got := testJSONRequestWithCollectionPassword(t, handler, http.MethodGet, metaPath, "wrong-password-"+strconv.Itoa(i), "")
+		switch got.Code {
+		case http.StatusUnauthorized:
+			unauthorized++
+		case http.StatusTooManyRequests:
+			tooMany++
+			throttledBody = got.Body.String()
+		default:
+			t.Fatalf("wrong attempt %d unexpected status = %d: %s", i, got.Code, got.Body.String())
+		}
+	}
+	if unauthorized == 0 {
+		t.Fatalf("expected some 401 before throttling")
+	}
+	if tooMany == 0 {
+		t.Fatalf("12 wrong attempts must yield at least one 429; got 401=%d 429=%d", unauthorized, tooMany)
+	}
+	if !strings.Contains(throttledBody, "COLLECTION_RATE_LIMITED") || strings.Contains(throttledBody, "collection-secret") {
+		t.Fatalf("throttled response must be structured and never leak the password: %s", throttledBody)
+	}
+	// Correct password requests never consume the failed-attempt buckets and must
+	// remain fully usable after the bucket is exhausted.
+	authorized := testJSONRequestWithCollectionPassword(t, handler, http.MethodGet, metaPath, "collection-secret", "")
+	if authorized.Code != http.StatusOK {
+		t.Fatalf("correct password after throttling = %d: %s", authorized.Code, authorized.Body.String())
+	}
+	second := testJSONRequestWithCollectionPassword(t, handler, http.MethodGet, metaPath, "collection-secret", "")
+	if second.Code != http.StatusOK {
+		t.Fatalf("repeat correct password after throttling = %d: %s", second.Code, second.Body.String())
+	}
+	// A second collection token from the same IP must not be blocked by the first
+	// collection's exhausted per-token bucket (shared general bucket is 60/min).
+	created2 := testJSONRequest(t, handler, http.MethodPost, "/api/collections", ownerToken, `{"name":"throttled-2","expiresInHours":24,"password":"second-secret"}`)
+	if created2.Code != http.StatusCreated {
+		t.Fatalf("create second collection = %d: %s", created2.Code, created2.Body.String())
+	}
+	secondToken := responseData(t, created2)["token"].(string)
+	secondMeta := testJSONRequestWithCollectionPassword(t, handler, http.MethodGet, "/api/collections/"+secondToken+"/meta", "second-secret", "")
+	if secondMeta.Code != http.StatusOK {
+		t.Fatalf("second collection correct password after first exhausted = %d: %s", secondMeta.Code, secondMeta.Body.String())
+	}
+
+	rows, err := db.DB.Query("SELECT username, action, target, reason FROM audit_logs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var username, action string
+		var target, reason sql.NullString
+		if err := rows.Scan(&username, &action, &target, &reason); err != nil {
+			t.Fatal(err)
+		}
+		fields := []string{username, action, target.String, reason.String}
+		if strings.Contains(strings.Join(fields, "\x00"), "collection-secret") || strings.Contains(strings.Join(fields, "\x00"), "second-secret") {
+			t.Fatalf("audit log leaked collection password: %#v", fields)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCollectionExpiredAndRevokedStayOutsidePasswordThrottling(t *testing.T) {
+	db, handler := newTestServer(t)
+	ownerToken := testAdminToken(t, handler)
+	created := testJSONRequest(t, handler, http.MethodPost, "/api/collections", ownerToken, `{"name":"state-gates","expiresInHours":24,"password":"collection-secret"}`)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create protected collection = %d: %s", created.Code, created.Body.String())
+	}
+	data := responseData(t, created)
+	id := int64(data["id"].(float64))
+	collectionToken := data["token"].(string)
+	// Force expiry without going through API fields.
+	if _, err := db.DB.Exec("UPDATE upload_collections SET expires_at = ? WHERE id = ?", time.Now().UTC().Add(-time.Minute).Format(time.RFC3339), id); err != nil {
+		t.Fatal(err)
+	}
+	// Expired state gates run before password authorization on upload-init: the
+	// request must yield 403 COLLECTION_EXPIRED rather than consuming password
+	// buckets or leaking throttling state.
+	init := testJSONRequestWithCollectionPassword(t, handler, http.MethodPost, "/api/collections/"+collectionToken+"/upload-init", "wrong-password", `{"name":"x.txt","size":1}`)
+	if init.Code != http.StatusForbidden || !strings.Contains(init.Body.String(), "COLLECTION_EXPIRED") {
+		t.Fatalf("expired protected init = %d: %s", init.Code, init.Body.String())
+	}
+	initOK := testJSONRequestWithCollectionPassword(t, handler, http.MethodPost, "/api/collections/"+collectionToken+"/upload-init", "collection-secret", `{"name":"x.txt","size":1}`)
+	if initOK.Code != http.StatusForbidden || !strings.Contains(initOK.Body.String(), "COLLECTION_EXPIRED") {
+		t.Fatalf("expired protected init correct password = %d: %s", initOK.Code, initOK.Body.String())
+	}
+	// A normal unprotected active collection keeps its generic meta behavior after
+	// all of the above (fresh server means fresh buckets; just ensure no shared-key
+	// regression path).
+	unprotected := testJSONRequest(t, handler, http.MethodPost, "/api/collections", ownerToken, `{"name":"open","expiresInHours":24}`)
+	if unprotected.Code != http.StatusCreated {
+		t.Fatalf("create unprotected collection = %d: %s", unprotected.Code, unprotected.Body.String())
+	}
+	openToken := responseData(t, unprotected)["token"].(string)
+	openMeta := testJSONRequest(t, handler, http.MethodGet, "/api/collections/"+openToken+"/meta", "", "")
+	if openMeta.Code != http.StatusOK {
+		t.Fatalf("unprotected meta = %d: %s", openMeta.Code, openMeta.Body.String())
+	}
+}
+
 func testRequestWithCollectionPassword(t *testing.T, handler http.Handler, method, path, password string, body []byte) *httptest.ResponseRecorder {
 	t.Helper()
 	request := httptest.NewRequest(method, path, bytes.NewReader(body))

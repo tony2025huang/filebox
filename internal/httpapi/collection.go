@@ -298,8 +298,8 @@ func (s *Server) collectionMeta(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "读取收集链接失败")
 		return
 	}
-	if !s.authorizeCollectionRequest(r, collection) {
-		s.rejectCollectionPassword(w, r, collection)
+	if decision := s.authorizeCollectionRequest(r, collection); decision != collectionAuthAllow {
+		s.writeCollectionAuthResult(w, r, collection, decision)
 		return
 	}
 	if !s.allowCollectionRequest(r, collection) {
@@ -377,8 +377,13 @@ func (s *Server) loadCollectionTaskWithAuth(r *http.Request, authorize bool) (st
 	if err := collectionTaskStateForAPI(collection); err != nil {
 		return store.UploadCollection{}, store.User{}, store.UploadTask{}, err
 	}
-	if authorize && !s.authorizeCollectionRequest(r, collection) {
-		return store.UploadCollection{}, store.User{}, store.UploadTask{}, errCollectionUnauthorized
+	if authorize {
+		if decision := s.authorizeCollectionRequest(r, collection); decision != collectionAuthAllow {
+			if decision == collectionAuthRateLimited {
+				return store.UploadCollection{}, store.User{}, store.UploadTask{}, errCollectionRateLimited
+			}
+			return store.UploadCollection{}, store.User{}, store.UploadTask{}, errCollectionUnauthorized
+		}
 	}
 	taskID := r.PathValue("taskID")
 	if taskID == "" {
@@ -400,7 +405,22 @@ func (s *Server) loadCollectionTaskWithAuth(r *http.Request, authorize bool) (st
 
 var errCollectionUnauthorized = errors.New("collection unauthorized")
 
+// errCollectionRateLimited separates a throttled failed password attempt from an
+// ordinary unauthorized request on anonymous task endpoints so callers can emit a
+// structured 429 instead of another 401.
+var errCollectionRateLimited = errors.New("collection rate limited")
+
 const collectionPasswordHeader = "X-Collection-Password"
+
+// collectionAuthDecision is the tri-state outcome of password authorization for a
+// protected collection: allowed, wrong/missing password (401), or throttled (429).
+type collectionAuthDecision int
+
+const (
+	collectionAuthAllow collectionAuthDecision = iota
+	collectionAuthUnauthorized
+	collectionAuthRateLimited
+)
 
 func hashCollectionPassword(password string) (string, error) {
 	if password == "" {
@@ -416,29 +436,52 @@ func hashCollectionPassword(password string) (string, error) {
 	return string(hash), nil
 }
 
-func (s *Server) authorizeCollectionRequest(r *http.Request, collection store.UploadCollection) bool {
+// authorizeCollectionRequest validates the collection password when one is set.
+// The returned decision distinguishes an ordinary wrong-password request from one
+// that is actively throttled by failed-attempt limiting.
+func (s *Server) authorizeCollectionRequest(r *http.Request, collection store.UploadCollection) collectionAuthDecision {
 	if collection.PasswordHash == "" {
-		return true
+		return collectionAuthAllow
 	}
 	password := r.Header.Get(collectionPasswordHeader)
 	if password == "" {
 		_ = bcrypt.CompareHashAndPassword(loginDummyPasswordHash, []byte("collection-password-missing"))
 	} else if bcrypt.CompareHashAndPassword([]byte(collection.PasswordHash), []byte(password)) == nil {
-		return true
+		return collectionAuthAllow
 	}
-	// Count only failed password attempts. Successful requests must remain usable
-	// after a visitor has made a few incorrect attempts while the failed-attempt
-	// bucket still throttles brute-force guesses.
+	// Failed password attempt: enforce a per-token+IP failed-attempt bucket and a
+	// general per-IP failed-attempt bucket. Both are keyed so that correct-password
+	// requests above never consume them; only wrong attempts fill the buckets.
+	// The per-token bucket stops brute force against a single collection while the
+	// general bucket prevents cross-token scanning from one IP.
 	ip := s.requestIP(r)
-	_ = s.rateLimiter.allowPublicRequest(ip+"\x00"+collection.Token, 10, 5)
-	return false
+	if !s.rateLimiter.allowPublicRequest(ip+"\x00"+collection.Token, 10, 10) {
+		return collectionAuthRateLimited
+	}
+	if !s.rateLimiter.allowPublicRequest(ip+"\x00collection-failed-password", 60, 30) {
+		return collectionAuthRateLimited
+	}
+	return collectionAuthUnauthorized
 }
 
+// allowCollectionRequest provides general request-rate protection for anonymous
+// collection endpoints. Password-protected collections rely on failed-attempt
+// throttling from authorizeCollectionRequest, so they skip this generic bucket to
+// avoid penalizing correct-password requests.
 func (s *Server) allowCollectionRequest(r *http.Request, collection store.UploadCollection) bool {
 	if collection.PasswordHash != "" {
 		return true
 	}
 	return s.rateLimiter.allowPublicRequest(s.requestIP(r), 30, 10)
+}
+
+func (s *Server) writeCollectionAuthResult(w http.ResponseWriter, r *http.Request, collection store.UploadCollection, decision collectionAuthDecision) {
+	switch decision {
+	case collectionAuthRateLimited:
+		s.collectionFailure(w, r, maskedCollectionToken(collection.Token), "rate_limited", http.StatusTooManyRequests, "尝试过于频繁，请稍后重试", map[string]string{"code": "COLLECTION_RATE_LIMITED"})
+	default:
+		s.rejectCollectionPassword(w, r, collection)
+	}
 }
 
 func (s *Server) rejectCollectionPassword(w http.ResponseWriter, r *http.Request, collection store.UploadCollection) {
@@ -515,8 +558,8 @@ func (s *Server) collectionUploadInit(w http.ResponseWriter, r *http.Request) {
 		rejectState(err)
 		return
 	}
-	if !s.authorizeCollectionRequest(r, collection) {
-		s.rejectCollectionPassword(w, r, collection)
+	if decision := s.authorizeCollectionRequest(r, collection); decision != collectionAuthAllow {
+		s.writeCollectionAuthResult(w, r, collection, decision)
 		return
 	}
 	if !s.allowCollectionRequest(r, collection) {
@@ -769,6 +812,13 @@ func (s *Server) collectionUploadChunk(w http.ResponseWriter, r *http.Request) {
 func (s *Server) writeCollectionTaskError(w http.ResponseWriter, r *http.Request, err error) {
 	reason, status, message, data := "task_not_found", http.StatusNotFound, "上传任务不存在", any(nil)
 	switch {
+	case errors.Is(err, errCollectionRateLimited):
+		collection, lookupErr := s.store.GetUploadCollectionByToken(r.Context(), r.PathValue("token"))
+		if lookupErr == nil {
+			s.writeCollectionAuthResult(w, r, collection, collectionAuthRateLimited)
+			return
+		}
+		reason, status, message, data = "rate_limited", http.StatusTooManyRequests, "尝试过于频繁，请稍后重试", map[string]string{"code": "COLLECTION_RATE_LIMITED"}
 	case errors.Is(err, errCollectionUnauthorized):
 		collection, lookupErr := s.store.GetUploadCollectionByToken(r.Context(), r.PathValue("token"))
 		if lookupErr == nil {
@@ -807,8 +857,8 @@ func (s *Server) collectionUploadTaskState(w http.ResponseWriter, r *http.Reques
 		s.writeCollectionTaskError(w, r, err)
 		return
 	}
-	if !s.authorizeCollectionRequest(r, collection) {
-		s.rejectCollectionPassword(w, r, collection)
+	if decision := s.authorizeCollectionRequest(r, collection); decision != collectionAuthAllow {
+		s.writeCollectionAuthResult(w, r, collection, decision)
 		return
 	}
 	if !s.allowCollectionRequest(r, collection) {
@@ -869,8 +919,8 @@ func (s *Server) collectionUploadComplete(w http.ResponseWriter, r *http.Request
 		s.writeCollectionTaskError(w, r, err)
 		return
 	}
-	if !s.authorizeCollectionRequest(r, collection) {
-		s.rejectCollectionPassword(w, r, collection)
+	if decision := s.authorizeCollectionRequest(r, collection); decision != collectionAuthAllow {
+		s.writeCollectionAuthResult(w, r, collection, decision)
 		return
 	}
 	if !s.allowCollectionRequest(r, collection) {
