@@ -314,3 +314,28 @@ join 链与最终落盘：
 - `upload_collections.upload_count` 只在完成上传或秒传写入收集记录时递增，不是未完成任务计数；owner 的 pending 字节配额仍按原有实现计算，本次不新增按字节上限。
 - `CreateCollectionUploadTask` 在同一 `BeginTx` 中先对 collection 执行写锁语句，再按 `collection_id` 和状态计数；达到 50 返回现有结构化 `COLLECTION_LIMIT` 业务错误，否则插入 `pending` 任务并提交。SQLite `Open` 将连接池固定为单连接，并配置 WAL/`busy_timeout`，因此并发 init 不会同时越过 50。
 - 完成方法在同一 store 事务中将任务写为 `complete`；取消和过期清理删除 `pending` 行，计数查询因此天然释放容量。
+
+## 待用户拍板的开放项【待确认】
+
+### O1 SFTP 主机密钥未配置时的信任策略
+
+- 现状（证据）：`internal/httpapi/sync.go:1105-1108` 未配置指纹时回退 `ssh.InsecureIgnoreHostKey()` 并打警告日志；配置字段已端到端存在（校验 `sync.go:177-186`、持久化 `:224/:294-316`），空值被接受以兼容既有数据。FileBox 对端走 HTTP 适配器，无 SSH 逻辑（`sync_filebox.go` 零命中）。
+- 候选方案（请用户选择，不代拍板）：
+  - A. 强制显式指纹：新建/更新远程系统必须配置 `hostKeyFingerprint`，否则拒绝保存；存量无指纹记录编辑时强制补填。
+  - B. TOFU 首次信任并持久化：首次连接记录指纹（需新增数据存储字段并处理并发），后续连接比对。
+  - C. 维持现状：无指纹仅告警 + `InsecureIgnoreHostKey`，界面/文档显著提示风险。
+  - D. 不处理。
+- 约束：任何方案不得破坏既有有指纹记录部署；指纹校验路径（严格 SHA256 比对）保持不回退。
+
+### O2 listCollections 是否改 SQL 分页
+
+- 现状（证据）：`internal/httpapi/collection.go:100-123` 全量查出后内存切片分页；`store.go:2189-2197` SQL 无 LIMIT。pageSize 上限 100（`server.go:4630`）。低优先逻辑项，不涉安全。
+- 候选：A. 保持现状并记录已知限制（推荐，用户目录量级小）；B. 改 SQL LIMIT/OFFSET（涉及 store 签名与调用方）。
+
+### 已确认修复汇总（2026-09-04，全项 FIXED-AS-EXPECTED + 回归测试通过）
+
+- H1-SHARE-PREVIEW / H1-SHARE-RANGE / H1-GROUP-EXPIRY：`ec11dc3`、`bdf9ac7`（预览计次、Range 窗口耗尽后拒绝、过期聚合 404 不泄成员）。
+- H2-SFTP-PULL-PATH / H2-FILEBOX-PULL-PATH：`83a0009`（逐段校验 + data 根 containment）。
+- 加固批次：`7a9a22a`（LIKE 转义、分页上界、ZIP 残留清理、登录时序、聚合扣次顺序一致化）。
+- V023 C/1：`48de889`（匿名收集未完成上传任务上限 50）。
+- v023 独立加密密钥：`3d86796`（新密钥 + JWT 派生密文兼容迁移 + 惰性迁移）。
