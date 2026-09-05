@@ -192,6 +192,40 @@ func TestCollectionUploadRejectsWhenDiskFull(t *testing.T) {
 	}
 }
 
+func TestCollectionUploadInitRejectsPendingTaskLimit(t *testing.T) {
+	db, handler := newTestServer(t)
+	adminToken := testAdminToken(t, handler)
+	created := testJSONRequest(t, handler, http.MethodPost, "/api/collections", adminToken, `{"name":"pending-limit","expiresInHours":24,"maxUploads":0}`)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create collection status = %d: %s", created.Code, created.Body.String())
+	}
+	collection := responseData(t, created)
+	collectionID := int64(collection["id"].(float64))
+	collectionToken := collection["token"].(string)
+	ctx := context.Background()
+	for i := 0; i < store.MaxPendingCollectionUploadTasks; i++ {
+		id := "http-pending-limit-task-" + strconv.Itoa(i)
+		if err := db.CreateCollectionUploadTask(ctx, store.UploadTask{
+			ID: id, UserID: 1, CollectionID: collectionID, Name: id,
+			Size: 1, ChunkSize: 1, TotalChunks: 1, Status: "pending", Mime: "text/plain",
+		}, collectionToken); err != nil {
+			t.Fatalf("seed pending task %d = %v", i+1, err)
+		}
+	}
+	init := testJSONRequest(t, handler, http.MethodPost, "/api/collections/"+collectionToken+"/upload-init", "", `{"name":"rejected.txt","size":1,"chunkSize":0}`)
+	if init.Code != http.StatusForbidden {
+		t.Fatalf("pending task limit status = %d: %s", init.Code, init.Body.String())
+	}
+	var body response
+	if err := json.Unmarshal(init.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	data, ok := body.Data.(map[string]any)
+	if !ok || data["code"] != "COLLECTION_LIMIT" {
+		t.Fatalf("pending task limit body = %s", init.Body.String())
+	}
+}
+
 func TestUploadCollectionLimitsExpiryQuotaAndOwnership(t *testing.T) {
 	db, handler := newTestServer(t)
 	token := testAdminToken(t, handler)

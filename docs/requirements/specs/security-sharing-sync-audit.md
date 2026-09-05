@@ -278,3 +278,14 @@ join 链与最终落盘：
 - 测试命令：`go test ./internal/httpapi/ ./internal/store/`
 - 测试结果：通过；`filebox/internal/httpapi` 与 `filebox/internal/store` 均输出 `ok`（cached）。
 - 未运行：部署、Release、前端构建、全量测试及未被用户授权的其他命令。
+
+## V023 C/1：匿名收集未完成上传任务上限
+
+- 【业务确认】2026-09-04：匿名收集链接未完成上传任务上限 50（不设字节上限）。
+
+### 技术发现
+
+- `upload_tasks.status` 是独立状态列：正常上传任务创建为 `pending`，完成路径在同一 store 事务中写为 `complete`。当前没有持久化的 `cancelled` 或 `expired` 状态；取消和 24 小时过期清理都是删除 `pending` 任务行，因此计数排除 `complete`、`cancelled`、`expired`，未知状态按未完成计数。
+- `upload_collections.upload_count` 只在完成上传或秒传写入收集记录时递增，不是未完成任务计数；owner 的 pending 字节配额仍按原有实现计算，本次不新增按字节上限。
+- `CreateCollectionUploadTask` 在同一 `BeginTx` 中先对 collection 执行写锁语句，再按 `collection_id` 和状态计数；达到 50 返回现有结构化 `COLLECTION_LIMIT` 业务错误，否则插入 `pending` 任务并提交。SQLite `Open` 将连接池固定为单连接，并配置 WAL/`busy_timeout`，因此并发 init 不会同时越过 50。
+- 完成方法在同一 store 事务中将任务写为 `complete`；取消和过期清理删除 `pending` 行，计数查询因此天然释放容量。

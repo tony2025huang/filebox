@@ -170,6 +170,10 @@ type UploadCollection struct {
 	CreatedAt    string `json:"createdAt"`
 }
 
+// MaxPendingCollectionUploadTasks limits unfinished tasks for one public collection.
+// MaxPendingCollectionUploadTasks 限制单一公开收集链接的未完成上传任务数。
+const MaxPendingCollectionUploadTasks = 50
+
 // UploadCollectionFile records the source collection for an uploaded file.
 // UploadCollectionFile 记录文件来自哪个收集链接以及访客备注。
 type UploadCollectionFile struct {
@@ -2330,6 +2334,20 @@ func (s *Store) CreateCollectionUploadTask(ctx context.Context, task UploadTask,
 		return err
 	}
 	defer tx.Rollback()
+	// Serialize collection init writers before counting. SQLite has no row-level
+	// SELECT lock; this write lock plus Open's single connection prevents two
+	// concurrent init transactions from observing the same pending-task count.
+	lockResult, err := tx.ExecContext(ctx, "UPDATE upload_collections SET updated_at = updated_at WHERE token = ?", token)
+	if err != nil {
+		return err
+	}
+	locked, err := lockResult.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if locked != 1 {
+		return ErrNotFound
+	}
 	var collection UploadCollection
 	err = tx.QueryRowContext(ctx, `SELECT id, created_by, name, token, expires_at, max_uploads, upload_count, max_file_bytes, COALESCE(revoked_at, ''), created_at
 FROM upload_collections WHERE token = ?`, token).Scan(&collection.ID, &collection.CreatedBy, &collection.Name, &collection.Token, &collection.ExpiresAt, &collection.MaxUploads, &collection.UploadCount, &collection.MaxFileBytes, &collection.RevokedAt, &collection.CreatedAt)
@@ -2348,6 +2366,14 @@ FROM upload_collections WHERE token = ?`, token).Scan(&collection.ID, &collectio
 	}
 	if task.UserID != collection.CreatedBy {
 		return ErrNotFound
+	}
+	var pendingTasks int64
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM upload_tasks
+		WHERE collection_id = ? AND status NOT IN ('complete', 'cancelled', 'expired')`, collection.ID).Scan(&pendingTasks); err != nil {
+		return err
+	}
+	if pendingTasks >= MaxPendingCollectionUploadTasks {
+		return ErrCollectionLimit
 	}
 	var quota, used, pending int64
 	if err := tx.QueryRowContext(ctx, "SELECT quota_bytes, used_bytes FROM users WHERE id = ?", task.UserID).Scan(&quota, &used); err != nil {

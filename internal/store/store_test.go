@@ -217,6 +217,133 @@ func TestClearAllLocks(t *testing.T) {
 	}
 }
 
+func TestCollectionPendingUploadTaskLimitAndRelease(t *testing.T) {
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.EnsureAdmin("admin", "admin123", 1024); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	collection, err := db.CreateUploadCollection(ctx, UploadCollection{
+		CreatedBy: 1, Name: "pending-limit", Token: "pending-limit-token",
+		ExpiresAt: time.Now().UTC().Add(time.Hour).Format(time.RFC3339),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tasks := make([]string, 0, MaxPendingCollectionUploadTasks)
+	for i := 0; i < MaxPendingCollectionUploadTasks; i++ {
+		id := "pending-limit-task-" + strconv.Itoa(i)
+		tasks = append(tasks, id)
+		if err := db.CreateCollectionUploadTask(ctx, UploadTask{
+			ID: id, UserID: 1, CollectionID: collection.ID, Name: id,
+			Size: 1, ChunkSize: 1, TotalChunks: 1, Status: "pending", Mime: "text/plain",
+		}, collection.Token); err != nil {
+			t.Fatalf("CreateCollectionUploadTask(%d) = %v", i+1, err)
+		}
+	}
+	if err := db.CreateCollectionUploadTask(ctx, UploadTask{
+		ID: "pending-limit-task-51", UserID: 1, CollectionID: collection.ID,
+		Name: "rejected", Size: 1, ChunkSize: 1, TotalChunks: 1, Status: "pending", Mime: "text/plain",
+	}, collection.Token); !errors.Is(err, ErrCollectionLimit) {
+		t.Fatalf("51st CreateCollectionUploadTask() = %v, want ErrCollectionLimit", err)
+	}
+
+	completedTask, err := db.GetUploadTask(ctx, tasks[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.CompleteCollectionFile(ctx, completedTask, File{
+		UserID: 1, Name: "completed.txt", StoredName: "completed.txt", Size: 1,
+		Mime: "text/plain", SHA256: "completed-sha", MD5: "completed-md5",
+		StoragePath: "files/1/completed.txt",
+	}, "completed.txt", ""); err != nil {
+		t.Fatalf("CompleteCollectionFile() = %v", err)
+	}
+	if err := db.DeleteUploadTask(ctx, tasks[1]); err != nil {
+		t.Fatalf("DeleteUploadTask(cancelled) = %v", err)
+	}
+	old := time.Now().UTC().Add(-25 * time.Hour).Format(time.RFC3339)
+	if _, err := db.DB.Exec("UPDATE upload_tasks SET created_at = ? WHERE id = ?", old, tasks[2]); err != nil {
+		t.Fatal(err)
+	}
+	expired, err := db.ListExpiredUploadTasks(ctx, 24*time.Hour)
+	if err != nil || len(expired) != 1 || expired[0] != tasks[2] {
+		t.Fatalf("ListExpiredUploadTasks() = %v, %v; want %q", expired, err, tasks[2])
+	}
+	if err := db.DeleteUploadTask(ctx, tasks[2]); err != nil {
+		t.Fatalf("DeleteUploadTask(expired) = %v", err)
+	}
+
+	for i := 0; i < 3; i++ {
+		id := "pending-limit-replacement-" + strconv.Itoa(i)
+		if err := db.CreateCollectionUploadTask(ctx, UploadTask{
+			ID: id, UserID: 1, CollectionID: collection.ID, Name: id,
+			Size: 1, ChunkSize: 1, TotalChunks: 1, Status: "pending", Mime: "text/plain",
+		}, collection.Token); err != nil {
+			t.Fatalf("replacement CreateCollectionUploadTask(%d) = %v", i+1, err)
+		}
+	}
+	var pendingTasks int
+	if err := db.DB.QueryRow("SELECT COUNT(*) FROM upload_tasks WHERE collection_id = ? AND status NOT IN ('complete', 'cancelled', 'expired')", collection.ID).Scan(&pendingTasks); err != nil {
+		t.Fatal(err)
+	}
+	if pendingTasks != MaxPendingCollectionUploadTasks {
+		t.Fatalf("pending task count after releases = %d, want %d", pendingTasks, MaxPendingCollectionUploadTasks)
+	}
+}
+
+func TestConcurrentCollectionPendingUploadTaskLimit(t *testing.T) {
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.EnsureAdmin("admin", "admin123", 1024); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	collection, err := db.CreateUploadCollection(ctx, UploadCollection{
+		CreatedBy: 1, Name: "concurrent-pending-limit", Token: "concurrent-pending-limit-token",
+		ExpiresAt: time.Now().UTC().Add(time.Hour).Format(time.RFC3339),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := make(chan struct{})
+	errs := make(chan error, MaxPendingCollectionUploadTasks+1)
+	for i := 0; i < MaxPendingCollectionUploadTasks+1; i++ {
+		go func(index int) {
+			<-start
+			errs <- db.CreateCollectionUploadTask(ctx, UploadTask{
+				ID: "concurrent-pending-task-" + strconv.Itoa(index), UserID: 1,
+				CollectionID: collection.ID, Name: "concurrent-" + strconv.Itoa(index),
+				Size: 1, ChunkSize: 1, TotalChunks: 1, Status: "pending", Mime: "text/plain",
+			}, collection.Token)
+		}(i)
+	}
+	close(start)
+	successes := 0
+	limitErrors := 0
+	for i := 0; i < MaxPendingCollectionUploadTasks+1; i++ {
+		err := <-errs
+		switch {
+		case err == nil:
+			successes++
+		case errors.Is(err, ErrCollectionLimit):
+			limitErrors++
+		default:
+			t.Fatalf("concurrent CreateCollectionUploadTask() = %v", err)
+		}
+	}
+	if successes != MaxPendingCollectionUploadTasks || limitErrors != 1 {
+		t.Fatalf("concurrent results = %d successes, %d limit errors; want %d, 1", successes, limitErrors, MaxPendingCollectionUploadTasks)
+	}
+}
+
 func TestStorageNameCandidateKeepsExtensionAfterSuffix(t *testing.T) {
 	if got := storageNameCandidate("conflict.txt", 1); got != "conflict (1).txt" {
 		t.Fatalf("storageNameCandidate() = %q, want conflict (1).txt", got)
