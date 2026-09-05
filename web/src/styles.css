@@ -49,6 +49,7 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 .public-drop-zone.dragging { border-color: var(--brand-color); background: var(--brand-color-soft); }
 .public-drop-zone strong { color: #264653; font-size: 15px; }
 .public-drop-zone span { color: #8797aa; font-size: 12px; }
+.public-upload-buttons { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
 .public-queue { border: 1px solid #dce5ed; background: #fff; }
 .public-queue-row { display: flex; align-items: center; gap: 10px; padding: 12px; border-bottom: 1px solid #edf1f5; }
 .public-queue-row:last-child { border-bottom: 0; }

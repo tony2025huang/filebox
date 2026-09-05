@@ -22,8 +22,8 @@
         <p v-if="!meta.uploadAllowed" class="alert error">{{ statusLabel }}</p>
         <form v-else class="public-upload-form" @submit.prevent="startQueue">
           <label class="form-label">{{ t('collection.remark') }}<input v-model.trim="remark" maxlength="2000" :placeholder="t('collection.remarkPlaceholder')" /></label>
-          <div class="public-drop-zone" :class="{ dragging }" @dragover.prevent="dragging = true" @dragleave.prevent="dragging = false" @drop.prevent="handleDrop"><UploadCloud :size="30" /><strong>{{ t('collection.drop') }}</strong><span>{{ t('collection.uploadCopy') }}</span><button type="button" class="secondary-button" @click="fileInput?.click()"><Upload :size="17" /> {{ t('collection.choose') }}</button><input ref="fileInput" type="file" multiple hidden @change="handleInput" /></div>
-          <div v-if="queue.length" class="public-queue"><div v-for="item in queue" :key="item.id" class="public-queue-row"><div class="transfer-main"><div class="transfer-name"><strong :title="item.file.name">{{ item.file.name }}</strong><span>{{ item.status }}</span></div><div class="progress-track"><span :style="{ width: item.progress + '%' }"></span></div><div v-if="item.state === 'queued'" class="collection-queued-card" role="status" aria-live="polite"><div class="collection-queued-heading"><LoaderCircle :size="16" class="spin" /><strong>{{ t('collection.queued') }}</strong></div><div class="collection-queued-details"><span v-if="item.queuePosition !== null">{{ t('collection.queuePosition', { position: item.queuePosition }) }}</span><span>{{ t('collection.waitReasonLabel') }}: {{ queueWaitReasonLabel(item) }}</span></div></div></div><span class="transfer-percent">{{ item.failed ? '' : item.progress + '%' }}</span></div></div>
+          <div class="public-drop-zone" :class="{ dragging }" @dragover.prevent="dragging = true" @dragleave.prevent="dragging = false" @drop.prevent="handleDrop"><UploadCloud :size="30" /><strong>{{ t('collection.drop') }}</strong><span>{{ t('collection.uploadCopy') }}</span><div class="public-upload-buttons"><button type="button" class="secondary-button" @click="fileInput?.click()"><Upload :size="17" /> {{ t('collection.choose') }}</button><button type="button" class="secondary-button" @click="folderInput?.click()"><FolderUp :size="17" /> {{ t('collection.chooseFolder') }}</button></div><input ref="fileInput" type="file" multiple hidden @change="handleInput" /><input ref="folderInput" type="file" webkitdirectory directory multiple hidden @change="handleFolderInput" /></div>
+          <div v-if="queue.length" class="public-queue"><div v-for="item in queue" :key="item.id" class="public-queue-row"><div class="transfer-main"><div class="transfer-name"><strong :title="item.label">{{ item.label }}</strong><span>{{ item.status }}</span></div><div class="progress-track"><span :style="{ width: item.progress + '%' }"></span></div><div v-if="item.state === 'queued'" class="collection-queued-card" role="status" aria-live="polite"><div class="collection-queued-heading"><LoaderCircle :size="16" class="spin" /><strong>{{ t('collection.queued') }}</strong></div><div class="collection-queued-details"><span v-if="item.queuePosition !== null">{{ t('collection.queuePosition', { position: item.queuePosition }) }}</span><span>{{ t('collection.waitReasonLabel') }}: {{ queueWaitReasonLabel(item) }}</span></div></div></div><span class="transfer-percent">{{ item.failed ? '' : item.progress + '%' }}</span></div></div>
           <p v-if="error" class="alert error">{{ error }}</p><p v-if="notice" class="alert success">{{ notice }}</p>
           <button class="primary-button submit-button" :disabled="running || !queue.length"><span>{{ running ? t('collection.uploading') : t('collection.upload') }}</span><UploadCloud :size="17" /></button>
         </form>
@@ -37,7 +37,7 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
-import { CheckCircle2, LoaderCircle, Lock, RefreshCw, Upload, UploadCloud, XCircle } from 'lucide-vue-next'
+import { CheckCircle2, FolderUp, LoaderCircle, Lock, RefreshCw, Upload, UploadCloud, XCircle } from 'lucide-vue-next'
 import { computeFileSHA256, localizeError } from '../api'
 import { brand, loadBrand } from '../brand'
 import BrandFooter from '../components/BrandFooter.vue'
@@ -52,7 +52,7 @@ const QUEUE_JITTER = 250
 
 const route = useRoute()
 const token = computed(() => String(route.params.token || ''))
-const loading = ref(true); const metaError = ref(''); const error = ref(''); const notice = ref(''); const meta = ref({}); const remark = ref(''); const queue = ref([]); const completed = ref([]); const dragging = ref(false); const running = ref(false); const fileInput = ref(null); const passwordInput = ref(null)
+const loading = ref(true); const metaError = ref(''); const error = ref(''); const notice = ref(''); const meta = ref({}); const remark = ref(''); const queue = ref([]); const completed = ref([]); const dragging = ref(false); const running = ref(false); const fileInput = ref(null); const folderInput = ref(null); const passwordInput = ref(null)
 const passwordGate = ref(false); const passwordInputValue = ref(''); const passwordError = ref(''); const passwordSubmitting = ref(false)
 const activePassword = ref('')
 const mounted = ref(false); const viewGeneration = ref(0)
@@ -139,12 +139,73 @@ async function loadMeta() {
   }
 }
 
-function createUploadItem(file) {
-  return { id: `${Date.now()}-${Math.random()}-${file.name}`, file, progress: 0, status: t('collection.pending'), failed: false, state: 'pending', taskId: '', sha256: '', chunkSize: 0, totalChunks: 0, queuePosition: null, waitReason: '', pollTimer: null, pollController: null, pollFailures: 0, uploadController: null, running: false, generation: viewGeneration.value }
+function createUploadItem(file, relPath = '') {
+  const path = relPath || file.name
+  const parts = path.split('/').filter(Boolean)
+  const dirParts = parts.length > 1 ? parts.slice(0, -1) : []
+  const dir = dirParts.join('/')
+  const label = dir ? `${dir}/${file.name}` : file.name
+  return { id: `${Date.now()}-${Math.random()}-${file.name}`, file, relPath: path !== file.name ? path : '', dir, label, progress: 0, status: t('collection.pending'), failed: false, state: 'pending', taskId: '', sha256: '', chunkSize: 0, totalChunks: 0, queuePosition: null, waitReason: '', pollTimer: null, pollController: null, pollFailures: 0, uploadController: null, running: false, generation: viewGeneration.value }
 }
-function addFiles(files) { for (const file of files) queue.value.push(createUploadItem(file)) }
-function handleInput(event) { addFiles(event.target.files || []); event.target.value = '' }
-function handleDrop(event) { dragging.value = false; addFiles(event.dataTransfer.files || []) }
+function addFiles(files) {
+  let added = 0
+  for (const entry of files) {
+    const file = entry.file || entry
+    const relPath = entry.relPath || file.webkitRelativePath || ''
+    queue.value.push(createUploadItem(file, relPath))
+    added += 1
+  }
+  if (!added && files.length > 0) notice.value = t('collection.folderEmpty')
+}
+function handleInput(event) { const picked = [...(event.target.files || [])].map(file => ({ file, relPath: file.webkitRelativePath || '' })); addFiles(picked); event.target.value = '' }
+function handleFolderInput(event) {
+  const files = [...(event.target.files || [])]
+  if (!files.length) { notice.value = t('collection.folderEmpty'); event.target.value = ''; return }
+  const picked = files.map(file => ({ file, relPath: file.webkitRelativePath || file.name }))
+  addFiles(picked)
+  event.target.value = ''
+}
+// collectDropEntries 递归读取浏览器目录条目；不支持条目 API 时回退到 webkitRelativePath。
+// collectDropEntries recursively walks browser directory entries and falls back to webkitRelativePath.
+async function collectDropEntries(event) {
+  const items = [...(event.dataTransfer?.items || [])]
+  if (!items.some(item => typeof item.webkitGetAsEntry === 'function')) {
+    const files = [...(event.dataTransfer?.files || [])]
+    if (!files.length) return { list: [], emptyFolders: 0 }
+    const list = files.map(file => ({ file, relPath: file.webkitRelativePath || file.name }))
+    return { list, emptyFolders: 0 }
+  }
+  const list = []
+  let emptyFolders = 0
+  async function visit(entry, prefix = '') {
+    if (entry.isFile) {
+      const file = await new Promise((resolve, reject) => entry.file(resolve, reject))
+      list.push({ file, relPath: `${prefix}${file.name}` })
+      return
+    }
+    if (!entry.isDirectory) return
+    const reader = entry.createReader()
+    const entries = []
+    while (true) {
+      const batch = await new Promise((resolve, reject) => reader.readEntries(resolve, reject))
+      if (!batch.length) break
+      entries.push(...batch)
+    }
+    if (!entries.length) emptyFolders += 1
+    for (const child of entries) await visit(child, `${prefix}${entry.name}/`)
+  }
+  for (const item of items) {
+    const entry = item.webkitGetAsEntry?.()
+    if (entry) await visit(entry)
+  }
+  return { list, emptyFolders }
+}
+async function handleDrop(event) {
+  dragging.value = false
+  const { list, emptyFolders } = await collectDropEntries(event)
+  if (!list.length) { notice.value = emptyFolders ? t('collection.folderEmpty') : t('files.dropEmpty'); return }
+  addFiles(list)
+}
 function safeQueuePosition(value) { const position = Number(value); return Number.isSafeInteger(position) && position > 0 ? position : null }
 function queueWaitReasonLabel(item) { return t(queueWaitReasonKeys[item.waitReason] || 'collection.waitReason.unknown') }
 function isCurrent(item, generation = item.generation) { return mounted.value && generation === viewGeneration.value && queue.value.includes(item) }
@@ -175,12 +236,12 @@ function isRetryablePollError(err) { return err?.status === 429 || err?.status >
 function setItemFailure(item, err) {
   const message = err?.message || t('collection.queueFailed')
   item.failed = true; item.state = 'failed'; item.status = message; item.running = false
-  if (isCurrent(item) && !passwordGate.value) error.value = err?.data?.code === 'COLLECTION_QUOTA_EXCEEDED' ? message : `${item.file.name}: ${message}`
+  if (isCurrent(item) && !passwordGate.value) error.value = err?.data?.code === 'COLLECTION_QUOTA_EXCEEDED' ? message : `${item.label || item.file.name}: ${message}`
 }
 function markCompleted(item, result) {
   if (!isCurrent(item) || item.state === 'completed') return
   item.progress = 100; item.state = 'completed'; item.failed = false; item.running = false; item.status = t('collection.completed')
-  completed.value.push({ ...(result || {}), id: item.id, name: result?.name || item.file.name, size: result?.size ?? item.file.size })
+  completed.value.push({ ...(result || {}), id: item.id, name: result?.name || item.label || item.file.name, size: result?.size ?? item.file.size })
 }
 
 async function pollQueueState(item) {
@@ -258,7 +319,7 @@ async function uploadOne(item) {
     const sha256 = await computeFileSHA256(item.file, progress => { if (isCurrent(item, generation)) item.progress = Math.round(progress * 0.2) })
     throwIfStale(item, generation, controller.signal)
     item.sha256 = sha256
-    const init = await request(`/api/collections/${encodeURIComponent(uploadToken)}/upload-init`, { method: 'POST', body: JSON.stringify({ name: item.file.name, size: item.file.size, chunkSize: item.file.size <= 8 * 1024 * 1024 ? item.file.size : 4 * 1024 * 1024, sha256, mime: item.file.type, remark: remark.value }), signal: controller.signal })
+    const init = await request(`/api/collections/${encodeURIComponent(uploadToken)}/upload-init`, { method: 'POST', body: JSON.stringify({ name: item.file.name, size: item.file.size, chunkSize: item.file.size <= 8 * 1024 * 1024 ? item.file.size : 4 * 1024 * 1024, sha256, mime: item.file.type, remark: remark.value, ...(item.dir ? { dir: item.dir } : {}) }), signal: controller.signal })
     if (init.data?.instant) return init.data.file
     const data = init.data || {}
     if (!data.taskId || !Number.isSafeInteger(Number(data.chunkSize)) || !Number.isSafeInteger(Number(data.totalChunks)) || Number(data.chunkSize) <= 0 || Number(data.totalChunks) <= 0) throw new Error(t('collection.queueFailed'))

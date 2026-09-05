@@ -49,6 +49,9 @@ type collectionUploadInitRequest struct {
 	MD5       string `json:"md5"`
 	Mime      string `json:"mime"`
 	Remark    string `json:"remark"`
+	// Dir 是相对收集目录根（uploads/<token>）的嵌套目录；空表示平铺。逐段校验与私有上传一致。
+	// Dir is a nested relative path under the collection root (uploads/<token>); empty uploads flat. Segments are validated like private uploads.
+	Dir string `json:"dir"`
 }
 
 type collectionUploadCompleteRequest struct {
@@ -530,6 +533,16 @@ func (s *Server) collectionUploadInit(w http.ResponseWriter, r *http.Request) {
 		s.collectionFailure(w, r, input.Name, "invalid_name", http.StatusBadRequest, "文件名或文件大小无效", nil)
 		return
 	}
+	// dir 可选：相对收集目录根（uploads/<token>）的嵌套目录。复用与私有上传同一套共享校验，
+	// 逐段拒绝绝对路径、..、反斜杠、控制字符与 Windows 保留字符，杜绝穿越与逃逸。
+	// dir is optional and relative to the collection root (uploads/<token>); the shared
+	// validator rejects absolute paths, .., backslashes, control chars and Windows reserved
+	// chars per segment, matching private uploads.
+	dir, err := validateUploadDir(input.Dir)
+	if err != nil {
+		s.collectionFailure(w, r, name, "invalid_dir", http.StatusBadRequest, "目录无效", nil)
+		return
+	}
 	if input.Size > s.config.MaxFileSize {
 		s.collectionFailure(w, r, name, "too_large", http.StatusRequestEntityTooLarge, "文件超过单文件大小上限", map[string]any{"code": "FILE_TOO_LARGE", "maxFileSize": s.config.MaxFileSize})
 		return
@@ -576,7 +589,12 @@ func (s *Server) collectionUploadInit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	storageDir := filepath.Join("files", strconv.FormatInt(owner.ID, 10), "uploads", token)
-	if err := s.store.EnsureFolderPath(r.Context(), owner.ID, filepath.Join("uploads", token)); err != nil {
+	folderPath := filepath.ToSlash(filepath.Join("uploads", token))
+	if dir != "" {
+		storageDir = filepath.Join(storageDir, filepath.FromSlash(dir))
+		folderPath = filepath.ToSlash(filepath.Join(folderPath, filepath.FromSlash(dir)))
+	}
+	if err := s.store.EnsureFolderPath(r.Context(), owner.ID, folderPath); err != nil {
 		log.Printf("ensure collection folder: %v", err)
 	}
 	input.MD5 = strings.ToLower(strings.TrimSpace(input.MD5))
