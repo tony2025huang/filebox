@@ -245,11 +245,12 @@ func TestCollectionPendingUploadTaskLimitAndRelease(t *testing.T) {
 			t.Fatalf("CreateCollectionUploadTask(%d) = %v", i+1, err)
 		}
 	}
-	if err := db.CreateCollectionUploadTask(ctx, UploadTask{
+	queuedState, err := db.CreateCollectionUploadTaskWithState(ctx, UploadTask{
 		ID: "pending-limit-task-51", UserID: 1, CollectionID: collection.ID,
 		Name: "rejected", Size: 1, ChunkSize: 1, TotalChunks: 1, Status: "pending", Mime: "text/plain",
-	}, collection.Token); !errors.Is(err, ErrCollectionLimit) {
-		t.Fatalf("51st CreateCollectionUploadTask() = %v, want ErrCollectionLimit", err)
+	}, collection.Token)
+	if err != nil || queuedState.State != "queued" || queuedState.QueuePosition != 1 {
+		t.Fatalf("51st CreateCollectionUploadTaskWithState() = %+v, %v; want queued at position 1", queuedState, err)
 	}
 
 	completedTask, err := db.GetUploadTask(ctx, tasks[0])
@@ -278,7 +279,7 @@ func TestCollectionPendingUploadTaskLimitAndRelease(t *testing.T) {
 		t.Fatalf("DeleteUploadTask(expired) = %v", err)
 	}
 
-	for i := 0; i < 3; i++ {
+	for i := 0; i < 2; i++ {
 		id := "pending-limit-replacement-" + strconv.Itoa(i)
 		if err := db.CreateCollectionUploadTask(ctx, UploadTask{
 			ID: id, UserID: 1, CollectionID: collection.ID, Name: id,
@@ -292,7 +293,7 @@ func TestCollectionPendingUploadTaskLimitAndRelease(t *testing.T) {
 		t.Fatal(err)
 	}
 	if pendingTasks != MaxPendingCollectionUploadTasks {
-		t.Fatalf("pending task count after releases = %d, want %d", pendingTasks, MaxPendingCollectionUploadTasks)
+		t.Fatalf("non-terminal task count after releases = %d, want %d", pendingTasks, MaxPendingCollectionUploadTasks)
 	}
 }
 
@@ -339,8 +340,210 @@ func TestConcurrentCollectionPendingUploadTaskLimit(t *testing.T) {
 			t.Fatalf("concurrent CreateCollectionUploadTask() = %v", err)
 		}
 	}
-	if successes != MaxPendingCollectionUploadTasks || limitErrors != 1 {
-		t.Fatalf("concurrent results = %d successes, %d limit errors; want %d, 1", successes, limitErrors, MaxPendingCollectionUploadTasks)
+	if successes != MaxPendingCollectionUploadTasks+1 || limitErrors != 0 {
+		t.Fatalf("concurrent results = %d successes, %d limit errors; want %d, 0", successes, limitErrors, MaxPendingCollectionUploadTasks+1)
+	}
+	var active, queued int
+	if err := db.DB.QueryRow("SELECT COUNT(*) FROM upload_tasks WHERE collection_id = ? AND status = 'active'", collection.ID).Scan(&active); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.DB.QueryRow("SELECT COUNT(*) FROM upload_tasks WHERE collection_id = ? AND status = 'queued'", collection.ID).Scan(&queued); err != nil {
+		t.Fatal(err)
+	}
+	if active != MaxPendingCollectionUploadTasks || queued != 1 {
+		t.Fatalf("concurrent task states = %d active, %d queued; want %d, 1", active, queued, MaxPendingCollectionUploadTasks)
+	}
+}
+
+func TestCollectionQueuedTasksPromoteFIFOOnCompleteCancelAndExpired(t *testing.T) {
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.EnsureAdmin("admin", "admin123", 1024*1024); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	collection, err := db.CreateUploadCollection(ctx, UploadCollection{
+		CreatedBy: 1, Name: "fifo", Token: "fifo-token",
+		ExpiresAt: time.Now().UTC().Add(time.Hour).Format(time.RFC3339),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	create := func(id string) {
+		t.Helper()
+		if err := db.CreateCollectionUploadTask(ctx, UploadTask{ID: id, UserID: 1, CollectionID: collection.ID, Name: id, Size: 1, ChunkSize: 1, TotalChunks: 1, Status: "pending", Mime: "text/plain"}, collection.Token); err != nil {
+			t.Fatalf("create task %q: %v", id, err)
+		}
+	}
+	for i := 0; i < MaxPendingCollectionUploadTasks; i++ {
+		create("fifo-active-" + strconv.Itoa(i))
+	}
+	create("fifo-queued-1")
+	create("fifo-queued-2")
+	create("fifo-queued-3")
+
+	active, err := db.GetUploadTask(ctx, "fifo-active-0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.CompleteCollectionFile(ctx, active, File{UserID: 1, Name: "fifo-complete.txt", StoredName: "fifo-complete.txt", Size: 1, Mime: "text/plain", StoragePath: "files/1/fifo-complete.txt"}, active.Name, ""); err != nil {
+		t.Fatalf("complete active task: %v", err)
+	}
+	assertCollectionTaskStatus(t, db, ctx, "fifo-queued-1", "active")
+	assertCollectionTaskStatus(t, db, ctx, "fifo-queued-2", "queued")
+
+	if err := db.DeleteUploadTask(ctx, "fifo-active-1"); err != nil {
+		t.Fatalf("cancel active task: %v", err)
+	}
+	assertCollectionTaskStatus(t, db, ctx, "fifo-queued-2", "active")
+	assertCollectionTaskStatus(t, db, ctx, "fifo-queued-3", "queued")
+
+	old := time.Now().UTC().Add(-25 * time.Hour).Format(time.RFC3339)
+	if _, err := db.DB.Exec("UPDATE upload_tasks SET created_at = ? WHERE id = ?", old, "fifo-active-2"); err != nil {
+		t.Fatal(err)
+	}
+	expired, err := db.ListExpiredUploadTasks(ctx, 24*time.Hour)
+	if err != nil || len(expired) != 1 || expired[0] != "fifo-active-2" {
+		t.Fatalf("expired tasks = %v, %v; want fifo-active-2", expired, err)
+	}
+	if err := db.DeleteUploadTask(ctx, expired[0]); err != nil {
+		t.Fatalf("expire active task: %v", err)
+	}
+	assertCollectionTaskStatus(t, db, ctx, "fifo-queued-3", "active")
+}
+
+func TestCollectionQueuedTaskDoesNotReserveQuotaOrProcessChunks(t *testing.T) {
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.EnsureAdmin("admin", "admin123", 1024); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	collection, err := db.CreateUploadCollection(ctx, UploadCollection{CreatedBy: 1, Name: "quota-queue", Token: "quota-queue-token", ExpiresAt: time.Now().UTC().Add(time.Hour).Format(time.RFC3339)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < MaxPendingCollectionUploadTasks; i++ {
+		if err := db.CreateCollectionUploadTask(ctx, UploadTask{ID: "quota-active-" + strconv.Itoa(i), UserID: 1, CollectionID: collection.ID, Name: "active", Size: 10, ChunkSize: 10, TotalChunks: 1, Status: "pending", Mime: "text/plain"}, collection.Token); err != nil {
+			t.Fatal(err)
+		}
+	}
+	state, err := db.CreateCollectionUploadTaskWithState(ctx, UploadTask{ID: "quota-queued-1", UserID: 1, CollectionID: collection.ID, Name: "queued-1", Size: 600, ChunkSize: 600, TotalChunks: 1, Status: "pending", Mime: "text/plain"}, collection.Token)
+	if err != nil || state.State != "queued" {
+		t.Fatalf("queued task = %+v, %v", state, err)
+	}
+	if _, err := db.CreateCollectionUploadTaskWithState(ctx, UploadTask{ID: "quota-queued-2", UserID: 1, CollectionID: collection.ID, Name: "queued-2", Size: 1, ChunkSize: 1, TotalChunks: 1, Status: "pending", Mime: "text/plain"}, collection.Token); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetChunk(ctx, "quota-queued-1", 0, 600, "hash"); !errors.Is(err, ErrCollectionTaskQueued) {
+		t.Fatalf("SetChunk queued = %v, want ErrCollectionTaskQueued", err)
+	}
+	queued, err := db.GetUploadTask(ctx, "quota-queued-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.CompleteCollectionFile(ctx, queued, File{UserID: 1, Name: "queued.txt", Size: 600, Mime: "text/plain", StoragePath: "files/1/queued.txt"}, queued.Name, ""); !errors.Is(err, ErrCollectionTaskQueued) {
+		t.Fatalf("complete queued = %v, want ErrCollectionTaskQueued", err)
+	}
+	var reserved int64
+	if err := db.DB.QueryRow("SELECT COALESCE(SUM(size), 0) FROM upload_tasks WHERE user_id = 1 AND status IN ('pending', 'active')").Scan(&reserved); err != nil {
+		t.Fatal(err)
+	}
+	if reserved != MaxPendingCollectionUploadTasks*10 {
+		t.Fatalf("reserved bytes = %d, want %d", reserved, MaxPendingCollectionUploadTasks*10)
+	}
+	regular := UploadTask{ID: "quota-regular", UserID: 1, Name: "regular", Size: 500, ChunkSize: 500, TotalChunks: 1, Status: "pending", Mime: "text/plain"}
+	if err := db.CreateUploadTask(ctx, regular); err != nil {
+		t.Fatalf("regular task after queued task = %v", err)
+	}
+	if err := db.DeleteUploadTask(ctx, regular.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.DeleteUploadTask(ctx, "quota-active-0"); err != nil {
+		t.Fatal(err)
+	}
+	state, err = db.GetCollectionUploadTaskState(ctx, collection.ID, "quota-queued-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.State != "queued" || state.WaitReason != "quota_exceeded" {
+		t.Fatalf("queue head state = %+v, want quota_exceeded queued", state)
+	}
+	assertCollectionTaskStatus(t, db, ctx, "quota-queued-2", "queued")
+}
+
+func TestConcurrentCollectionCompleteAndInitPromoteWithoutOverflow(t *testing.T) {
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.EnsureAdmin("admin", "admin123", 1024*1024); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	collection, err := db.CreateUploadCollection(ctx, UploadCollection{CreatedBy: 1, Name: "concurrent-complete", Token: "concurrent-complete-token", ExpiresAt: time.Now().UTC().Add(time.Hour).Format(time.RFC3339)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < MaxPendingCollectionUploadTasks+10; i++ {
+		if err := db.CreateCollectionUploadTask(ctx, UploadTask{ID: "concurrent-complete-task-" + strconv.Itoa(i), UserID: 1, CollectionID: collection.ID, Name: "task", Size: 1, ChunkSize: 1, TotalChunks: 1, Status: "pending", Mime: "text/plain"}, collection.Token); err != nil {
+			t.Fatal(err)
+		}
+	}
+	start := make(chan struct{})
+	errs := make(chan error, 20)
+	for i := 0; i < 10; i++ {
+		id := "concurrent-complete-task-" + strconv.Itoa(i)
+		go func(index int, taskID string) {
+			<-start
+			task, getErr := db.GetUploadTask(ctx, taskID)
+			if getErr != nil {
+				errs <- getErr
+				return
+			}
+			_, completeErr := db.CompleteCollectionFile(ctx, task, File{UserID: 1, Name: "concurrent-" + strconv.Itoa(index) + ".txt", StoredName: "concurrent-" + strconv.Itoa(index) + ".txt", Size: 1, Mime: "text/plain", StoragePath: "files/1/concurrent-" + strconv.Itoa(index) + ".txt"}, task.Name, "")
+			errs <- completeErr
+		}(i, id)
+	}
+	for i := 0; i < 10; i++ {
+		go func(index int) {
+			<-start
+			errs <- db.CreateCollectionUploadTask(ctx, UploadTask{ID: "concurrent-init-task-" + strconv.Itoa(index), UserID: 1, CollectionID: collection.ID, Name: "new", Size: 1, ChunkSize: 1, TotalChunks: 1, Status: "pending", Mime: "text/plain"}, collection.Token)
+		}(i)
+	}
+	close(start)
+	for i := 0; i < cap(errs); i++ {
+		if err := <-errs; err != nil {
+			t.Fatalf("concurrent complete/init = %v", err)
+		}
+	}
+	var active, queued int
+	if err := db.DB.QueryRow("SELECT COUNT(*) FROM upload_tasks WHERE collection_id = ? AND status = 'active'", collection.ID).Scan(&active); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.DB.QueryRow("SELECT COUNT(*) FROM upload_tasks WHERE collection_id = ? AND status = 'queued'", collection.ID).Scan(&queued); err != nil {
+		t.Fatal(err)
+	}
+	if active != MaxPendingCollectionUploadTasks || queued != 10 {
+		t.Fatalf("concurrent final states = %d active, %d queued; want %d, 10", active, queued, MaxPendingCollectionUploadTasks)
+	}
+}
+
+func assertCollectionTaskStatus(t *testing.T, db *Store, ctx context.Context, taskID, want string) {
+	t.Helper()
+	task, err := db.GetUploadTask(ctx, taskID)
+	if err != nil {
+		t.Fatalf("get task %q: %v", taskID, err)
+	}
+	if task.Status != want {
+		t.Fatalf("task %q status = %q, want %q", taskID, task.Status, want)
 	}
 }
 

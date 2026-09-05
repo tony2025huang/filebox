@@ -343,8 +343,11 @@ func (s *Server) loadCollectionTask(r *http.Request) (store.UploadCollection, st
 		taskID = r.URL.Query().Get("taskId")
 	}
 	task, err := s.store.GetUploadTask(r.Context(), taskID)
-	if err != nil || task.CollectionID != collection.ID || task.UserID != collection.CreatedBy || task.Status != "pending" {
+	if err != nil || task.CollectionID != collection.ID || task.UserID != collection.CreatedBy || (task.Status != "pending" && task.Status != "active" && task.Status != "queued") {
 		return store.UploadCollection{}, store.User{}, store.UploadTask{}, store.ErrNotFound
+	}
+	if task.Status == "queued" {
+		return store.UploadCollection{}, store.User{}, store.UploadTask{}, store.ErrCollectionTaskQueued
 	}
 	user, err := s.store.GetUser(collection.CreatedBy)
 	if err != nil {
@@ -524,7 +527,7 @@ func (s *Server) collectionUploadInit(w http.ResponseWriter, r *http.Request) {
 	if mimeType == "" {
 		mimeType = "application/octet-stream"
 	}
-	err = s.store.CreateCollectionUploadTask(r.Context(), store.UploadTask{ID: taskID, UserID: owner.ID, CollectionID: collection.ID, Remark: strings.TrimSpace(input.Remark), Name: name, Size: input.Size, ChunkSize: chunkSize, TotalChunks: totalChunks, Status: "pending", Mime: mimeType, StorageDir: storageDir}, token)
+	taskState, err := s.store.CreateCollectionUploadTaskWithState(r.Context(), store.UploadTask{ID: taskID, UserID: owner.ID, CollectionID: collection.ID, Remark: strings.TrimSpace(input.Remark), Name: name, Size: input.Size, ChunkSize: chunkSize, TotalChunks: totalChunks, Status: "pending", Mime: mimeType, StorageDir: storageDir}, token)
 	if errors.Is(err, store.ErrCollectionLimit) || errors.Is(err, store.ErrCollectionExpired) || errors.Is(err, store.ErrCollectionRevoked) {
 		rejectState(err)
 		return
@@ -543,7 +546,14 @@ func (s *Server) collectionUploadInit(w http.ResponseWriter, r *http.Request) {
 		s.collectionFailure(w, r, name, "task_create_failed", http.StatusInternalServerError, "创建上传任务失败", nil)
 		return
 	}
-	writeData(w, http.StatusOK, "上传任务已创建", map[string]any{"taskId": taskID, "chunkSize": chunkSize, "totalChunks": totalChunks, "uploadedChunks": []int{}})
+	data := map[string]any{"taskId": taskID, "chunkSize": chunkSize, "totalChunks": totalChunks, "uploadedChunks": []int{}, "state": taskState.State}
+	if taskState.State == "queued" {
+		data["queuePosition"] = taskState.QueuePosition
+		if taskState.WaitReason != "" {
+			data["waitReason"] = taskState.WaitReason
+		}
+	}
+	writeData(w, http.StatusOK, "上传任务已创建", data)
 }
 
 // collectionUploadChunk writes one anonymous chunk after token/task validation.
@@ -657,10 +667,45 @@ func (s *Server) writeCollectionTaskError(w http.ResponseWriter, r *http.Request
 		reason, status, message, data = "collection_revoked", http.StatusForbidden, "收集链接已撤销", map[string]string{"code": "COLLECTION_REVOKED"}
 	case errors.Is(err, store.ErrCollectionLimit):
 		reason, status, message, data = "collection_limit", http.StatusForbidden, "收集链接上传次数已用完", map[string]string{"code": "COLLECTION_LIMIT"}
+	case errors.Is(err, store.ErrCollectionTaskQueued):
+		reason, status, message, data = "collection_task_queued", http.StatusConflict, "收集上传任务仍在排队，请等待活动槽位", map[string]string{"code": "COLLECTION_TASK_QUEUED"}
 	case !errors.Is(err, store.ErrNotFound):
 		status, message = http.StatusInternalServerError, "读取上传任务失败"
 	}
 	s.collectionFailure(w, r, r.PathValue("taskID"), reason, status, message, data)
+}
+
+// collectionUploadTaskState returns only the anonymous task state for this collection token.
+func (s *Server) collectionUploadTaskState(w http.ResponseWriter, r *http.Request) {
+	if !s.rateLimiter.allowPublicRequest(s.requestIP(r), 30, 10) {
+		s.collectionFailure(w, r, r.PathValue("token"), "rate_limited", http.StatusTooManyRequests, "请求过于频繁，请稍后重试", nil)
+		return
+	}
+	collection, err := s.store.GetUploadCollectionByToken(r.Context(), r.PathValue("token"))
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "收集链接不存在")
+		return
+	}
+	if err != nil {
+		log.Printf("load collection task state: %v", err)
+		writeError(w, http.StatusInternalServerError, "读取上传任务状态失败")
+		return
+	}
+	if err := collectionTaskStateForAPI(collection); err != nil {
+		s.writeCollectionTaskError(w, r, err)
+		return
+	}
+	state, err := s.store.GetCollectionUploadTaskState(r.Context(), collection.ID, r.PathValue("taskID"))
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "上传任务不存在")
+		return
+	}
+	if err != nil {
+		log.Printf("get collection task state: %v", err)
+		writeError(w, http.StatusInternalServerError, "读取上传任务状态失败")
+		return
+	}
+	writeData(w, http.StatusOK, "读取成功", state)
 }
 
 func (s *Server) collectionUploadStatus(w http.ResponseWriter, r *http.Request) {

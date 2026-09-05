@@ -192,7 +192,7 @@ func TestCollectionUploadRejectsWhenDiskFull(t *testing.T) {
 	}
 }
 
-func TestCollectionUploadInitRejectsPendingTaskLimit(t *testing.T) {
+func TestCollectionUploadInitQueuesAfterActiveLimit(t *testing.T) {
 	db, handler := newTestServer(t)
 	adminToken := testAdminToken(t, handler)
 	created := testJSONRequest(t, handler, http.MethodPost, "/api/collections", adminToken, `{"name":"pending-limit","expiresInHours":24,"maxUploads":0}`)
@@ -212,17 +212,13 @@ func TestCollectionUploadInitRejectsPendingTaskLimit(t *testing.T) {
 			t.Fatalf("seed pending task %d = %v", i+1, err)
 		}
 	}
-	init := testJSONRequest(t, handler, http.MethodPost, "/api/collections/"+collectionToken+"/upload-init", "", `{"name":"rejected.txt","size":1,"chunkSize":0}`)
-	if init.Code != http.StatusForbidden {
-		t.Fatalf("pending task limit status = %d: %s", init.Code, init.Body.String())
+	init := testJSONRequest(t, handler, http.MethodPost, "/api/collections/"+collectionToken+"/upload-init", "", `{"name":"queued.txt","size":1,"chunkSize":0}`)
+	if init.Code != http.StatusOK {
+		t.Fatalf("active limit init status = %d: %s", init.Code, init.Body.String())
 	}
-	var body response
-	if err := json.Unmarshal(init.Body.Bytes(), &body); err != nil {
-		t.Fatal(err)
-	}
-	data, ok := body.Data.(map[string]any)
-	if !ok || data["code"] != "COLLECTION_LIMIT" {
-		t.Fatalf("pending task limit body = %s", init.Body.String())
+	data := responseData(t, init)
+	if data["state"] != "queued" || data["queuePosition"] != float64(1) {
+		t.Fatalf("active limit init data = %#v", data)
 	}
 }
 

@@ -453,6 +453,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/collections/{token}/upload-chunk", s.collectionUploadChunk)
 	mux.HandleFunc("POST /api/collections/{token}/upload-chunk", s.collectionUploadChunk)
 	mux.HandleFunc("GET /api/collections/{token}/upload-status/{taskID}", s.collectionUploadStatus)
+	mux.HandleFunc("GET /api/collections/{token}/upload-queue/{taskID}", s.collectionUploadTaskState)
 	mux.HandleFunc("POST /api/collections/{token}/upload-complete/{taskID}", s.collectionUploadComplete)
 	mux.HandleFunc("POST /api/collections/{token}/upload-complete", s.collectionUploadComplete)
 	mux.HandleFunc("POST /api/folders", s.requireAuth(s.createFolder))
@@ -465,6 +466,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/sync/systems", s.requireAuth(s.listSyncSystems))
 	mux.HandleFunc("POST /api/sync/systems", s.requireAuth(s.createSyncSystem))
 	mux.HandleFunc("PUT /api/sync/systems/{id}", s.requireAuth(s.updateSyncSystem))
+	mux.HandleFunc("POST /api/sync/systems/{id}/host-key", s.requireAuth(s.updateSyncSystemHostKey))
 	mux.HandleFunc("DELETE /api/sync/systems/{id}", s.requireAuth(s.deleteSyncSystem))
 	mux.HandleFunc("GET /api/sync/systems/{id}/secret", s.requireAuth(s.getSyncSystemSecret))
 	mux.HandleFunc("GET /api/sync/systems/{id}/browse", s.requireAuth(s.browseSyncSystem))
@@ -1682,6 +1684,10 @@ func (s *Server) uploadChunk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	task, err := s.store.GetUploadTask(r.Context(), taskID)
+	if err == nil && task.UserID == user.ID && task.Status == "queued" {
+		writeErrorData(w, http.StatusConflict, "收集上传任务仍在排队，请等待活动槽位", map[string]string{"code": "COLLECTION_TASK_QUEUED"})
+		return
+	}
 	if errors.Is(err, store.ErrNotFound) || task.UserID != user.ID || task.Status != "pending" {
 		s.recordAudit(r, &user.ID, user.Username, "upload_chunk", taskID, "failure", "task_not_found")
 		s.serviceEvent(r, "upload_chunk", user.Username, "task=%s index=%d result=failure reason=task_not_found", taskID, index)
@@ -1935,6 +1941,10 @@ func (s *Server) uploadStatus(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "上传任务不存在")
 		return
 	}
+	if task.Status == "queued" {
+		writeErrorData(w, http.StatusConflict, "收集上传任务仍在排队，暂不能读取分片状态", map[string]string{"code": "COLLECTION_TASK_QUEUED"})
+		return
+	}
 	chunks, err := s.store.ListChunks(r.Context(), task.ID)
 	if err != nil {
 		log.Printf("list upload status chunks: %v", err)
@@ -2110,6 +2120,10 @@ func (s *Server) completeUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	task, err := s.store.GetUploadTask(r.Context(), taskID)
+	if err == nil && task.UserID == user.ID && task.Status == "queued" {
+		writeErrorData(w, http.StatusConflict, "收集上传任务仍在排队，请等待活动槽位", map[string]string{"code": "COLLECTION_TASK_QUEUED"})
+		return
+	}
 	if errors.Is(err, store.ErrNotFound) || task.UserID != user.ID || task.Status != "pending" {
 		writeError(w, http.StatusNotFound, "上传任务不存在")
 		return

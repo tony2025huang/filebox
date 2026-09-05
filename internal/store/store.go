@@ -155,6 +155,14 @@ type UploadTask struct {
 	Resolve      string
 }
 
+// CollectionUploadTaskState is the public state of one collection upload task.
+type CollectionUploadTaskState struct {
+	TaskID        string `json:"taskId"`
+	State         string `json:"state"`
+	QueuePosition int    `json:"queuePosition,omitempty"`
+	WaitReason    string `json:"waitReason,omitempty"`
+}
+
 // UploadCollection represents an owner-controlled public upload endpoint.
 // UploadCollection 表示创建者控制的公开上传收集链接。
 type UploadCollection struct {
@@ -187,9 +195,10 @@ type UploadCollectionFile struct {
 }
 
 var (
-	ErrCollectionLimit   = errors.New("collection upload limit reached")
-	ErrCollectionExpired = errors.New("collection expired")
-	ErrCollectionRevoked = errors.New("collection revoked")
+	ErrCollectionLimit      = errors.New("collection upload limit reached")
+	ErrCollectionExpired    = errors.New("collection expired")
+	ErrCollectionRevoked    = errors.New("collection revoked")
+	ErrCollectionTaskQueued = errors.New("collection upload task is queued")
 	// ErrCollectionMaxUploadsBelow 表示下调上传次数上限时低于当前已用次数。
 	// ErrCollectionMaxUploadsBelow indicates a lowered upload limit below the current used count.
 	ErrCollectionMaxUploadsBelow = errors.New("collection max uploads below used count")
@@ -486,6 +495,11 @@ func (s *Store) migrateCollectionsSchema() error {
 			return err
 		}
 	}
+	if !columns["queue_wait_reason"] {
+		if _, err := s.DB.Exec("ALTER TABLE upload_tasks ADD COLUMN queue_wait_reason TEXT NOT NULL DEFAULT ''"); err != nil {
+			return err
+		}
+	}
 	_, err = s.DB.Exec(`CREATE TABLE IF NOT EXISTS upload_collections (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   created_by INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -509,8 +523,70 @@ CREATE TABLE IF NOT EXISTS upload_collection_files (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_upload_collection_files_collection ON upload_collection_files(collection_id, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_upload_collection_files_file ON upload_collection_files(file_id);`)
-	return err
+CREATE INDEX IF NOT EXISTS idx_upload_collection_files_file ON upload_collection_files(file_id);
+CREATE INDEX IF NOT EXISTS idx_upload_tasks_collection_queue ON upload_tasks(collection_id, status, created_at, id);`)
+	if err != nil {
+		return err
+	}
+	return s.migrateLegacyCollectionTaskStates()
+}
+
+// migrateLegacyCollectionTaskStates maps pre-v023 collection pending tasks to active/queued.
+func (s *Store) migrateLegacyCollectionTaskStates() error {
+	rows, err := s.DB.Query(`SELECT DISTINCT collection_id FROM upload_tasks WHERE collection_id > 0 AND status = 'pending'`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	collectionIDs := make([]int64, 0)
+	for rows.Next() {
+		var collectionID int64
+		if err := rows.Scan(&collectionID); err != nil {
+			return err
+		}
+		collectionIDs = append(collectionIDs, collectionID)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, collectionID := range collectionIDs {
+		var active int
+		if err := s.DB.QueryRow("SELECT COUNT(*) FROM upload_tasks WHERE collection_id = ? AND status = 'active'", collectionID).Scan(&active); err != nil {
+			return err
+		}
+		legacyRows, err := s.DB.Query("SELECT id FROM upload_tasks WHERE collection_id = ? AND status = 'pending' ORDER BY created_at, id", collectionID)
+		if err != nil {
+			return err
+		}
+		ids := make([]string, 0)
+		for legacyRows.Next() {
+			var id string
+			if err := legacyRows.Scan(&id); err != nil {
+				legacyRows.Close()
+				return err
+			}
+			ids = append(ids, id)
+		}
+		if err := legacyRows.Err(); err != nil {
+			legacyRows.Close()
+			return err
+		}
+		legacyRows.Close()
+		for _, id := range ids {
+			status := "queued"
+			if active < MaxPendingCollectionUploadTasks {
+				status = "active"
+				active++
+			}
+			if _, err := s.DB.Exec("UPDATE upload_tasks SET status = ?, queue_wait_reason = '' WHERE id = ?", status, id); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // migrateSharesSchema creates sharing records after any legacy files-table rebuild has finished.
@@ -1497,7 +1573,7 @@ func (s *Store) CreateUploadTask(ctx context.Context, task UploadTask) error {
 		tx.Rollback()
 		return err
 	}
-	if err := tx.QueryRowContext(ctx, "SELECT COALESCE(SUM(size), 0) FROM upload_tasks WHERE user_id = ? AND status = 'pending'", task.UserID).Scan(&pending); err != nil {
+	if err := tx.QueryRowContext(ctx, "SELECT COALESCE(SUM(size), 0) FROM upload_tasks WHERE user_id = ? AND status IN ('pending', 'active')", task.UserID).Scan(&pending); err != nil {
 		tx.Rollback()
 		return err
 	}
@@ -1533,8 +1609,29 @@ func (s *Store) GetUploadTask(ctx context.Context, id string) (UploadTask, error
 // SetChunk 以幂等方式记录已写入的分片元数据。
 // SetChunk upserts the metadata for a successfully written chunk.
 func (s *Store) SetChunk(ctx context.Context, taskID string, idx int, size int64, sha256 string) error {
-	_, err := s.DB.ExecContext(ctx, "INSERT INTO chunks(task_id, idx, size, sha256) VALUES(?, ?, ?, ?) ON CONFLICT(task_id, idx) DO UPDATE SET size = excluded.size, sha256 = excluded.sha256", taskID, idx, size, sha256)
-	return err
+	result, err := s.DB.ExecContext(ctx, `INSERT INTO chunks(task_id, idx, size, sha256)
+SELECT ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM upload_tasks WHERE id = ? AND status IN ('pending', 'active'))
+ON CONFLICT(task_id, idx) DO UPDATE SET size = excluded.size, sha256 = excluded.sha256`, taskID, idx, size, sha256, taskID)
+	if err != nil {
+		return err
+	}
+	if affected, err := result.RowsAffected(); err != nil {
+		return err
+	} else if affected == 0 {
+		var status string
+		err := s.DB.QueryRowContext(ctx, "SELECT status FROM upload_tasks WHERE id = ?", taskID).Scan(&status)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return err
+		}
+		if status == "queued" {
+			return ErrCollectionTaskQueued
+		}
+		return ErrConflict
+	}
+	return nil
 }
 
 // ListChunks 读取任务已上传的分片，数据库记录是断点续传的唯一事实来源。
@@ -1602,7 +1699,7 @@ func (s *Store) DeleteChunks(ctx context.Context, taskID string) error {
 // ListExpiredUploadTasks returns upload task IDs still pending beyond maxAge for background cleanup.
 func (s *Store) ListExpiredUploadTasks(ctx context.Context, maxAge time.Duration) ([]string, error) {
 	cutoff := time.Now().UTC().Add(-maxAge).Format(time.RFC3339)
-	rows, err := s.DB.QueryContext(ctx, "SELECT id FROM upload_tasks WHERE status = 'pending' AND created_at < ?", cutoff)
+	rows, err := s.DB.QueryContext(ctx, "SELECT id FROM upload_tasks WHERE status IN ('pending', 'active', 'queued') AND created_at < ?", cutoff)
 	if err != nil {
 		return nil, err
 	}
@@ -1625,14 +1722,25 @@ func (s *Store) DeleteUploadTask(ctx context.Context, taskID string) error {
 	if err != nil {
 		return err
 	}
+	defer tx.Rollback()
 	// Keep the expiration check and deletion in one write transaction. A task can
 	// finish between ListExpiredUploadTasks and this call, and must then be kept.
-	if _, err := tx.ExecContext(ctx, `DELETE FROM chunks
-		WHERE task_id = ? AND EXISTS (SELECT 1 FROM upload_tasks WHERE id = ? AND status = 'pending')`, taskID, taskID); err != nil {
+	var collectionID int64
+	var status string
+	if err := tx.QueryRowContext(ctx, "SELECT collection_id, status FROM upload_tasks WHERE id = ?", taskID).Scan(&collectionID, &status); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		}
+		return err
+	}
+	if status != "pending" && status != "active" && status != "queued" {
+		return ErrNotFound
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM chunks WHERE task_id = ?", taskID); err != nil {
 		tx.Rollback()
 		return err
 	}
-	result, err := tx.ExecContext(ctx, "DELETE FROM upload_tasks WHERE id = ? AND status = 'pending'", taskID)
+	result, err := tx.ExecContext(ctx, "DELETE FROM upload_tasks WHERE id = ? AND status IN ('pending', 'active', 'queued')", taskID)
 	if err != nil {
 		tx.Rollback()
 		return err
@@ -1645,6 +1753,12 @@ func (s *Store) DeleteUploadTask(ctx context.Context, taskID string) error {
 	if count != 1 {
 		tx.Rollback()
 		return ErrNotFound
+	}
+	if collectionID > 0 {
+		if err := promoteQueuedCollectionTasksTx(ctx, tx, collectionID); err != nil {
+			tx.Rollback()
+			return err
+		}
 	}
 	return tx.Commit()
 }
@@ -1703,6 +1817,9 @@ func (s *Store) completeUpload(ctx context.Context, task UploadTask, file File, 
 }
 
 func (s *Store) completeUploadWithCollection(ctx context.Context, task UploadTask, file File, place func(storagePath string, replace bool) error, originalName, remark string) (File, error) {
+	if task.Status == "queued" {
+		return File{}, ErrCollectionTaskQueued
+	}
 	// completeUpload 在同一事务中协调路径分配、文件放置、元数据写入、配额更新和任务完成。
 	// completeUpload coordinates path allocation, content placement, metadata, quota, and task completion in one transaction.
 	// 目录锁覆盖路径分配、磁盘放置和事务提交，避免与提交后移动目录的重命名交错。
@@ -1818,7 +1935,7 @@ WHERE id = ? AND revoked_at IS NULL AND expires_at > ? AND (max_uploads = 0 OR u
 			return File{}, err
 		}
 	}
-	result, err = tx.ExecContext(ctx, "UPDATE upload_tasks SET status = 'complete', updated_at = ? WHERE id = ? AND status = 'pending'", now, task.ID)
+	result, err = tx.ExecContext(ctx, "UPDATE upload_tasks SET status = 'complete', updated_at = ? WHERE id = ? AND status IN ('pending', 'active')", now, task.ID)
 	if err != nil {
 		tx.Rollback()
 		return File{}, err
@@ -1829,6 +1946,12 @@ WHERE id = ? AND revoked_at IS NULL AND expires_at > ? AND (max_uploads = 0 OR u
 			return File{}, err
 		}
 		return File{}, ErrConflict
+	}
+	if task.CollectionID > 0 {
+		if err := promoteQueuedCollectionTasksTx(ctx, tx, task.CollectionID); err != nil {
+			tx.Rollback()
+			return File{}, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return File{}, err
@@ -2346,9 +2469,14 @@ WHERE token = ? AND revoked_at IS NULL AND expires_at > ? AND (max_uploads = 0 O
 // CreateCollectionUploadTask validates collection capacity, quota, and creates a pending task atomically.
 // CreateCollectionUploadTask 在一个事务中校验收集容量、用户配额并创建待处理分片任务。
 func (s *Store) CreateCollectionUploadTask(ctx context.Context, task UploadTask, token string) error {
+	_, err := s.CreateCollectionUploadTaskWithState(ctx, task, token)
+	return err
+}
+
+func (s *Store) CreateCollectionUploadTaskWithState(ctx context.Context, task UploadTask, token string) (CollectionUploadTaskState, error) {
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return CollectionUploadTaskState{}, err
 	}
 	defer tx.Rollback()
 	// Serialize collection init writers before counting. SQLite has no row-level
@@ -2356,60 +2484,177 @@ func (s *Store) CreateCollectionUploadTask(ctx context.Context, task UploadTask,
 	// concurrent init transactions from observing the same pending-task count.
 	lockResult, err := tx.ExecContext(ctx, "UPDATE upload_collections SET updated_at = updated_at WHERE token = ?", token)
 	if err != nil {
-		return err
+		return CollectionUploadTaskState{}, err
 	}
 	locked, err := lockResult.RowsAffected()
 	if err != nil {
-		return err
+		return CollectionUploadTaskState{}, err
 	}
 	if locked != 1 {
-		return ErrNotFound
+		return CollectionUploadTaskState{}, ErrNotFound
 	}
 	var collection UploadCollection
 	err = tx.QueryRowContext(ctx, `SELECT id, created_by, name, token, expires_at, max_uploads, upload_count, max_file_bytes, COALESCE(revoked_at, ''), created_at
 FROM upload_collections WHERE token = ?`, token).Scan(&collection.ID, &collection.CreatedBy, &collection.Name, &collection.Token, &collection.ExpiresAt, &collection.MaxUploads, &collection.UploadCount, &collection.MaxFileBytes, &collection.RevokedAt, &collection.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
-		return ErrNotFound
+		return CollectionUploadTaskState{}, ErrNotFound
 	}
 	if err != nil {
-		return err
+		return CollectionUploadTaskState{}, err
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
 	if err := collectionState(collection, now); err != nil {
-		return err
+		return CollectionUploadTaskState{}, err
 	}
 	if task.CollectionID == 0 {
 		task.CollectionID = collection.ID
 	}
 	if task.UserID != collection.CreatedBy {
-		return ErrNotFound
+		return CollectionUploadTaskState{}, ErrNotFound
 	}
-	var pendingTasks int64
+	var activeTasks int64
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM upload_tasks
-		WHERE collection_id = ? AND status NOT IN ('complete', 'cancelled', 'expired')`, collection.ID).Scan(&pendingTasks); err != nil {
-		return err
-	}
-	if pendingTasks >= MaxPendingCollectionUploadTasks {
-		return ErrCollectionLimit
-	}
-	var quota, used, pending int64
-	if err := tx.QueryRowContext(ctx, "SELECT quota_bytes, used_bytes FROM users WHERE id = ?", task.UserID).Scan(&quota, &used); err != nil {
-		return err
-	}
-	if err := tx.QueryRowContext(ctx, "SELECT COALESCE(SUM(size), 0) FROM upload_tasks WHERE user_id = ? AND status = 'pending'", task.UserID).Scan(&pending); err != nil {
-		return err
-	}
-	if used+pending+task.Size > quota {
-		return &QuotaError{UsedBytes: used, QuotaBytes: quota, FileSize: task.Size}
+		WHERE collection_id = ? AND status = 'active'`, collection.ID).Scan(&activeTasks); err != nil {
+		return CollectionUploadTaskState{}, err
 	}
 	if collection.MaxUploads > 0 && collection.UploadCount >= collection.MaxUploads {
-		return ErrCollectionLimit
+		return CollectionUploadTaskState{}, ErrCollectionLimit
 	}
-	_, err = tx.ExecContext(ctx, "INSERT INTO upload_tasks(id, user_id, collection_id, remark, name, size, mime, chunk_size, total_chunks, status, storage_dir, resolve, created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, '', ?, ?)", task.ID, task.UserID, task.CollectionID, task.Remark, task.Name, task.Size, task.Mime, task.ChunkSize, task.TotalChunks, task.StorageDir, now, now)
+	status := "active"
+	if activeTasks >= MaxPendingCollectionUploadTasks {
+		status = "queued"
+	} else if err := checkCollectionTaskQuotaTx(ctx, tx, task.UserID, task.Size); err != nil {
+		return CollectionUploadTaskState{}, err
+	}
+	_, err = tx.ExecContext(ctx, "INSERT INTO upload_tasks(id, user_id, collection_id, remark, name, size, mime, chunk_size, total_chunks, status, queue_wait_reason, storage_dir, resolve, created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, '', ?, ?)", task.ID, task.UserID, task.CollectionID, task.Remark, task.Name, task.Size, task.Mime, task.ChunkSize, task.TotalChunks, status, task.StorageDir, now, now)
+	if err != nil {
+		return CollectionUploadTaskState{}, err
+	}
+	state := CollectionUploadTaskState{TaskID: task.ID, State: status}
+	if status == "queued" {
+		if err := populateCollectionQueuePositionTx(ctx, tx, collection.ID, task.ID, &state); err != nil {
+			return CollectionUploadTaskState{}, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return CollectionUploadTaskState{}, err
+	}
+	return state, nil
+}
+
+func checkCollectionTaskQuotaTx(ctx context.Context, tx *sql.Tx, userID, size int64) error {
+	var quota, used, reserved int64
+	if err := tx.QueryRowContext(ctx, "SELECT quota_bytes, used_bytes FROM users WHERE id = ?", userID).Scan(&quota, &used); err != nil {
+		return err
+	}
+	if err := tx.QueryRowContext(ctx, "SELECT COALESCE(SUM(size), 0) FROM upload_tasks WHERE user_id = ? AND status IN ('pending', 'active')", userID).Scan(&reserved); err != nil {
+		return err
+	}
+	if used+reserved+size > quota {
+		return &QuotaError{UsedBytes: used, QuotaBytes: quota, FileSize: size}
+	}
+	return nil
+}
+
+func populateCollectionQueuePositionTx(ctx context.Context, tx *sql.Tx, collectionID int64, taskID string, state *CollectionUploadTaskState) error {
+	return tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM upload_tasks queued
+WHERE queued.collection_id = ? AND queued.status = 'queued' AND
+(queued.created_at < (SELECT created_at FROM upload_tasks WHERE id = ?) OR
+(queued.created_at = (SELECT created_at FROM upload_tasks WHERE id = ?) AND queued.id <= ?))`, collectionID, taskID, taskID, taskID).Scan(&state.QueuePosition)
+}
+
+func (s *Store) PromoteQueuedCollectionTasks(ctx context.Context, collectionID int64) error {
+	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
+	defer tx.Rollback()
+	if err := promoteQueuedCollectionTasksTx(ctx, tx, collectionID); err != nil {
+		return err
+	}
 	return tx.Commit()
+}
+
+func promoteQueuedCollectionTasksTx(ctx context.Context, tx *sql.Tx, collectionID int64) error {
+	for {
+		var active int64
+		if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM upload_tasks WHERE collection_id = ? AND status = 'active'", collectionID).Scan(&active); err != nil {
+			return err
+		}
+		if active >= MaxPendingCollectionUploadTasks {
+			return nil
+		}
+		var expiresAt, revokedAt string
+		var maxUploads, uploadCount int
+		if err := tx.QueryRowContext(ctx, "SELECT expires_at, COALESCE(revoked_at, ''), max_uploads, upload_count FROM upload_collections WHERE id = ?", collectionID).Scan(&expiresAt, &revokedAt, &maxUploads, &uploadCount); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return nil
+			}
+			return err
+		}
+		var taskID string
+		var userID, size int64
+		err := tx.QueryRowContext(ctx, `SELECT id, user_id, size FROM upload_tasks
+WHERE collection_id = ? AND status = 'queued' ORDER BY created_at, id LIMIT 1`, collectionID).Scan(&taskID, &userID, &size)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		waitReason := ""
+		now := time.Now().UTC().Format(time.RFC3339)
+		if revokedAt != "" {
+			waitReason = "collection_revoked"
+		} else if expiresAt <= now {
+			waitReason = "collection_expired"
+		} else if maxUploads > 0 && uploadCount >= maxUploads {
+			waitReason = "collection_limit"
+		} else if quotaErr := checkCollectionTaskQuotaTx(ctx, tx, userID, size); quotaErr != nil {
+			var quotaDetails *QuotaError
+			if errors.As(quotaErr, &quotaDetails) {
+				waitReason = "quota_exceeded"
+			} else {
+				return quotaErr
+			}
+		}
+		if waitReason != "" {
+			_, err := tx.ExecContext(ctx, "UPDATE upload_tasks SET queue_wait_reason = ?, updated_at = ? WHERE id = ? AND status = 'queued'", waitReason, now, taskID)
+			return err
+		}
+		result, err := tx.ExecContext(ctx, "UPDATE upload_tasks SET status = 'active', queue_wait_reason = '', updated_at = ? WHERE id = ? AND status = 'queued'", now, taskID)
+		if err != nil {
+			return err
+		}
+		if count, err := result.RowsAffected(); err != nil {
+			return err
+		} else if count != 1 {
+			return ErrConflict
+		}
+	}
+}
+
+func (s *Store) GetCollectionUploadTaskState(ctx context.Context, collectionID int64, taskID string) (CollectionUploadTaskState, error) {
+	var state CollectionUploadTaskState
+	var createdAt string
+	err := s.DB.QueryRowContext(ctx, "SELECT id, status, COALESCE(queue_wait_reason, ''), created_at FROM upload_tasks WHERE id = ? AND collection_id = ?", taskID, collectionID).Scan(&state.TaskID, &state.State, &state.WaitReason, &createdAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return CollectionUploadTaskState{}, ErrNotFound
+	}
+	if err != nil {
+		return CollectionUploadTaskState{}, err
+	}
+	if state.State != "active" && state.State != "queued" {
+		return CollectionUploadTaskState{}, ErrNotFound
+	}
+	if state.State == "queued" {
+		if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM upload_tasks
+WHERE collection_id = ? AND status = 'queued' AND
+(created_at < ? OR (created_at = ? AND id <= ?))`, collectionID, createdAt, createdAt, taskID).Scan(&state.QueuePosition); err != nil {
+			return CollectionUploadTaskState{}, err
+		}
+	}
+	return state, nil
 }
 
 func (s *Store) insertCollectionFileTx(ctx context.Context, tx *sql.Tx, collectionID, fileID int64, originalName, remark, now string) error {

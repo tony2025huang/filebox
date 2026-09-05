@@ -315,17 +315,15 @@ join 链与最终落盘：
 - `CreateCollectionUploadTask` 在同一 `BeginTx` 中先对 collection 执行写锁语句，再按 `collection_id` 和状态计数；达到 50 返回现有结构化 `COLLECTION_LIMIT` 业务错误，否则插入 `pending` 任务并提交。SQLite `Open` 将连接池固定为单连接，并配置 WAL/`busy_timeout`，因此并发 init 不会同时越过 50。
 - 完成方法在同一 store 事务中将任务写为 `complete`；取消和过期清理删除 `pending` 行，计数查询因此天然释放容量。
 
-## 待用户拍板的开放项【待确认】
+## v023 SFTP 主机密钥 TOFU 策略【业务确认】
 
-### O1 SFTP 主机密钥未配置时的信任策略
+- 首次连接：RemoteSystem 为 SFTP 且没有 `hostKeyFingerprint` 时，SSH 握手观察到的 SHA-256 指纹自动写入该 RemoteSystem；条件更新保证并发首次连接只固定一个指纹。
+- 后续连接：必须使用已保存指纹进行严格 SHA-256 比对；匹配时继续连接，失配时拒绝连接并返回结构化 `HOST_KEY_CHANGED`，只携带 `expectedFingerprint` 与 `observedFingerprint`。
+- 变更确认：普通系统编辑不会改变指纹。仅资源 owner（或 admin）可在确认新指纹后调用专用更新接口，接口使用 expected 值做并发保护；更新成功后由界面自动重试，过期确认不会覆盖更新后的指纹。
+- 安全记录：连接失败、显式更新和审计仅记录系统 ID、结果、原因及主机密钥指纹等安全元数据，不记录密码、私钥、passphrase 或文件内容；不使用跳过主机密钥校验的默认回退。
+- 验收：覆盖首次信任持久化、既有指纹匹配、失配拒绝且不变更、owner 确认更新后成功、未认证及跨 owner 拒绝，以及前端三语确认和构建。
 
-- 现状（证据）：`internal/httpapi/sync.go:1105-1108` 未配置指纹时回退 `ssh.InsecureIgnoreHostKey()` 并打警告日志；配置字段已端到端存在（校验 `sync.go:177-186`、持久化 `:224/:294-316`），空值被接受以兼容既有数据。FileBox 对端走 HTTP 适配器，无 SSH 逻辑（`sync_filebox.go` 零命中）。
-- 候选方案（请用户选择，不代拍板）：
-  - A. 强制显式指纹：新建/更新远程系统必须配置 `hostKeyFingerprint`，否则拒绝保存；存量无指纹记录编辑时强制补填。
-  - B. TOFU 首次信任并持久化：首次连接记录指纹（需新增数据存储字段并处理并发），后续连接比对。
-  - C. 维持现状：无指纹仅告警 + `InsecureIgnoreHostKey`，界面/文档显著提示风险。
-  - D. 不处理。
-- 约束：任何方案不得破坏既有有指纹记录部署；指纹校验路径（严格 SHA256 比对）保持不回退。
+## 其他待用户拍板的开放项【待确认】
 
 ### O2 listCollections 是否改 SQL 分页
 
@@ -339,3 +337,10 @@ join 链与最终落盘：
 - 加固批次：`7a9a22a`（LIKE 转义、分页上界、ZIP 残留清理、登录时序、聚合扣次顺序一致化）。
 - V023 C/1：`48de889`（匿名收集未完成上传任务上限 50）。
 - v023 独立加密密钥：`3d86796`（新密钥 + JWT 派生密文兼容迁移 + 惰性迁移）。
+## v023 collection upload FIFO queue [BUSINESS CONFIRMED]
+
+- The former V023 C/1 decision, which returned HTTP 403 `COLLECTION_LIMIT` when 50 unfinished collection tasks existed, is deprecated and superseded by this change.
+- Each collection has at most 50 `active` tasks. Further init requests succeed as `queued` tasks; queued tasks do not create chunks or reserve quota.
+- Queued tasks promote in `(created_at, id)` FIFO order after complete, cancel, or expiration cleanup. Promotion and quota checks occur in the same SQLite write transaction; a quota-blocked head remains queued and later tasks are not skipped.
+- Chunk, status, and complete requests for queued tasks return `COLLECTION_TASK_QUEUED`. The anonymous state endpoint exposes only `taskId`, `state`, `queuePosition`, and an applicable `waitReason` for the supplied collection token and task ID.
+- Acceptance evidence: `TestCollectionQueuedTasksPromoteFIFOOnCompleteCancelAndExpired`, `TestCollectionQueuedTaskDoesNotReserveQuotaOrProcessChunks`, `TestConcurrentCollectionPendingUploadTaskLimit`, `TestCollectionQueuedTaskAPIAndAnonymousStateIsolation`, and `TestCollectionUploadInitQueuesAfterActiveLimit`.
