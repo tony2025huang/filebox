@@ -268,6 +268,16 @@ Object.assign(en, {
   'files.uploadFolderConfirmTitle': 'Upload folder', 'files.folderUploadTitle': 'Upload folder', 'files.uploadFolderConfirmCount': 'Upload {count} files', 'files.uploadFolderConfirmSize': 'Total size: {size}', 'files.uploadFolderTarget': 'Target location: {dir}', 'files.folderEmpty': 'The selected folder contains no uploadable files'
 })
 
+Object.assign(zhCN, {
+  'files.transferActiveTab': '进行中', 'files.transferDoneTab': '已完成', 'files.transferEmptyActive': '暂无进行中的传输', 'files.transferEmptyDone': '暂无已完成记录', 'files.clearFinished': '清除已完成', 'files.finishedSuccess': '成功', 'files.finishedFailed': '失败', 'files.finishedCancelled': '已取消'
+})
+Object.assign(zhTW, {
+  'files.transferActiveTab': '進行中', 'files.transferDoneTab': '已完成', 'files.transferEmptyActive': '暫無進行中的傳輸', 'files.transferEmptyDone': '暫無已完成記錄', 'files.clearFinished': '清除已完成', 'files.finishedSuccess': '成功', 'files.finishedFailed': '失敗', 'files.finishedCancelled': '已取消'
+})
+Object.assign(en, {
+  'files.transferActiveTab': 'In progress', 'files.transferDoneTab': 'Completed', 'files.transferEmptyActive': 'No transfers in progress', 'files.transferEmptyDone': 'No completed records', 'files.clearFinished': 'Clear completed', 'files.finishedSuccess': 'Success', 'files.finishedFailed': 'Failed', 'files.finishedCancelled': 'Cancelled'
+})
+
 export const dictionaries = { 'zh-CN': zhCN, 'zh-TW': zhTW, en }
 export const currentLocale = ref('zh-CN')
 export const systemLocale = ref('zh-CN')
