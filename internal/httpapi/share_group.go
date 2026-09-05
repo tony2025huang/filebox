@@ -165,6 +165,11 @@ func (s *Server) shareGroupMeta(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ownerID = &group.CreatedBy
+	if !shareActive(group.ExpiresAt) {
+		reason = "share_expired"
+		writeError(w, http.StatusNotFound, "分享不存在或已过期")
+		return
+	}
 	files, err := s.store.ListShareGroupFiles(r.Context(), group.ID)
 	if err != nil {
 		reason = "list_failed"
