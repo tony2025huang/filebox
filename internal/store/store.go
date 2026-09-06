@@ -476,7 +476,10 @@ CREATE TABLE IF NOT EXISTS ip_failures (
 	if err := s.migrateCollectionsSchema(); err != nil {
 		return err
 	}
-	return s.migrateSyncSchema()
+	if err := s.migrateSyncSchema(); err != nil {
+		return err
+	}
+	return s.migrateSyncTriggeredSchema()
 }
 
 // migrateCollectionsSchema creates collection tables and adds the optional task link.

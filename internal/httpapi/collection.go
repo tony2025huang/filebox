@@ -1226,5 +1226,6 @@ func (s *Server) collectionUploadComplete(w http.ResponseWriter, r *http.Request
 	}
 	cleanupFinal = false
 	auditReason = ""
+	s.notifyFileBoxChange(task.UserID, userDirFromStorageDir(task.StorageDir))
 	writeData(w, http.StatusOK, "上传完成", publicFile(completed))
 }

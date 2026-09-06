@@ -73,6 +73,18 @@ type Server struct {
 	syncLocks          map[int64]*sync.Mutex
 	syncProgressMu     sync.Mutex
 	syncProgress       map[int64]*syncRunProgress
+	// 触发同步协调器：registry 保存 enabled 触发任务快照，states 保存每个任务的
+	// 去抖/合并/串行执行状态（参见 sync_trigger.go）。
+	// Triggered-sync coordinator: registry holds enabled triggered-task snapshots and
+	// states track per-task debounce/coalescing/serialization (see sync_trigger.go).
+	triggerMu       sync.Mutex
+	triggerTasks    map[int64]store.SyncTask
+	triggerStates   map[int64]*syncTriggerState
+	triggerDebounce time.Duration
+	triggerCtx      context.Context
+	triggerCancel   context.CancelFunc
+	triggerStarted  bool
+	triggerRunHook  func(context.Context, store.SyncTask) // 测试注入；nil 时走 executeSyncTask
 }
 
 const uploadChunkIdleTimeout = 30 * time.Second
@@ -336,7 +348,7 @@ func NewServer(db *store.Store, config Config) *Server {
 	if config.JWTExpiry <= 0 {
 		config.JWTExpiry = 7 * 24 * time.Hour
 	}
-	server := &Server{store: db, config: config, rateLimiter: rateLimiter{buckets: make(map[int64]*rate.Limiter), lastSeen: make(map[int64]time.Time), publicBuckets: make(map[string]*rate.Limiter), publicLastSeen: make(map[string]time.Time)}, findUploadConflict: db.FindUploadConflict, syncLocks: make(map[int64]*sync.Mutex), syncProgress: make(map[int64]*syncRunProgress)}
+	server := &Server{store: db, config: config, rateLimiter: rateLimiter{buckets: make(map[int64]*rate.Limiter), lastSeen: make(map[int64]time.Time), publicBuckets: make(map[string]*rate.Limiter), publicLastSeen: make(map[string]time.Time)}, findUploadConflict: db.FindUploadConflict, syncLocks: make(map[int64]*sync.Mutex), syncProgress: make(map[int64]*syncRunProgress), triggerTasks: make(map[int64]store.SyncTask), triggerStates: make(map[int64]*syncTriggerState), triggerDebounce: 30 * time.Second}
 	server.startBatchDownloadTempCleanup()
 	return server
 }
@@ -2265,6 +2277,7 @@ func (s *Server) completeUpload(w http.ResponseWriter, r *http.Request) {
 	cleanupFinal = false
 	auditResult, auditReason = "success", ""
 	serviceResult, serviceReason = "success", ""
+	s.notifyFileBoxChange(user.ID, userDirFromStorageDir(task.StorageDir))
 	writeData(w, http.StatusOK, "上传完成", publicFile(completed))
 }
 
@@ -2698,6 +2711,7 @@ func (s *Server) batchDelete(w http.ResponseWriter, r *http.Request) {
 		treeFileSeen := make(map[int64]struct{})
 		treeFolderIDs := make([]int64, 0)
 		treeFolderSeen := make(map[int64]struct{})
+		treeFolderPaths := make([]string, 0, 64)
 		rootFolders := make([]store.Folder, 0, len(input.FolderIDs))
 		rootSeen := make(map[int64]struct{}, len(input.FolderIDs))
 
@@ -2739,6 +2753,7 @@ func (s *Server) batchDelete(w http.ResponseWriter, r *http.Request) {
 				}
 				treeFolderSeen[folder.ID] = struct{}{}
 				treeFolderIDs = append(treeFolderIDs, folder.ID)
+				treeFolderPaths = append(treeFolderPaths, folder.Path)
 			}
 		}
 
@@ -2792,6 +2807,9 @@ func (s *Server) batchDelete(w http.ResponseWriter, r *http.Request) {
 			s.serviceEvent(r, "folder_delete", user.Username, "target=%s result=success", folder.Path)
 			s.recordAudit(r, &user.ID, user.Username, "folder_delete", folder.Path, "success", "folder_delete")
 		}
+		changedDirs := append([]string{}, treeFolderPaths...)
+		changedDirs = append(changedDirs, userDirsFromStoragePaths(paths)...)
+		s.notifyFileBoxChange(user.ID, changedDirs...)
 		auditResult = "success"
 		writeData(w, http.StatusOK, "已删除", map[string]any{"deleted": len(paths), "foldersDeleted": len(treeFolderIDs)})
 		return
@@ -2833,7 +2851,10 @@ func (s *Server) batchDelete(w http.ResponseWriter, r *http.Request) {
 		foldersDeleted++
 		s.serviceEvent(r, "folder_delete", user.Username, "target=%s result=success", folder.Path)
 		s.recordAudit(r, &user.ID, user.Username, "folder_delete", folder.Path, "success", "folder_delete")
+		s.notifyFileBoxChange(user.ID, folder.Path)
 	}
+	changedDirs := userDirsFromStoragePaths(paths)
+	s.notifyFileBoxChange(user.ID, changedDirs...)
 	auditResult = "success"
 	writeData(w, http.StatusOK, "已删除", map[string]any{"deleted": len(paths), "foldersDeleted": foldersDeleted})
 }
@@ -3596,6 +3617,7 @@ func (s *Server) createFolder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.serviceEvent(r, "folder_create", user.Username, "target=%s result=success", folder.Path)
+	s.notifyFileBoxChange(user.ID, folder.Path)
 	writeData(w, http.StatusCreated, "目录已创建", folder)
 }
 
@@ -3673,6 +3695,7 @@ func (s *Server) renameFolder(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "目录名无效")
 		return
 	}
+	oldFolder, oldErr := s.store.GetFolderByID(r.Context(), id, user.ID)
 	err = s.store.RenameFolder(r.Context(), id, user.ID, name)
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "目录不存在")
@@ -3688,6 +3711,14 @@ func (s *Server) renameFolder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	folder, _ := s.store.GetFolderByID(r.Context(), id, user.ID)
+	changedDirs := make([]string, 0, 2)
+	if oldErr == nil {
+		changedDirs = append(changedDirs, oldFolder.Path)
+	}
+	if folder.Path != "" {
+		changedDirs = append(changedDirs, folder.Path)
+	}
+	s.notifyFileBoxChange(user.ID, changedDirs...)
 	s.serviceEvent(r, "folder_rename", user.Username, "target=%s result=success", folder.Path)
 	writeData(w, http.StatusOK, "目录已重命名", folder)
 }
@@ -3720,6 +3751,7 @@ func (s *Server) deleteFolder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.serviceEvent(r, "folder_delete", user.Username, "target=%s result=success", folder.Path)
+	s.notifyFileBoxChange(user.ID, folder.Path)
 	writeData(w, http.StatusOK, "目录已删除", map[string]any{"removed": deleted})
 }
 
@@ -3757,6 +3789,7 @@ func (s *Server) deleteFile(w http.ResponseWriter, r *http.Request) {
 		log.Printf("remove file content: %v", err)
 	}
 	serviceResult, serviceReason = "success", ""
+	s.notifyFileBoxChange(user.ID, userDirsFromStoragePaths([]string{path})...)
 	writeData(w, http.StatusOK, "文件已删除", nil)
 }
 

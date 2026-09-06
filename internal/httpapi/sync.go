@@ -772,7 +772,7 @@ func validateSyncTaskInput(input syncTaskRequest) (syncTaskRequest, error) {
 	if input.Name == "" || len([]byte(input.Name)) > 255 || input.RemoteSystemID <= 0 {
 		return input, errors.New("invalid sync task")
 	}
-	if input.Direction != "push" && input.Direction != "pull" || input.ConflictPolicy != "overwrite" && input.ConflictPolicy != "skip" && input.ConflictPolicy != "rename" || input.ScheduleType != "once" && input.ScheduleType != "periodic" {
+	if input.Direction != "push" && input.Direction != "pull" || input.ConflictPolicy != "overwrite" && input.ConflictPolicy != "skip" && input.ConflictPolicy != "rename" || input.ScheduleType != "once" && input.ScheduleType != "periodic" && input.ScheduleType != "triggered" {
 		return input, errors.New("invalid sync task")
 	}
 	// 方向矩阵：push 以本地 FileBox 为源（目标为 SFTP 或远端 FileBox）；pull 以本地 FileBox 为目标（源为 SFTP 或远端 FileBox）。
@@ -783,6 +783,17 @@ func validateSyncTaskInput(input syncTaskRequest) (syncTaskRequest, error) {
 	}
 	if input.SourceKind != "" && input.SourceKind != "directory" && input.SourceKind != "file" {
 		return input, errors.New("invalid sync task")
+	}
+	// 触发同步只能以本地 FileBox 目录为源（push，目录源）：本进程只能在本地目录
+	// 变化时触发；pull/远程 FileBox 源/单文件源都不允许。
+	// Triggered sync requires a local FileBox directory source (push + directory): this
+	// process can only observe changes to local directories, so pull/remote-FileBox
+	// sources and single-file sources are rejected.
+	if input.ScheduleType == "triggered" {
+		if input.Direction != "push" || input.SourceType != "filebox" || (input.SourceKind != "" && input.SourceKind != "directory") {
+			return input, errors.New("triggered sync requires a FileBox directory source")
+		}
+		input.SourceKind = "directory"
 	}
 	var err error
 	if input.SourceType == "filebox" {
@@ -848,6 +859,7 @@ func (s *Server) createSyncTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.serviceEvent(r, "sync_task_create", user.Username, "target=%d result=success", item.ID)
+	s.refreshTriggeredTasks(context.Background())
 	writeData(w, http.StatusCreated, "同步任务已创建", publicSyncTask(item))
 }
 
@@ -935,6 +947,7 @@ func (s *Server) updateSyncTask(w http.ResponseWriter, r *http.Request) {
 	}
 	result, _ := s.store.GetSyncTask(r.Context(), item.ID, user.ID, user.Role == "admin")
 	s.serviceEvent(r, "sync_task_update", user.Username, "target=%d result=success", item.ID)
+	s.refreshTriggeredTasks(context.Background())
 	writeData(w, http.StatusOK, "同步任务已更新", publicSyncTask(result))
 }
 
@@ -962,6 +975,7 @@ func (s *Server) deleteSyncTask(w http.ResponseWriter, r *http.Request) {
 	}
 	s.releaseSyncLock(item.ID)
 	s.serviceEvent(r, "sync_task_delete", user.Username, "target=%d result=success", item.ID)
+	s.refreshTriggeredTasks(context.Background())
 	writeData(w, http.StatusOK, "同步任务已删除", nil)
 }
 

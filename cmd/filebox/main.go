@@ -235,6 +235,7 @@ func runServe(args []string) error {
 	cleanupContext, stopCleanup := context.WithCancel(context.Background())
 	cleanupDone := make(chan struct{})
 	server.StartSyncScheduler(cleanupContext)
+	server.StartSyncTriggers(cleanupContext)
 	defer func() {
 		stopCleanup()
 		<-cleanupDone

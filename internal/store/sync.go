@@ -214,6 +214,63 @@ CREATE INDEX IF NOT EXISTS idx_sync_logs_run ON sync_logs(run_at);
 	return nil
 }
 
+// migrateSyncTriggeredSchema 放宽 sync_tasks 的 schedule_type CHECK，允许 'triggered'。
+// SQLite 无法直接修改列约束，采用与既有 sync_logs 一致的“重建表 + 迁移数据 + 换名”方式。
+// migrateSyncTriggeredSchema relaxes the sync_tasks schedule_type CHECK to accept
+// 'triggered' by rebuilding the table (SQLite cannot alter a CHECK constraint).
+func (s *Store) migrateSyncTriggeredSchema() error {
+	var tableSQL string
+	if err := s.DB.QueryRow("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'sync_tasks'").Scan(&tableSQL); err != nil {
+		return err
+	}
+	if strings.Contains(tableSQL, "'triggered'") {
+		return nil
+	}
+	// 目标表按当前最新 schema 重建：既有各列 + 放宽后的 CHECK（含 source_kind、last_run_at、last_result）。
+	// Rebuild against the current schema: all existing columns plus the relaxed CHECK
+	// (source_kind, last_run_at and last_result included).
+	tx, err := s.DB.Begin()
+	if err != nil {
+		return err
+	}
+	const schema = `
+CREATE TABLE sync_tasks_new (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  direction TEXT NOT NULL CHECK(direction IN ('push', 'pull')),
+  remote_system_id INTEGER NOT NULL REFERENCES remote_systems(id) ON DELETE RESTRICT,
+  source_type TEXT NOT NULL CHECK(source_type IN ('filebox', 'sftp')),
+  source_path TEXT NOT NULL,
+  source_kind TEXT NOT NULL DEFAULT 'directory' CHECK(source_kind IN ('directory', 'file')),
+  target_type TEXT NOT NULL CHECK(target_type IN ('filebox', 'sftp')),
+  target_path TEXT NOT NULL,
+  conflict_policy TEXT NOT NULL DEFAULT 'overwrite' CHECK(conflict_policy IN ('overwrite', 'skip', 'rename')),
+  schedule_type TEXT NOT NULL CHECK(schedule_type IN ('once', 'periodic', 'triggered')),
+  cron TEXT NOT NULL DEFAULT '',
+  enabled INTEGER NOT NULL DEFAULT 1,
+  last_run_at TEXT,
+  last_result TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL
+);
+INSERT INTO sync_tasks_new(id, user_id, name, direction, remote_system_id, source_type, source_path,
+  source_kind, target_type, target_path, conflict_policy, schedule_type, cron, enabled,
+  last_run_at, last_result, created_at)
+  SELECT id, user_id, name, direction, remote_system_id, source_type, source_path,
+    COALESCE(source_kind, 'directory'), target_type, target_path, conflict_policy, schedule_type, cron, enabled,
+    COALESCE(last_run_at, ''), COALESCE(last_result, ''), created_at FROM sync_tasks;
+DROP TABLE sync_tasks;
+ALTER TABLE sync_tasks_new RENAME TO sync_tasks;
+CREATE INDEX IF NOT EXISTS idx_sync_tasks_user ON sync_tasks(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_sync_tasks_schedule ON sync_tasks(enabled, schedule_type);
+`
+	if _, err := tx.Exec(schema); err != nil {
+		tx.Rollback()
+		return err
+	}
+	return tx.Commit()
+}
+
 func scanRemoteSystem(row interface{ Scan(...any) error }) (RemoteSystem, error) {
 	var item RemoteSystem
 	var err error
@@ -547,6 +604,37 @@ func (s *Store) ListScheduledSyncTasks(ctx context.Context) ([]SyncTask, error) 
  COALESCE(sync_tasks.last_result, ''), sync_tasks.created_at
  FROM sync_tasks JOIN users ON users.id = sync_tasks.user_id
  WHERE sync_tasks.enabled = 1 AND sync_tasks.schedule_type = 'periodic' AND users.disabled = 0
+ ORDER BY sync_tasks.id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]SyncTask, 0)
+	for rows.Next() {
+		item, err := scanSyncTask(rows)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+// ListTriggeredSyncTasks 返回触发器需要关注的 enabled 触发任务。
+// 触发同步只能以本地 FileBox 目录为源：direction=push、source_type=filebox、source_kind=directory。
+// ListTriggeredSyncTasks returns enabled trigger tasks the in-process trigger
+// coordinator watches. Triggered sync requires a local FileBox directory source:
+// direction=push, source_type=filebox and source_kind=directory.
+func (s *Store) ListTriggeredSyncTasks(ctx context.Context) ([]SyncTask, error) {
+	rows, err := s.DB.QueryContext(ctx, `SELECT sync_tasks.id, sync_tasks.user_id, sync_tasks.name, sync_tasks.direction, sync_tasks.remote_system_id,
+ sync_tasks.source_type, sync_tasks.source_path, COALESCE(sync_tasks.source_kind, 'directory'), sync_tasks.target_type, sync_tasks.target_path, sync_tasks.conflict_policy,
+ sync_tasks.schedule_type, sync_tasks.cron, sync_tasks.enabled, COALESCE(sync_tasks.last_run_at, ''),
+ COALESCE(sync_tasks.last_result, ''), sync_tasks.created_at
+ FROM sync_tasks JOIN users ON users.id = sync_tasks.user_id
+ WHERE sync_tasks.enabled = 1 AND sync_tasks.schedule_type = 'triggered'
+   AND sync_tasks.direction = 'push' AND sync_tasks.source_type = 'filebox'
+   AND COALESCE(sync_tasks.source_kind, 'directory') = 'directory'
+   AND users.disabled = 0
  ORDER BY sync_tasks.id`)
 	if err != nil {
 		return nil, err

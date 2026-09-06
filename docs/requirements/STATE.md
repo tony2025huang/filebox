@@ -1,6 +1,14 @@
 # FileBox Requirement State
 
-Updated: 2026-09-05 (v024.2：登录页脚锚定与备案合规行自适应)
+Updated: 2026-09-05 (v025：FileBox 源目录变更触发同步)
+
+| Requirement | State | Notes |
+|---|---|---|
+| v025 triggered sync schedule | done | 【业务确认】`scheduleType=triggered` allowed only for push tasks whose local FileBox directory is the source (sourceType=filebox, sourceKind=directory); pull/SFTP/single-file rejected at API and DB CHECK (relaxed by table rebuild); invalid combinations return 400. |
+| v025 debounce/coalesce/serialization | done | 【业务确认】30s debounce after the final change; changes during an active run coalesce into exactly one follow-up after completion; the same task never runs concurrently (shared per-task lock with manual/scheduled runs and `executeSyncTask`). |
+| v025 mutation hooks & matching | done | 【业务确认】Trigger on upload complete (incl. overwrite/rename), folder create/rename(old+new)/delete, file delete, batch delete incl. forced recursive tree, and collection completion that creates owner files; no trigger on chunk uploads, failed/incomplete chunks or instant-upload hits (no new file created). Matching: root source matches all; otherwise change must equal the source or be inside its subtree. |
+| v025 lifecycle/restart | done | 【业务确认】Coordinator starts with the process, refreshes registry after task CRUD/enable changes, stops all timers on shutdown; no retroactive run after restart (documented). |
+| v025 SyncView | done | 【开发拟定】Schedule dropdown adds 变更触发/On change, disabled when direction is not push with an explainer on save; cron hidden under triggered with a 30s debounce hint; task rows show on-change status. |
 
 | Requirement | State | Notes |
 |---|---|---|
