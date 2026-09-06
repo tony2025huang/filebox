@@ -1,6 +1,11 @@
 # FileBox Requirement State
 
-Updated: 2026-09-05 (v025：FileBox 源目录变更触发同步)
+Updated: 2026-09-05 (v025 mobile navigation/layout; v025 triggered sync)
+
+| Requirement | State | Notes |
+|---|---|---|
+| v025 mobile topbar collapse | done | 【业务确认】≤800px 时 AuthenticatedTopbar 将导航链接、语言选择、修改密码与退出折叠到单一无障碍菜单（汉堡按钮，aria-expanded/aria-controls，打开后聚焦关闭按钮）；菜单支持背板点击 / Esc / 路由跳转 / 视口转宽自动关闭；各页 actions 插槽（如文件页传输）在菜单内可达；桌面内联顶栏保持不变。 |
+| v025 shared responsive polish | done | 【业务确认】共享 CSS 移动端梳理：page-heading 操作区折行、表格只在语义表格容器内横向滚动（不引发 body 溢出）、≤800/≤500 触控目标加大、模态框背板可滚动、分页换行、文件名列宽随屏收缩；Files/Collections/Shares/Sync/Logs/Admin 均受益，不改页面逻辑。 |
 
 | Requirement | State | Notes |
 |---|---|---|

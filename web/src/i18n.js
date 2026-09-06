@@ -387,3 +387,8 @@ Object.assign(en, {
   'confirm.deleteNonEmptyFolders': '{message}\n\nDelete the folders along with ALL their contents? This cannot be undone.',
   'notice.deleteSelectionDone': '{files} files and {folders} folders deleted'
 })
+
+// v025: mobile topbar navigation menu labels.
+Object.assign(zhCN, { 'nav.menu': '菜单', 'nav.openMenu': '打开导航菜单', 'nav.closeMenu': '关闭导航菜单' })
+Object.assign(zhTW, { 'nav.menu': '選單', 'nav.openMenu': '開啟導覽選單', 'nav.closeMenu': '關閉導覽選單' })
+Object.assign(en, { 'nav.menu': 'Menu', 'nav.openMenu': 'Open navigation menu', 'nav.closeMenu': 'Close navigation menu' })

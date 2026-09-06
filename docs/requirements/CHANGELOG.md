@@ -1,5 +1,11 @@
 # Requirement Change Log
 
+## 2026-09-05 - v025 手机端折叠导航与全页响应式布局
+
+- 【业务确认】AuthenticatedTopbar：≤800px 时折叠 文件/收集/分享/同步/日志/系统(admin) 导航、语言选择、修改密码与退出为单一无障碍菜单（汉堡按钮，aria-expanded/aria-controls，打开后自动聚焦关闭按钮，关闭后焦点回到触发按钮）；菜单支持 背板点击 / Esc / 点击导航项 / 路由变化 / 视口变宽 自动关闭，打开时锁定 body 滚动；各页 actions 插槽（如文件页传输按钮）在菜单内可达；桌面顶栏样式与行为保持不变。
+- 【业务确认】共享样式移动端梳理：page-heading 操作区折行；表格仅在语义表格容器内横向滚动，不引发 body 溢出；≤800/≤500 加大按钮与行内操作触控目标；模态框背板改为可滚动（超高弹窗不再被裁切）；分页自动换行；文件/文件夹名列宽随屏收缩；Files/Collections/Shares/Sync/Logs/Admin 均受益，未改动各页逻辑。
+- 新增 `web/src/topbarNav.js`（纯分区/激活键解析 + node 测试 `web/tests/topbarNav.test.mjs`），i18n 三语新增 `nav.menu` / `nav.openMenu` / `nav.closeMenu`。
+
 ## 2026-09-05 - v025 同步任务：FileBox 源目录变更触发（on-change trigger）
 
 - 【业务确认】同步任务新增 `scheduleType=triggered`，仅允许「以本地 FileBox 目录为源」的任务（push 方向 + sourceType=filebox + sourceKind=directory）；pull、SFTP 源、单文件源在 REST/存储校验层均被拒绝（`validateSyncTaskInput` 与 DB CHECK 同步放宽，新建/编辑返回 400）。

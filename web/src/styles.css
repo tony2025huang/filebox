@@ -145,3 +145,53 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 .secret-value input { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; letter-spacing: .03em; }
 .alert.info { color: #1a5276; background: #eaf3f8; }
 .protected-mark { display: inline-flex; align-items: center; gap: 4px; color: #8b5a19; font-size: 11px; font-weight: 600; white-space: nowrap; }
+
+/* ============ v025 mobile navigation & responsive polish ============
+ * Desktop keeps the inline topbar (`.topbar-actions`); ≤800px collapses the
+ * navigation/account controls into one accessible menu (logo + section remain
+ * visible). Styles are global (not scoped) so RouterLink <a> children and
+ * slotted controls can be styled reliably. */
+.mobile-menu-toggle { display: none; align-items: center; justify-content: center; color: #4d6077; }
+.mobile-nav-backdrop { position: fixed; inset: 0; z-index: 70; background: rgba(16, 42, 67, .36); }
+.mobile-nav-panel { position: fixed; top: 0; right: 0; bottom: 0; z-index: 71; display: flex; flex-direction: column; width: min(88vw, 340px); background: #fff; box-shadow: -18px 0 42px rgba(16, 42, 67, .2); }
+.mobile-nav-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 16px 18px; border-bottom: 1px solid #e6ebf2; }
+.mobile-nav-heading { color: #102a43; font-size: 15px; font-weight: 700; }
+.mobile-nav-body { flex: 1; min-height: 0; overflow-y: auto; padding: 14px 12px 26px; }
+.mobile-nav-slot { margin-bottom: 8px; padding: 4px 2px 10px; border-bottom: 1px solid #edf1f5; }
+.mobile-nav-slot .icon-text-button { color: var(--brand-color-strong); font-weight: 600; }
+.mobile-nav-link { display: flex; align-items: center; gap: 12px; box-sizing: border-box; width: 100%; padding: 12px; border-radius: 8px; color: #33475c; font-size: 15px; font-weight: 600; text-decoration: none; }
+.mobile-nav-link svg { flex: none; }
+.mobile-nav-link.active { color: var(--brand-color-strong); background: var(--brand-color-soft); }
+.mobile-nav-divider { height: 1px; margin: 10px 6px; background: #edf1f5; }
+.mobile-nav-account { display: grid; gap: 4px; }
+.mobile-nav-lang { padding: 2px 8px 6px; }
+.mobile-nav-lang .language-select select { width: 100%; height: 38px; }
+.mobile-nav-tool { display: flex; align-items: center; gap: 12px; box-sizing: border-box; width: 100%; padding: 11px 12px; border: 0; border-radius: 8px; background: transparent; color: #33475c; font-size: 14px; font-weight: 600; text-align: left; cursor: pointer; }
+.mobile-nav-tool:hover { background: #f0f4f7; }
+.mobile-nav-tool.danger { color: #c94b35; }
+
+@media (max-width: 800px) {
+  .topbar-actions { display: none; }
+  .mobile-menu-toggle { display: inline-flex; }
+  .page-heading { gap: 16px; }
+  .page-heading .sync-heading-actions { width: 100%; flex-wrap: wrap; justify-content: flex-end; }
+  .page-heading .sync-heading-actions .primary-button { flex: 1 1 auto; }
+  .modal-backdrop { display: block; overflow-y: auto; padding: 4vh 14px 30px; }
+  .modal-backdrop .modal-panel { margin: 0 auto; }
+  .pagination { flex-wrap: wrap; row-gap: 10px; }
+  .file-title { max-width: 34vw; }
+  .dir-bar { align-items: flex-start; flex-wrap: wrap; }
+  .dir-bar .dir-actions { margin-left: auto; }
+  .secondary-button, .primary-button, .icon-text-button { min-height: 40px; }
+  .icon-button { min-width: 36px; min-height: 36px; }
+}
+@media (max-width: 500px) {
+  .topbar-brand .brand-logo { width: 112px; }
+  .file-table th, .file-table td { padding: 10px 8px; }
+  .file-title { max-width: 26vw; }
+  .share-manage-actions { grid-template-columns: 1fr; }
+  .share-manage-actions form { flex-direction: column; align-items: stretch; }
+  .share-manage-actions .secondary-button { width: 100%; }
+  .page-heading .sync-heading-actions { justify-content: stretch; }
+  .page-heading .sync-heading-actions .secondary-button { flex: 1; }
+}
