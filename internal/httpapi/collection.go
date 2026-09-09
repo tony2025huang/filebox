@@ -303,6 +303,10 @@ func (s *Server) collectionMeta(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "读取收集链接失败")
 		return
 	}
+	if err := collectionTaskStateForAPI(collection); err != nil {
+		writeError(w, http.StatusNotFound, "收集链接不存在")
+		return
+	}
 	if decision := s.authorizeCollectionRequest(r, collection); decision != collectionAuthAllow {
 		s.writeCollectionAuthResult(w, r, collection, decision)
 		return

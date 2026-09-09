@@ -121,7 +121,7 @@ func TestUploadCollectionLifecycleAndAnonymousUpload(t *testing.T) {
 		t.Fatalf("revoke collection = %d: %s", revoked.Code, revoked.Body.String())
 	}
 	revokedMeta := testJSONRequest(t, handler, http.MethodGet, "/api/collections/"+collectionToken+"/meta", "", "")
-	if revokedMeta.Code != http.StatusOK || responseData(t, revokedMeta)["status"] != "revoked" {
+	if revokedMeta.Code != http.StatusNotFound || strings.Contains(revokedMeta.Body.String(), "外部收集") {
 		t.Fatalf("revoked collection meta = %d: %s", revokedMeta.Code, revokedMeta.Body.String())
 	}
 	blocked := testJSONRequest(t, handler, http.MethodPost, "/api/collections/"+collectionToken+"/upload-init", "", `{"name":"blocked.txt","size":1,"chunkSize":0}`)
@@ -1120,6 +1120,260 @@ func uploadTestFile(t *testing.T, handler http.Handler, token, name, mimeType st
 		t.Fatalf("upload complete status = %d: %s", complete.Code, complete.Body.String())
 	}
 	return responseData(t, complete)
+}
+
+func TestClearAllFilesPasswordSuccess(t *testing.T) {
+	_, handler := newTestServer(t)
+	token := testAdminToken(t, handler)
+	uploadTestFile(t, handler, token, "clear-me.txt", "text/plain", []byte("clear me"))
+
+	folder := testJSONRequest(t, handler, http.MethodPost, "/api/folders", token, `{"name":"clear-me-folder"}`)
+	if folder.Code != http.StatusCreated {
+		t.Fatalf("create folder = %d: %s", folder.Code, folder.Body.String())
+	}
+
+	cleared := testJSONRequest(t, handler, http.MethodPost, "/api/files/clear-all", token, `{"password":"admin123"}`)
+	if cleared.Code != http.StatusOK {
+		t.Fatalf("clear all files = %d: %s", cleared.Code, cleared.Body.String())
+	}
+
+	files := testJSONRequest(t, handler, http.MethodGet, "/api/files", token, "")
+	if files.Code != http.StatusOK {
+		t.Fatalf("list files after clear all = %d: %s", files.Code, files.Body.String())
+	}
+	fileData := responseData(t, files)
+	fileItems, ok := fileData["items"].([]any)
+	if !ok || fileData["total"] != float64(0) || len(fileItems) != 0 {
+		t.Fatalf("files after clear all = %s", files.Body.String())
+	}
+
+	folders := testJSONRequest(t, handler, http.MethodGet, "/api/folders", token, "")
+	if folders.Code != http.StatusOK {
+		t.Fatalf("list folders after clear all = %d: %s", folders.Code, folders.Body.String())
+	}
+	folderItems, ok := responseData(t, folders)["items"].([]any)
+	if !ok || len(folderItems) != 0 {
+		t.Fatalf("folders after clear all = %s", folders.Body.String())
+	}
+
+	me := testJSONRequest(t, handler, http.MethodGet, "/api/auth/me", token, "")
+	if me.Code != http.StatusOK || responseData(t, me)["usedBytes"] != float64(0) {
+		t.Fatalf("user after clear all = %d: %s", me.Code, me.Body.String())
+	}
+}
+
+func TestClearAllFilesReadOnlyDenied(t *testing.T) {
+	_, handler := newTestServer(t)
+	adminToken := testAdminToken(t, handler)
+	created := testJSONRequest(t, handler, http.MethodPost, "/api/admin/users", adminToken, `{"username":"clear-read-only-user","password":"Readonly123!","role":"user","quotaBytes":1048576}`)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create read-only test user = %d: %s", created.Code, created.Body.String())
+	}
+	userData := responseData(t, created)
+	userID := int64(userData["id"].(float64))
+
+	login := testJSONRequest(t, handler, http.MethodPost, "/api/auth/login", "", `{"username":"clear-read-only-user","password":"Readonly123!"}`)
+	if login.Code != http.StatusOK {
+		t.Fatalf("read-only test user login = %d: %s", login.Code, login.Body.String())
+	}
+	userToken := responseData(t, login)["token"].(string)
+	uploaded := uploadTestFile(t, handler, userToken, "keep-read-only.txt", "text/plain", []byte("keep me"))
+
+	setWindow := testJSONRequest(t, handler, http.MethodPut, "/api/admin/users/"+formatID(userID)+"/read-only", adminToken, `{"from":"2000-01-01T00:00:00Z","until":"2999-01-01T00:00:00Z"}`)
+	if setWindow.Code != http.StatusOK {
+		t.Fatalf("set user read-only window = %d: %s", setWindow.Code, setWindow.Body.String())
+	}
+
+	denied := testJSONRequest(t, handler, http.MethodPost, "/api/files/clear-all", userToken, `{"password":"Readonly123!"}`)
+	if denied.Code != http.StatusForbidden {
+		t.Fatalf("clear all during user read-only window = %d, want 403: %s", denied.Code, denied.Body.String())
+	}
+
+	files := testJSONRequest(t, handler, http.MethodGet, "/api/files", userToken, "")
+	if files.Code != http.StatusOK {
+		t.Fatalf("list files after read-only denied clear all = %d: %s", files.Code, files.Body.String())
+	}
+	fileData := responseData(t, files)
+	fileItems, ok := fileData["items"].([]any)
+	if !ok || fileData["total"] != float64(1) || len(fileItems) != 1 || int64(fileItems[0].(map[string]any)["id"].(float64)) != int64(uploaded["id"].(float64)) {
+		t.Fatalf("files after read-only denied clear all = %s", files.Body.String())
+	}
+}
+
+func TestClearAllFilesWrongPasswordDenied(t *testing.T) {
+	_, handler := newTestServer(t)
+	token := testAdminToken(t, handler)
+	uploaded := uploadTestFile(t, handler, token, "keep-me.txt", "text/plain", []byte("keep me"))
+
+	denied := testJSONRequest(t, handler, http.MethodPost, "/api/files/clear-all", token, `{"password":"wrong-password"}`)
+	if denied.Code != http.StatusUnauthorized {
+		t.Fatalf("clear all with wrong password = %d, want 401: %s", denied.Code, denied.Body.String())
+	}
+
+	files := testJSONRequest(t, handler, http.MethodGet, "/api/files", token, "")
+	if files.Code != http.StatusOK {
+		t.Fatalf("list files after denied clear all = %d: %s", files.Code, files.Body.String())
+	}
+	fileData := responseData(t, files)
+	fileItems, ok := fileData["items"].([]any)
+	if !ok || fileData["total"] != float64(1) || len(fileItems) != 1 || int64(fileItems[0].(map[string]any)["id"].(float64)) != int64(uploaded["id"].(float64)) {
+		t.Fatalf("files after denied clear all = %s", files.Body.String())
+	}
+}
+
+func TestClearAllFilesTOTPRejectsPassword(t *testing.T) {
+	db, handler := newTestServer(t)
+	token := testAdminToken(t, handler)
+	admin, err := db.GetUserByUsername("admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	enabled := testJSONRequest(t, handler, http.MethodPut, "/api/admin/users/"+strconv.FormatInt(admin.ID, 10)+"/totp", token, `{"enabled":true}`)
+	if enabled.Code != http.StatusOK {
+		t.Fatalf("enable admin TOTP = %d: %s", enabled.Code, enabled.Body.String())
+	}
+
+	uploaded := uploadTestFile(t, handler, token, "keep-with-totp.txt", "text/plain", []byte("keep me"))
+	denied := testJSONRequest(t, handler, http.MethodPost, "/api/files/clear-all", token, `{"password":"admin123"}`)
+	if denied.Code != http.StatusUnauthorized {
+		t.Fatalf("clear all with password while TOTP enabled = %d, want 401: %s", denied.Code, denied.Body.String())
+	}
+
+	files := testJSONRequest(t, handler, http.MethodGet, "/api/files", token, "")
+	if files.Code != http.StatusOK {
+		t.Fatalf("list files after TOTP-denied clear all = %d: %s", files.Code, files.Body.String())
+	}
+	fileData := responseData(t, files)
+	fileItems, ok := fileData["items"].([]any)
+	if !ok || fileData["total"] != float64(1) || len(fileItems) != 1 || int64(fileItems[0].(map[string]any)["id"].(float64)) != int64(uploaded["id"].(float64)) {
+		t.Fatalf("files after TOTP-denied clear all = %s", files.Body.String())
+	}
+}
+
+func TestClearAllFilesTOTPSuccess(t *testing.T) {
+	db, handler := newTestServer(t)
+	token := testAdminToken(t, handler)
+	admin, err := db.GetUserByUsername("admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	enabled := testJSONRequest(t, handler, http.MethodPut, "/api/admin/users/"+strconv.FormatInt(admin.ID, 10)+"/totp", token, `{"enabled":true}`)
+	if enabled.Code != http.StatusOK {
+		t.Fatalf("enable admin TOTP = %d: %s", enabled.Code, enabled.Body.String())
+	}
+
+	admin, err = db.GetUser(admin.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := NewServer(db, Config{DataDir: db.DataDir, JWTSecret: []byte("test-secret")})
+	secret, err := server.decryptTOTPSecretForUser(context.Background(), admin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	uploadTestFile(t, handler, token, "clear-with-totp.txt", "text/plain", []byte("clear me"))
+
+	code := totpCode(secret, time.Now().UTC().Unix()/30)
+	cleared := testJSONRequest(t, handler, http.MethodPost, "/api/files/clear-all", token, `{"code":"`+code+`"}`)
+	if cleared.Code != http.StatusOK {
+		t.Fatalf("clear all files with TOTP = %d: %s", cleared.Code, cleared.Body.String())
+	}
+
+	files := testJSONRequest(t, handler, http.MethodGet, "/api/files", token, "")
+	if files.Code != http.StatusOK {
+		t.Fatalf("list files after TOTP clear all = %d: %s", files.Code, files.Body.String())
+	}
+	fileData := responseData(t, files)
+	fileItems, ok := fileData["items"].([]any)
+	if !ok || fileData["total"] != float64(0) || len(fileItems) != 0 {
+		t.Fatalf("files after TOTP clear all = %s", files.Body.String())
+	}
+}
+
+func TestListFilesSortAndPagination(t *testing.T) {
+	db, handler := newTestServer(t)
+	token := testAdminToken(t, handler)
+
+	fixtures := []struct {
+		name      string
+		mime      string
+		content   []byte
+		createdAt string
+	}{
+		{name: "alpha.txt", mime: "text/plain", content: []byte("aaa"), createdAt: "2024-01-03T00:00:00Z"},
+		{name: "beta.bin", mime: "application/octet-stream", content: []byte("b"), createdAt: "2024-01-01T00:00:00Z"},
+		{name: "gamma.css", mime: "text/css", content: []byte("ccc"), createdAt: "2024-01-04T00:00:00Z"},
+		{name: "delta.jpg", mime: "image/jpeg", content: []byte("ddddd"), createdAt: "2024-01-02T00:00:00Z"},
+	}
+	for _, fixture := range fixtures {
+		file := uploadTestFile(t, handler, token, fixture.name, fixture.mime, fixture.content)
+		if _, err := db.DB.Exec("UPDATE files SET created_at = ? WHERE id = ?", fixture.createdAt, int64(file["id"].(float64))); err != nil {
+			t.Fatalf("set created_at for %s: %v", fixture.name, err)
+		}
+	}
+
+	listNames := func(path string) []string {
+		t.Helper()
+		recorder := testJSONRequest(t, handler, http.MethodGet, path, token, "")
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("list files %q = %d: %s", path, recorder.Code, recorder.Body.String())
+		}
+		items, ok := responseData(t, recorder)["items"].([]any)
+		if !ok {
+			t.Fatalf("list files %q items type = %T", path, responseData(t, recorder)["items"])
+		}
+		names := make([]string, 0, len(items))
+		for _, item := range items {
+			entry, ok := item.(map[string]any)
+			if !ok {
+				t.Fatalf("list files %q item type = %T", path, item)
+			}
+			name, ok := entry["name"].(string)
+			if !ok {
+				t.Fatalf("list files %q item name = %#v", path, entry["name"])
+			}
+			names = append(names, name)
+		}
+		return names
+	}
+
+	cases := []struct {
+		name  string
+		query string
+		want  string
+	}{
+		{name: "default name asc", query: "", want: "alpha.txt,beta.bin,delta.jpg,gamma.css"},
+		{name: "name desc", query: "sortBy=name&sortOrder=desc", want: "gamma.css,delta.jpg,beta.bin,alpha.txt"},
+		{name: "size asc", query: "sortBy=size&sortOrder=asc", want: "beta.bin,alpha.txt,gamma.css,delta.jpg"},
+		{name: "size desc", query: "sortBy=size&sortOrder=desc", want: "delta.jpg,gamma.css,alpha.txt,beta.bin"},
+		{name: "type asc", query: "sortBy=type&sortOrder=asc", want: "beta.bin,delta.jpg,gamma.css,alpha.txt"},
+		{name: "type desc", query: "sortBy=type&sortOrder=desc", want: "alpha.txt,gamma.css,delta.jpg,beta.bin"},
+		{name: "updatedAt asc", query: "sortBy=updatedAt&sortOrder=asc", want: "beta.bin,delta.jpg,alpha.txt,gamma.css"},
+		{name: "updatedAt desc", query: "sortBy=updatedAt&sortOrder=desc", want: "gamma.css,alpha.txt,delta.jpg,beta.bin"},
+	}
+	for _, tc := range cases {
+		path := "/api/files"
+		if tc.query != "" {
+			path += "?" + tc.query
+		}
+		got := strings.Join(listNames(path), ",")
+		if got != tc.want {
+			t.Errorf("%s order = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+
+	for _, query := range []string{"sortBy=invalid", "sortOrder=invalid"} {
+		recorder := testJSONRequest(t, handler, http.MethodGet, "/api/files?"+query, token, "")
+		if recorder.Code != http.StatusBadRequest {
+			t.Errorf("invalid %s status = %d, want 400", query, recorder.Code)
+		}
+	}
+
+	pageOne := strings.Join(listNames("/api/files?sortBy=size&sortOrder=asc&page=1&pageSize=2"), ",")
+	pageTwo := strings.Join(listNames("/api/files?sortBy=size&sortOrder=asc&page=2&pageSize=2"), ",")
+	if pageOne != "beta.bin,alpha.txt" || pageTwo != "gamma.css,delta.jpg" {
+		t.Fatalf("stable size pagination = %q / %q, want %q / %q", pageOne, pageTwo, "beta.bin,alpha.txt", "gamma.css,delta.jpg")
+	}
 }
 
 func TestBatchDeleteFilesAndFoldersPrechecksNonEmptyFolders(t *testing.T) {

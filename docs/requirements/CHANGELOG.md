@@ -1,5 +1,13 @@
 # Requirement Change Log
 
+## 2026-09-08 - v026 sort, security, privacy, and transfer follow-up
+
+- Sort APIs and UI are complete.
+- Clear-all reauthentication is complete, with separate password-versus-TOTP paths covered by tests.
+- Anonymous collection metadata is concealed for expired or revoked collections.
+- Transfer completion unification and timestamps are in progress, along with folder queue batching and request race protection.
+- Native directory picker support is complete: `showDirectoryPicker` is preferred, with `webkitdirectory` fallback; browser prompts cannot be suppressed in the fallback. Deployment remains pending.
+
 ## 2026-09-05 - v025 手机端折叠导航与全页响应式布局
 
 - 【业务确认】AuthenticatedTopbar：≤800px 时折叠 文件/收集/分享/同步/日志/系统(admin) 导航、语言选择、修改密码与退出为单一无障碍菜单（汉堡按钮，aria-expanded/aria-controls，打开后自动聚焦关闭按钮，关闭后焦点回到触发按钮）；菜单支持 背板点击 / Esc / 点击导航项 / 路由变化 / 视口变宽 自动关闭，打开时锁定 body 滚动；各页 actions 插槽（如文件页传输按钮）在菜单内可达；桌面顶栏样式与行为保持不变。

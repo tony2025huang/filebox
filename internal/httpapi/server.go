@@ -438,6 +438,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/shared-groups/{token}/files/{fileID}", s.requireAuth(s.removeShareGroupFile))
 	mux.HandleFunc("PUT /api/shared-groups/{token}", s.requireAuth(s.updateShareGroup))
 	mux.HandleFunc("POST /api/files/batch-delete", s.requireAuth(s.batchDelete))
+	mux.HandleFunc("POST /api/files/clear-all", s.requireAuth(s.clearAllFiles))
 	mux.HandleFunc("GET /api/files/progress/stream", s.requireAuth(s.uploadProgressStream))
 	mux.HandleFunc("GET /api/files/{id}/preview", s.requireAuth(s.preview))
 	mux.HandleFunc("POST /api/files/{id}/share", s.requireAuth(s.createShare))
@@ -1423,6 +1424,75 @@ func (s *Server) decryptTOTPSecretForUser(ctx context.Context, user store.User) 
 	return secret, nil
 }
 
+func (s *Server) clearFilesReauth(ctx context.Context, user store.User, password, code string) error {
+	const genericError = "reauthentication failed"
+	if user.TOTPEnabled {
+		if len(code) != 6 {
+			return errors.New(genericError)
+		}
+		secret, err := s.decryptTOTPSecretForUser(ctx, user)
+		if err != nil {
+			return errors.New(genericError)
+		}
+		now := time.Now().UTC()
+		baseCounter := now.Unix() / 30
+		for offset := int64(-1); offset <= 1; offset++ {
+			if hmac.Equal([]byte(totpCode(secret, baseCounter+offset)), []byte(code)) {
+				return nil
+			}
+		}
+		return errors.New(genericError)
+	}
+	if bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password)) != nil {
+		return errors.New(genericError)
+	}
+	return nil
+}
+
+func (s *Server) clearAllFiles(w http.ResponseWriter, r *http.Request) {
+	user := currentUser(r.Context())
+	var input struct {
+		Password string `json:"password"`
+		Code     string `json:"code"`
+	}
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	if s.rejectReadOnly(w, r, user, "clear_all", "all") {
+		return
+	}
+
+	auditResult, auditReason := "failure", "clear_failed"
+	defer func() {
+		s.recordAudit(r, &user.ID, user.Username, "clear_all", "all", auditResult, auditReason)
+		s.serviceEvent(r, "clear_all", user.Username, "target=all result=%s reason=%s", auditResult, auditReason)
+	}()
+
+	if err := s.clearFilesReauth(r.Context(), user, input.Password, input.Code); err != nil {
+		auditReason = "reauth_failed"
+		writeError(w, http.StatusUnauthorized, "验证失败")
+		return
+	}
+	paths, err := s.store.ClearUserFiles(r.Context(), user.ID)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusUnauthorized, "请先登录")
+		return
+	}
+	if err != nil {
+		log.Printf("clear user files: %v", err)
+		writeError(w, http.StatusInternalServerError, "清空文件失败")
+		return
+	}
+	for _, path := range paths {
+		if err := os.RemoveAll(filepath.Join(s.config.DataDir, path)); err != nil {
+			log.Printf("remove cleared file content %q: %v", path, err)
+		}
+	}
+	auditResult, auditReason = "success", "clear_all"
+	s.notifyFileBoxChange(user.ID, userDirsFromStoragePaths(paths)...)
+	writeData(w, http.StatusOK, "文件已清空", map[string]any{"count": len(paths)})
+}
+
 func totpURL(username, secret string) string {
 	return "otpauth://totp/FileBox:" + url.PathEscape(username) + "?secret=" + secret + "&issuer=FileBox"
 }
@@ -2293,7 +2363,25 @@ func (s *Server) listFiles(w http.ResponseWriter, r *http.Request) {
 		}
 		dir = validated
 	}
-	files, total, err := s.store.ListFiles(r.Context(), user.ID, user.Role == "admin", strings.TrimSpace(r.URL.Query().Get("keyword")), dir, page, pageSize)
+	fileSort := store.FileSort{By: "name"}
+	if sortBy := strings.TrimSpace(r.URL.Query().Get("sortBy")); sortBy != "" {
+		switch sortBy {
+		case "name", "size", "type", "updatedAt":
+			fileSort.By = sortBy
+		default:
+			writeError(w, http.StatusBadRequest, "排序字段无效")
+			return
+		}
+	}
+	switch sortOrder := strings.TrimSpace(r.URL.Query().Get("sortOrder")); sortOrder {
+	case "", "asc":
+	case "desc":
+		fileSort.Desc = true
+	default:
+		writeError(w, http.StatusBadRequest, "排序方向无效")
+		return
+	}
+	files, total, err := s.store.ListFilesSorted(r.Context(), user.ID, user.Role == "admin", strings.TrimSpace(r.URL.Query().Get("keyword")), dir, fileSort, page, pageSize)
 	if err != nil {
 		log.Printf("list files: %v", err)
 		writeError(w, http.StatusInternalServerError, "获取文件列表失败")
@@ -3653,6 +3741,25 @@ func normalizeFolderPath(path string) (string, bool) {
 // listFolders returns all of the current user's folders, filtering and normalizing legacy invalid/prefixed paths (v019 #4).
 func (s *Server) listFolders(w http.ResponseWriter, r *http.Request) {
 	user := currentUser(r.Context())
+	folderSortBy := "name"
+	if sortBy := strings.TrimSpace(r.URL.Query().Get("sortBy")); sortBy != "" {
+		switch sortBy {
+		case "name", "size", "type", "updatedAt":
+			folderSortBy = sortBy
+		default:
+			writeError(w, http.StatusBadRequest, "排序字段无效")
+			return
+		}
+	}
+	folderSortDesc := false
+	switch sortOrder := strings.TrimSpace(r.URL.Query().Get("sortOrder")); sortOrder {
+	case "", "asc":
+	case "desc":
+		folderSortDesc = true
+	default:
+		writeError(w, http.StatusBadRequest, "排序方向无效")
+		return
+	}
 	folders, err := s.store.ListFolders(r.Context(), user.ID)
 	if err != nil {
 		log.Printf("list folders: %v", err)
@@ -3668,8 +3775,49 @@ func (s *Server) listFolders(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		folder.Path = normalized
+		folder.Name = filepath.Base(normalized)
 		items = append(items, folder)
 	}
+	sort.SliceStable(items, func(i, j int) bool {
+		left, right := items[i], items[j]
+		compare := func(leftValue, rightValue string) int {
+			if leftValue < rightValue {
+				return -1
+			}
+			if leftValue > rightValue {
+				return 1
+			}
+			return 0
+		}
+		var result int
+		switch folderSortBy {
+		case "size":
+			result = compare("", "")
+		case "type":
+			result = compare("folder", "folder")
+		case "updatedAt":
+			result = compare(left.CreatedAt, right.CreatedAt)
+		default:
+			result = compare(left.Name, right.Name)
+		}
+		if result == 0 {
+			result = compare(left.Name, right.Name)
+		}
+		if result == 0 {
+			result = compare(left.Path, right.Path)
+		}
+		if result == 0 {
+			if left.ID < right.ID {
+				result = -1
+			} else if left.ID > right.ID {
+				result = 1
+			}
+		}
+		if folderSortDesc {
+			return result > 0
+		}
+		return result < 0
+	})
 	s.serviceEvent(r, "folder_list", user.Username, "result=success count=%d", len(items))
 	writeData(w, http.StatusOK, "获取成功", map[string]any{"items": items})
 }

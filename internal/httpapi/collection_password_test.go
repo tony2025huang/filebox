@@ -271,6 +271,41 @@ func TestCollectionExpiredAndRevokedStayOutsidePasswordThrottling(t *testing.T) 
 	}
 }
 
+func TestCollectionMetaHidesExpiredAndRevokedCollections(t *testing.T) {
+	db, handler := newTestServer(t)
+	ownerToken := testAdminToken(t, handler)
+
+	expired := testJSONRequest(t, handler, http.MethodPost, "/api/collections", ownerToken, `{"name":"expired-meta-name","expiresInHours":24}`)
+	if expired.Code != http.StatusCreated {
+		t.Fatalf("create expired collection = %d: %s", expired.Code, expired.Body.String())
+	}
+	expiredData := responseData(t, expired)
+	expiredID := int64(expiredData["id"].(float64))
+	expiredToken := expiredData["token"].(string)
+	if _, err := db.DB.Exec("UPDATE upload_collections SET expires_at = ? WHERE id = ?", time.Now().UTC().Add(-time.Minute).Format(time.RFC3339), expiredID); err != nil {
+		t.Fatal(err)
+	}
+	expiredMeta := testJSONRequest(t, handler, http.MethodGet, "/api/collections/"+expiredToken+"/meta", "", "")
+	if expiredMeta.Code != http.StatusNotFound || strings.Contains(expiredMeta.Body.String(), "expired-meta-name") {
+		t.Fatalf("expired collection meta = %d: %s", expiredMeta.Code, expiredMeta.Body.String())
+	}
+
+	revoked := testJSONRequest(t, handler, http.MethodPost, "/api/collections", ownerToken, `{"name":"revoked-meta-name","expiresInHours":24}`)
+	if revoked.Code != http.StatusCreated {
+		t.Fatalf("create revoked collection = %d: %s", revoked.Code, revoked.Body.String())
+	}
+	revokedData := responseData(t, revoked)
+	revokedID := int64(revokedData["id"].(float64))
+	revokedToken := revokedData["token"].(string)
+	if response := testJSONRequest(t, handler, http.MethodDelete, "/api/collections/"+strconv.FormatInt(revokedID, 10), ownerToken, ""); response.Code != http.StatusOK {
+		t.Fatalf("revoke collection = %d: %s", response.Code, response.Body.String())
+	}
+	revokedMeta := testJSONRequest(t, handler, http.MethodGet, "/api/collections/"+revokedToken+"/meta", "", "")
+	if revokedMeta.Code != http.StatusNotFound || strings.Contains(revokedMeta.Body.String(), "revoked-meta-name") {
+		t.Fatalf("revoked collection meta = %d: %s", revokedMeta.Code, revokedMeta.Body.String())
+	}
+}
+
 func testRequestWithCollectionPassword(t *testing.T, handler http.Handler, method, path, password string, body []byte) *httptest.ResponseRecorder {
 	t.Helper()
 	request := httptest.NewRequest(method, path, bytes.NewReader(body))

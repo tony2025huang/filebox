@@ -1,6 +1,15 @@
 # FileBox Requirement State
 
-Updated: 2026-09-05 (v025 mobile navigation/layout; v025 triggered sync)
+Updated: 2026-09-08 (v026 sort/security/privacy/transfer follow-up)
+
+| Requirement | State | Notes |
+|---|---|---|
+| v026 sort APIs/UI | done | Sort support is exposed consistently by the APIs and rendered in the UI. |
+| v026 clear-all reauth and password-vs-TOTP | done | Clear-all requires reauthentication; password and TOTP paths are distinct and covered by tests. |
+| v026 anonymous collection metadata concealment | done | Expired or revoked collections do not disclose anonymous collection metadata. |
+| v026 transfer completion and queue reliability | in-progress | Transfer completion is unified with timestamps; folder queue batching and request race protection are in progress. |
+| v026 native directory picker | done | `showDirectoryPicker` is preferred, with `webkitdirectory` as fallback; browser prompts cannot be suppressed in the fallback. |
+| v026 deployment | pending | Deployment remains pending. |
 
 | Requirement | State | Notes |
 |---|---|---|

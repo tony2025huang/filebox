@@ -138,6 +138,55 @@ type File struct {
 	DeletedAt   string `json:"deletedAt,omitempty"`
 }
 
+// FileSort defines the allowed file-list sort field and direction.
+type FileSort struct {
+	By   string
+	Desc bool
+}
+
+func normalizeFileSort(value FileSort) (FileSort, bool) {
+	if value.By == "" {
+		value.By = "name"
+	}
+	switch value.By {
+	case "name", "size", "type", "updatedAt":
+		return value, true
+	default:
+		return FileSort{}, false
+	}
+}
+
+func fileSortOrderBy(value FileSort) (string, bool) {
+	value, ok := normalizeFileSort(value)
+	if !ok {
+		return "", false
+	}
+	switch value.By {
+	case "name":
+		if value.Desc {
+			return "name DESC, id DESC", true
+		}
+		return "name ASC, id ASC", true
+	case "size":
+		if value.Desc {
+			return "size DESC, id DESC", true
+		}
+		return "size ASC, id ASC", true
+	case "type":
+		if value.Desc {
+			return "mime DESC, id DESC", true
+		}
+		return "mime ASC, id ASC", true
+	case "updatedAt":
+		if value.Desc {
+			return "created_at DESC, id DESC", true
+		}
+		return "created_at ASC, id ASC", true
+	default:
+		return "", false
+	}
+}
+
 // UploadTask 表示单文件单分片上传流程中的暂存任务。
 // UploadTask represents a temporary task in the single-file, single-chunk upload flow.
 type UploadTask struct {
@@ -1469,6 +1518,61 @@ func (s *Store) DeleteUser(ctx context.Context, id int64) ([]string, error) {
 	if count == 0 {
 		tx.Rollback()
 		return nil, ErrNotFound
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return paths, nil
+}
+
+// ClearUserFiles transactionally soft-deletes a user's ready files, removes their folders, and resets used quota.
+func (s *Store) ClearUserFiles(ctx context.Context, userID int64) ([]string, error) {
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	rollback := func(err error) ([]string, error) {
+		_ = tx.Rollback()
+		return nil, err
+	}
+
+	rows, err := tx.QueryContext(ctx, "SELECT storage_path FROM files WHERE user_id = ? AND status = 'ready'", userID)
+	if err != nil {
+		return rollback(err)
+	}
+	paths := make([]string, 0)
+	for rows.Next() {
+		var path string
+		if err := rows.Scan(&path); err != nil {
+			rows.Close()
+			return rollback(err)
+		}
+		paths = append(paths, path)
+	}
+	if err := rows.Close(); err != nil {
+		return rollback(err)
+	}
+	if err := rows.Err(); err != nil {
+		return rollback(err)
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	if _, err := tx.ExecContext(ctx, "UPDATE files SET status = 'deleted', deleted_at = ? WHERE user_id = ? AND status = 'ready'", now, userID); err != nil {
+		return rollback(err)
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM folders WHERE user_id = ?", userID); err != nil {
+		return rollback(err)
+	}
+	result, err := tx.ExecContext(ctx, "UPDATE users SET used_bytes = 0, updated_at = ? WHERE id = ?", now, userID)
+	if err != nil {
+		return rollback(err)
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return rollback(err)
+	}
+	if count == 0 {
+		return rollback(ErrNotFound)
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
@@ -3301,6 +3405,14 @@ func scanFile(row *sql.Row) (File, error) {
 }
 
 func (s *Store) ListFiles(ctx context.Context, userID int64, admin bool, keyword, dir string, page, pageSize int) ([]File, int, error) {
+	return s.ListFilesSorted(ctx, userID, admin, keyword, dir, FileSort{By: "updatedAt", Desc: true}, page, pageSize)
+}
+
+func (s *Store) ListFilesSorted(ctx context.Context, userID int64, admin bool, keyword, dir string, fileSort FileSort, page, pageSize int) ([]File, int, error) {
+	orderBy, ok := fileSortOrderBy(fileSort)
+	if !ok {
+		return nil, 0, errors.New("invalid file sort")
+	}
 	// ListFiles 只返回 ready 文件；普通用户按所有权隔离，管理员可查看全部文件；dir 限定 storage_path 前缀（v011 目录过滤）。
 	// ListFiles returns ready files only; regular users are isolated by ownership while admins can view all files; dir filters by storage-path prefix.
 	pageSize, offset := listPageOffset(page, pageSize)
@@ -3343,7 +3455,7 @@ func (s *Store) ListFiles(ctx context.Context, userID int64, admin bool, keyword
 		return nil, 0, err
 	}
 	args = append(args, pageSize, offset)
-	rows, err := s.DB.QueryContext(ctx, "SELECT id, user_id, name, stored_name, size, mime, sha256, md5, status, storage_path, created_at, COALESCE(deleted_at, '') FROM files WHERE "+where+" ORDER BY created_at DESC LIMIT ? OFFSET ?", args...)
+	rows, err := s.DB.QueryContext(ctx, "SELECT id, user_id, name, stored_name, size, mime, sha256, md5, status, storage_path, created_at, COALESCE(deleted_at, '') FROM files WHERE "+where+" ORDER BY "+orderBy+" LIMIT ? OFFSET ?", args...)
 	if err != nil {
 		return nil, 0, err
 	}

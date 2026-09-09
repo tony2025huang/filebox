@@ -115,3 +115,62 @@ func TestNormalizeFolderPath(t *testing.T) {
 		}
 	}
 }
+
+func TestListFoldersSorting(t *testing.T) {
+	db, handler := newTestServer(t)
+	token := testAdminToken(t, handler)
+
+	fixtures := []struct {
+		name      string
+		path      string
+		createdAt string
+	}{
+		{name: "first", path: "files/1/zulu", createdAt: "2024-01-02T00:00:00Z"},
+		{name: "last", path: "files/1/alpha", createdAt: "2024-01-01T00:00:00Z"},
+		{name: "middle", path: "files/1/mike", createdAt: "2024-01-03T00:00:00Z"},
+	}
+	for _, fixture := range fixtures {
+		if _, err := db.DB.ExecContext(context.Background(), "INSERT INTO folders(user_id, parent_id, name, path, created_at) VALUES(?, NULL, ?, ?, ?)", 1, fixture.name, fixture.path, fixture.createdAt); err != nil {
+			t.Fatalf("seed folder %q: %v", fixture.path, err)
+		}
+	}
+
+	listNames := func(path string) []string {
+		t.Helper()
+		list := testJSONRequest(t, handler, http.MethodGet, path, token, "")
+		if list.Code != http.StatusOK {
+			t.Fatalf("list folders %q = %d: %s", path, list.Code, list.Body.String())
+		}
+		items, ok := responseData(t, list)["items"].([]any)
+		if !ok {
+			t.Fatalf("list folders %q items type = %T", path, responseData(t, list)["items"])
+		}
+		names := make([]string, 0, len(items))
+		for _, item := range items {
+			entry, ok := item.(map[string]any)
+			if !ok {
+				t.Fatalf("list folders %q item type = %T", path, item)
+			}
+			name, ok := entry["name"].(string)
+			if !ok {
+				t.Fatalf("list folders %q item name = %#v", path, entry["name"])
+			}
+			names = append(names, name)
+		}
+		return names
+	}
+
+	if got := strings.Join(listNames("/api/folders"), ","); got != "alpha,mike,zulu" {
+		t.Fatalf("default normalized name order = %q, want %q", got, "alpha,mike,zulu")
+	}
+	if got := strings.Join(listNames("/api/folders?sortBy=updatedAt&sortOrder=desc"), ","); got != "mike,zulu,alpha" {
+		t.Fatalf("updatedAt desc order = %q, want %q", got, "mike,zulu,alpha")
+	}
+
+	for _, query := range []string{"sortBy=invalid", "sortOrder=invalid"} {
+		list := testJSONRequest(t, handler, http.MethodGet, "/api/folders?"+query, token, "")
+		if list.Code != http.StatusBadRequest {
+			t.Errorf("invalid %s status = %d, want 400", query, list.Code)
+		}
+	}
+}
