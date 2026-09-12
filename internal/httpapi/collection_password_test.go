@@ -154,6 +154,9 @@ func TestCollectionPasswordCanOnlyBeChangedByOwnerAndCanBeCleared(t *testing.T) 
 }
 
 func TestCollectionWrongPasswordAttemptsThrottleTo429AndCorrectPasswordStillAllowed(t *testing.T) {
+	if raceDetectorEnabled {
+		t.Skip("-race slows bcrypt ~10-20x so the per-token failed-attempt bucket refills mid-test; bucket semantics are pinned deterministically by TestClearAllReauthLimiterBoundsAttemptsDeterministically")
+	}
 	db, handler := newTestServer(t)
 	ownerToken := testAdminToken(t, handler)
 	created := testJSONRequest(t, handler, http.MethodPost, "/api/collections", ownerToken, `{"name":"throttled","expiresInHours":24,"password":"collection-secret"}`)

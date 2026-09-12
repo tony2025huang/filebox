@@ -26,6 +26,7 @@ FileBox 是一个可自托管的文件传输与管理系统，使用单个 Go �
 - 创建用户直接设置安全项（v012）：新建用户弹窗可直接配置 TOTP（生成一次性 secret 供转交）、下次重绑 TOTP、IP 白名单，无需创建后再编辑；品牌设置「界面主色」不再独占一行，布局更紧凑。
 - 公网代理 XFF 信任开关（v012）：`trustProxy` 设置（默认关闭）——仅当管理员开启**且**请求直连 IP 落在 `--trusted-proxies` 白名单内时才解析 `X-Forwarded-For`，避免伪造来源 IP。
 - 外部上传收集链接（v012）：任何登录用户可创建「上传收集链接」（`/u/:token`），外部访客无需登录即可多文件上传（复用分片/秒传链路）；限制含有效期、总上传次数、单文件大小上限，文件落入创建者 `uploads/<token>/` 目录并计入其配额；支持撤销、上传者备注、匿名 IP 限速与审计。
+- 收集链接密码（v024，**创建接口默认语义**）：`POST /api/collections` 未携带 `passwordMode` 时按历史语义创建**无密码**收集链接（也可显式 `passwordMode=none`）；设置随机密码需显式 `passwordMode=random`（服务端 crypto/rand 生成，明文仅一次性返回，另附 `#password=` fragment 便捷链接）；手工指定则用 `passwordMode=manual` + `password`（缺 `password` 返回 400）；编辑用 `passwordMode=keep|random|manual|none`。密码经 bcrypt 存储，错误尝试按「单收集 + 单来源 IP」两级限速，超限返回 `429 COLLECTION_RATE_LIMITED`。
 - 用户只读时段（v012）：管理员可为单个用户设置一次性只读窗口，窗口内该用户仅可查看/下载，全部写操作（上传/删除/重命名/建目录/分享）返回 `403 READ_ONLY`，管理员不受限；前端禁用写操作入口并提示。
 - 分享管理（v012）：`/shares` 页面集中管理我的分享——查看列表/详情（剩余时间、已下载/上限）、延期、增加下载次数（不允许降低）、单条撤销（软撤销，匿名访问返回 403 已撤销）、复制链接；每条分享的下载日志（时间/IP/结果/失败原因）创建者可见。
 - 分享失败原因细分（v012）：`share_not_found` / `share_expired` / `share_revoked` / `share_limit` / `share_denied` 明确区分权限不足、次数用尽、过期与撤销。

@@ -1424,29 +1424,85 @@ func (s *Server) decryptTOTPSecretForUser(ctx context.Context, user store.User) 
 	return secret, nil
 }
 
-func (s *Server) clearFilesReauth(ctx context.Context, user store.User, password, code string) error {
-	const genericError = "reauthentication failed"
+// clearReauthDecision 表示 clear-all 二次认证的判定：通过、凭据错误、或触发失败限速。
+// clearReauthDecision classifies a clear-all re-authentication: allowed, wrong credentials, or throttled.
+type clearReauthDecision int
+
+const (
+	clearReauthAllow clearReauthDecision = iota
+	clearReauthUnauthorized
+	clearReauthRateLimited
+)
+
+// clearReauth 的两级限速：尝试桶约束全部尝试（含正确）以限制 bcrypt/TOTP 计算的 CPU 占用，
+// 失败桶在凭据错误时额外消耗，桶空即返回 429。
+// Two clear-all re-auth buckets: the attempt bucket bounds every attempt (including correct
+// ones) so bcrypt/TOTP work cannot be amplified, while wrong credentials additionally consume
+// the stricter failure bucket and are throttled with 429 once it is empty.
+const (
+	clearReauthAttemptPerMinute = 10
+	clearReauthAttemptBurst     = 10
+	clearReauthFailurePerMinute = 5
+	clearReauthFailureBurst     = 5
+)
+
+// clearFilesReauth 校验 clear-all 的二次认证：启用 TOTP 时校验动态码（并消费计数器防重放），
+// 否则校验密码。失败尝试消耗独立限速桶；正确尝试只消耗宽松的尝试桶，保证正常清空不被误伤。
+// clearFilesReauth verifies the clear-all re-authentication: a consumed TOTP code when enabled
+// (replay-protected), otherwise the password. Failures consume a dedicated bucket while a
+// successful attempt only consumes the looser attempt bucket, so legitimate clears keep working
+// even while an attacker is being throttled.
+func (s *Server) clearFilesReauth(ctx context.Context, r *http.Request, user store.User, password, code string) (clearReauthDecision, error) {
+	key := strconv.FormatInt(user.ID, 10) + "\x00" + s.requestIP(r)
+	if !s.rateLimiter.allowPublicRequest(key+"\x00clear-all-attempt", clearReauthAttemptPerMinute, clearReauthAttemptBurst) {
+		return clearReauthRateLimited, nil
+	}
 	if user.TOTPEnabled {
 		if len(code) != 6 {
-			return errors.New(genericError)
+			return s.clearReauthFailed(key), nil
 		}
 		secret, err := s.decryptTOTPSecretForUser(ctx, user)
 		if err != nil {
-			return errors.New(genericError)
+			return s.clearReauthFailed(key), nil
 		}
 		now := time.Now().UTC()
 		baseCounter := now.Unix() / 30
+		matchedCounter := int64(-1)
 		for offset := int64(-1); offset <= 1; offset++ {
-			if hmac.Equal([]byte(totpCode(secret, baseCounter+offset)), []byte(code)) {
-				return nil
+			candidate := baseCounter + offset
+			if hmac.Equal([]byte(totpCode(secret, candidate)), []byte(code)) {
+				matchedCounter = candidate
+				break
 			}
 		}
-		return errors.New(genericError)
+		if matchedCounter < 0 {
+			return s.clearReauthFailed(key), nil
+		}
+		// 消费动态码计数器：同一码不得重复授权破坏性清空（与登录路径一致）。
+		// Consume the TOTP counter so one code cannot authorize repeated destructive clears.
+		consumed, err := s.store.ConsumeTOTP(ctx, user.ID, matchedCounter, now)
+		if err != nil {
+			return clearReauthUnauthorized, err
+		}
+		if !consumed {
+			return s.clearReauthFailed(key), nil
+		}
+		return clearReauthAllow, nil
 	}
 	if bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password)) != nil {
-		return errors.New(genericError)
+		return s.clearReauthFailed(key), nil
 	}
-	return nil
+	return clearReauthAllow, nil
+}
+
+// clearReauthFailed 记录一次失败的二次认证尝试：消耗失败桶，桶空即判定为限速。
+// clearReauthFailed records one failed re-auth attempt: it consumes the failure bucket and
+// reports a rate-limited decision once that bucket is empty.
+func (s *Server) clearReauthFailed(key string) clearReauthDecision {
+	if !s.rateLimiter.allowPublicRequest(key+"\x00clear-all-failed", clearReauthFailurePerMinute, clearReauthFailureBurst) {
+		return clearReauthRateLimited
+	}
+	return clearReauthUnauthorized
 }
 
 func (s *Server) clearAllFiles(w http.ResponseWriter, r *http.Request) {
@@ -1468,7 +1524,28 @@ func (s *Server) clearAllFiles(w http.ResponseWriter, r *http.Request) {
 		s.serviceEvent(r, "clear_all", user.Username, "target=all result=%s reason=%s", auditResult, auditReason)
 	}()
 
-	if err := s.clearFilesReauth(r.Context(), user, input.Password, input.Code); err != nil {
+	decision, err := s.clearFilesReauth(r.Context(), r, user, input.Password, input.Code)
+	if err != nil {
+		log.Printf("clear all reauth: %v", err)
+		auditReason = "reauth_failed"
+		writeError(w, http.StatusInternalServerError, "清空文件失败")
+		return
+	}
+	if decision != clearReauthAllow {
+		// 失败（含限速）计入来源 IP 失败窗口（R-IPBAN）。刻意不接入账号级锁定：
+		// 持有被盗 JWT 的攻击者不应能把受害者账号锁死。
+		// Failures (including throttled ones) feed the source-IP failure window (R-IPBAN).
+		// Account-level lockout is intentionally not applied so a stolen JWT cannot lock the victim out.
+		if settings, settingsErr := s.store.GetLogSettings(r.Context()); settingsErr != nil {
+			log.Printf("clear all reauth settings: %v", settingsErr)
+		} else {
+			s.recordIPFailure(r, settings)
+		}
+		if decision == clearReauthRateLimited {
+			auditReason = "reauth_rate_limited"
+			writeErrorData(w, http.StatusTooManyRequests, "验证尝试过于频繁，请稍后重试", map[string]string{"code": "REAUTH_RATE_LIMITED"})
+			return
+		}
 		auditReason = "reauth_failed"
 		writeError(w, http.StatusUnauthorized, "验证失败")
 		return

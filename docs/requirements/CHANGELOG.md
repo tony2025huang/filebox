@@ -1,5 +1,16 @@
 # Requirement Change Log
 
+## 2026-09-12 - v027 clear-all reauth hardening, trigger race, docs
+
+- `POST /api/files/clear-all` 二次认证加固：新增"尝试桶（10/分钟，含正确尝试）+ 失败桶（5/分钟，仅失败）"两级限速（key = userID + 来源 IP），失败含限速统一返回 `429 REAUTH_RATE_LIMITED`，失败计入来源 IP 失败窗口（R-IPBAN）；**刻意不接入账号级锁定**（避免持被盗 JWT 者锁死受害者账号）；`bcrypt`/TOTP 计算受尝试桶约束，无法被无限放大（修复前 12 次错误密码全 401、锁表为空）。
+- `clear-all` 的 TOTP 校验改用 `store.ConsumeTOTP` 消费计数器，同一动态码不可重复授权破坏性清空（修复前同码两次均 200，与登录路径不一致）。
+- 修复 `sync_trigger.go` 未同步读取 `s.triggerCtx` 的数据竞争：新增持锁的 `triggerContextErr()` 供未持锁执行路径调用；`triggerCtx` 全部访问均在锁内或经该 helper。
+- **竞态检测已执行并通过**：以便携 w64devkit GCC + `CGO_ENABLED=1` 运行 `go test -race`，`./internal/httpapi/`（411.7s）、`./internal/store/`、`./internal/srvlog/`、`./cmd/filebox/` 全部 `ok`，**无 DATA RACE**。同时消除两个测试的时序脆弱性：`-race` 下 bcrypt 慢 10–20 倍会使限速桶在测试中途补充令牌，故 clear-all 尝试桶与收集密码失败桶两个 HTTP 级断言在 `-race` 下跳过（新增 `raceDetectorEnabled` 构建标记），其桶语义改由确定性单测 `TestClearAllReauthLimiterBoundsAttemptsDeterministically`（1 令牌/分钟，测试期间不可能补充）在所有模式下固定。
+- 文档修正：`DEV_DOC.md` 三处来源 IP 描述与实现相反（称"XFF 首项"，实为"默认 RemoteAddr；开启 trustProxy 且在 --trusted-proxies 内时从右向左取首个不可信 IP"）——已改正并加"v0.1 草案，功能以 requirements/STATE.md 为准"声明；`README.md` 补写收集创建默认密码语义（缺省 `passwordMode` = 无密码，随机密码需显式 `passwordMode=random`）。
+- 新增规格 `docs/requirements/specs/v027-clear-all-reauth.md` 与回归测试 `internal/httpapi/clear_all_reauth_test.go`（3 用例：失败限速/不锁账号、尝试桶 CPU 边界、TOTP 防重放）。
+- 卫生：删除仓库根调试残留 `tmp-read-users.go`、`.tmp-read-users.go`（未被 git 跟踪，只读探测工具）。
+- 未包含（需人工，仓库外）：工作区 `run-codex.ps1` 硬编码 OpenAI API key 的**吊销/轮换**；脚本已改为优先读环境变量并支持本地密钥文件。
+
 ## 2026-09-08 - v026 sort, security, privacy, and transfer follow-up
 
 - Sort APIs and UI are complete.

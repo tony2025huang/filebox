@@ -223,7 +223,7 @@ func (s *Server) runTriggeredTask(taskID int64) {
 		if lock.TryLock() {
 			break
 		}
-		if s.triggerCtx != nil && s.triggerCtx.Err() != nil {
+		if s.triggerContextErr() {
 			s.finishTrigger(taskID)
 			return
 		}
@@ -252,6 +252,15 @@ func (s *Server) runTriggeredTask(taskID int64) {
 	runCtx, cancel := context.WithTimeout(context.Background(), syncTaskTimeout)
 	defer cancel()
 	s.executeSyncTask(runCtx, task)
+}
+
+// triggerContextErr 在持锁状态下报告协调器上下文是否已取消或缺失，供未持锁的执行路径调用。
+// triggerContextErr reports whether the coordinator context is cancelled or missing while
+// holding the mutex, so callers that do not hold it can check without a data race.
+func (s *Server) triggerContextErr() bool {
+	s.triggerMu.Lock()
+	defer s.triggerMu.Unlock()
+	return s.triggerCtx == nil || s.triggerCtx.Err() != nil
 }
 
 // triggerDoneChannel 返回协调器 ctx 取消时关闭的 channel；nil ctx 时永不关闭。

@@ -1,5 +1,7 @@
 # FileBox 文件传输系统 — 开发文档 v0.1（待确认）
 
+> **文档状态（v027 起）**：本文件是 v0.1 架构草案，用于记录设计意图与早期决策；**功能清单、默认值、接口语义与验收标准以 `docs/requirements/STATE.md` 与 `docs/requirements/CHANGELOG.md` 为准**。后续新增功能（上传收集密码模式、批量分享聚合、SFTP/FileBox 同步、文件清空认证、文件排序、主机指纹 TOFU、独立静态加密密钥等）未回写到本文档。
+
 ## 1. 项目概述
 
 一个公网部署的 Web 文件传输系统：多用户登录、文件上传/下载/管理、断点续传、秒传、文件夹上传、分享链接、在线预览、配额与限速，带独立的登录界面和独立的管理员账号权限管理界面。
@@ -139,7 +141,7 @@ settings   key, value                     -- 注册开关/默认配额/上传上
 - `GET /api/logs/actions` → 可选操作类型枚举
 - 日志字段：时间、用户（username）、操作（登录/上传/下载/分享创建/分享查看/分享下载）、目标（文件名等）、来源 IP、结果、失败原因（仅成功登录后可见）
 - **留存周期**：`GET /api/admin/settings` / `PUT /api/admin/settings` → `{logRetentionDays(默认30), lockThreshold(默认5), autoUnlockEnabled(默认true), autoUnlockMinutes(默认5), defaultLang('zh-CN'|'zh-TW'|'en', 默认'zh-CN'), themeColor('#RRGGBB', 默认'#1b998b', 空/重置=默认), passwordMinLength(默认8), passwordComplexity(默认3, 0=不要求), ipLockWindowMinutes(默认10), ipLockThreshold(默认50, 0=关闭), ipAutoUnlockEnabled(默认true), ipUnlockMinutes(默认30)}`；日志写入时惰性清理过期记录（超过周期自动删除）
-- 来源 IP：优先取 `X-Forwarded-For` 首项（公网反代场景），否则 `RemoteAddr`；日志脱敏（不记录密码/token/文件内容）
+- 来源 IP：**默认直连模式忽略 `X-Forwarded-For`，一律取 `RemoteAddr`；仅当管理员开启 `trustProxy` 设置且直连对端命中 `--trusted-proxies` 白名单（IP/CIDR）时，才解析 `X-Forwarded-For`，并从右向左取首个不在可信代理名单内的 IP**（防止伪造 XFF 绕过 IP 锁定/白名单，见 R-PROXY）；日志脱敏（不记录密码/token/文件内容）
 
 ### 5.6 分享页（前端路由）
 - `/:token` 匿名分享页（展示文件名/大小/预览，提供下载按钮）——无需登录；查看与下载行为记入分享日志（R-LOG）
@@ -163,7 +165,7 @@ settings   key, value                     -- 注册开关/默认配额/上传上
 - **强制改密（R-INIT）**：`must_change_password=true` 的用户，除 `/api/auth/me`、`/api/auth/change-password`、`/api/auth/logout` 外全部接口返回 403（错误码 `PASSWORD_CHANGE_REQUIRED`）；改密成功后清除标记并重签 JWT。首次部署：`--admin-user`（默认 admin）与 `--admin-pass`（默认 admin123）指定初始管理员，创建时 must_change_password=true。
 - **密码强度（R-PWD）**：校验函数按 settings：长度 ≥ passwordMinLength；字符类别（大写/小写/数字/特殊）计数 ≥ passwordComplexity（默认 3；0=不校验类别）。应用于创建用户、管理员重置密码、用户改密（管理员账号同样建议但不强制，admin 重置自己的密码也校验）。前端表单显示当前策略提示（长度与类别要求）。
 - **TOTP（R-TOTP）**：secret 生成后经密钥（--jwt-secret 派生）加密存库；`otpauth://totp/FileBox:<user>?secret=...&issuer=FileBox` 生成二维码 PNG（后端返回 data URI 或 base64，前端 `<img>` 展示）+ secret base32 字符串（明文仅绑定页返回一次）；绑定验证通过后 `totp_enabled=true`。登录流程两步（见 5.1）。校验 RFC 6238：HMAC-SHA1、30 秒步长、允许 ±1 窗口、防重放（同一码 60 秒内不可复用）。
-- **IP 白名单（R-IPACL）**：`ip_acl_enabled=true` 时，requireAuth 中间件校验请求来源 IP（X-Forwarded-For 首项或 RemoteAddr）匹配 `ip_whitelist`（单 IP 或 CIDR）；不匹配 → 403「当前 IP 不在白名单」。**不开启则不校验**。来源 IP 解析与审计日志一致。
+- **IP 白名单（R-IPACL）**：`ip_acl_enabled=true` 时，requireAuth 中间件校验请求来源 IP（**沿用与审计日志一致的可信解析：默认 `RemoteAddr`；仅当开启 `trustProxy` 且直连对端在 `--trusted-proxies` 内时才取 `X-Forwarded-For` 中从右向左首个不可信 IP**）匹配 `ip_whitelist`（单 IP 或 CIDR）；不匹配 → 403「当前 IP 不在白名单」。**不开启则不校验**。
 - **IP 锁定（R-IPBAN）**：登录失败（含用户不存在）均累计 `ip_failures`；窗口滑动（window_started_at 距今 > windowMinutes 则重置计数）；计数 ≥ ipLockThreshold → locked_until（自动解禁开=now+ipUnlockMinutes，关=9999）；登录前检查 IP 锁定 → 401 统一文案 + 日志 reason `ip_locked`。登录成功时清除该 IP 的失败计数。
 - **锁定管理（R-LOCKADMIN）**：管理后台「锁定管理」面板：IP 锁定表（IP/失败次数/窗口起点/锁定截止/状态）与用户锁定表，各带「解除」按钮；解除 IP 锁定=清 ip_failures 记录，解除用户锁定=清 failed_attempts/locked_until。
 
@@ -250,7 +252,7 @@ make build-linux  # GOOS=linux 交叉编译，输出 bin/filebox-linux
   - 管理事件：operator = 执行操作的管理员，并用 `target` 字段标注作用对象（如 `operator=admin target=user2 action=disable`）；
   - 系统/定时/启动退出：operator=`system`；R-OPS 命令行操作：operator=`cli`（并记录子命令）。
   - 日志格式：`时间 级别 [事件] operator=<用户名|system|cli> [target=<对象>] 详情`；审计日志（DB）的 `username` 列即操作者，与服务日志 operator 语义一致。
-- **来源 IP 字段（Web 请求事件必带）**：所有由 HTTP 请求触发的事件（登录、查看、上传、下载、删除、管理操作等）统一携带 `ip=<来源IP>`（与审计日志一致：`X-Forwarded-For` 首项，否则 `RemoteAddr`）；系统/CLI 事件无来源 IP 时记 `ip=-`。
+- **来源 IP 字段（Web 请求事件必带）**：所有由 HTTP 请求触发的事件（登录、查看、上传、下载、删除、管理操作等）统一携带 `ip=<来源IP>`（与审计日志一致：默认 `RemoteAddr`；仅当开启 `trustProxy` 且直连对端在 `--trusted-proxies` 内时才取 `X-Forwarded-For`，并从右向左取首个不可信 IP）；系统/CLI 事件无来源 IP 时记 `ip=-`。
 - 日志格式：`时间 级别 [事件] operator=... ip=... [target=...] 详情`（如 `2026-08-29T10:00:00+08:00 INFO [login] operator=admin ip=127.0.0.1 result=success`）；含敏感信息（密码/token/文件内容）一律不记录。
 
 ## 9.9 反向代理部署（R-PROXY）

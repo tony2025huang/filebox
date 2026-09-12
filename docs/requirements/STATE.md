@@ -1,6 +1,16 @@
 # FileBox Requirement State
 
-Updated: 2026-09-08 (v026 sort/security/privacy/transfer follow-up)
+Updated: 2026-09-12 (v027 clear-all reauth hardening / trigger race / docs)
+
+| Requirement | State | Notes |
+|---|---|---|
+| v027 clear-all reauth throttling | done | Two buckets keyed by userID + source IP: attempt bucket (10/min, every attempt incl. correct) bounds bcrypt/TOTP work, failure bucket (5/min, wrong credentials only) returns `429 REAUTH_RATE_LIMITED`; failures feed `ip_failures` (R-IPBAN) but deliberately never lock the account (a stolen JWT must not lock the victim out). Verified by 3 new Go tests plus the 5 pre-existing clear-all tests. |
+| v027 clear-all TOTP replay protection | done | The TOTP branch now calls `store.ConsumeTOTP`, so one code cannot authorize repeated destructive clears (same code replayed → 401); ±1 window and constant-time compare unchanged. |
+| v027 sync trigger data race | done | `runTriggeredTask` reads the coordinator context through the new mutex-guarded `triggerContextErr()`; every `triggerCtx` access is now inside `triggerMu` or via that helper. **Verified with the race detector**: `go test -race ./internal/httpapi/` → ok, no data race (portable w64devkit GCC + `CGO_ENABLED=1`), likewise `./internal/store/`, `./internal/srvlog/`, `./cmd/filebox/`. Two timing-sensitive rate-limit assertions (clear-all attempt bucket, collection password bucket) are skipped under `-race` because the instrumented build slows bcrypt ~10-20x and the token buckets refill mid-test; their semantics are pinned by the deterministic `TestClearAllReauthLimiterBoundsAttemptsDeterministically` (1 token/minute, no refill possible) which runs in every mode. |
+| v027 DEV_DOC source-IP wording | done | Three statements claiming "X-Forwarded-For first entry" contradicted the implementation; corrected to the actual semantics (plain `RemoteAddr` unless `trustProxy` is on and the peer is a trusted proxy, then the rightmost untrusted XFF entry), plus a banner stating DEV_DOC is a v0.1 draft superseded by `requirements/STATE.md` + `CHANGELOG.md`. |
+| v027 collection create default password semantics | done | Documented in `README.md`: omitting `passwordMode` creates an unprotected collection (legacy semantics); a random password requires explicit `passwordMode=random`; `manual` requires `password` (else 400). |
+| v027 workspace hygiene | done | Removed the untracked debug probes `tmp-read-users.go` / `.tmp-read-users.go`. |
+| v027 workspace API key rotation | blocked-on-user | `dsh-project/run-codex.ps1` hard-coded an OpenAI API key; the script was hardened to prefer `$env:OPENAI_API_KEY` with an optional local key file, but **rotating the exposed key is a manual operator action** (the file lives outside the filebox repo). |
 
 | Requirement | State | Notes |
 |---|---|---|
