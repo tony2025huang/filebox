@@ -12,15 +12,12 @@ const BLOCK_SIZE = 8 * 1024 * 1024
 
 // createStreamingHasher 返回 { update, digest, engine }。hash-wasm 必须在构建期静态导入：Vite 的 worker
 // 产物是单文件，运行时动态 import 会强制代码分割而失败。WASM 初始化异常（例如 CSP 未放行
-// 'wasm-unsafe-eval'）时回退到零依赖的纯 JS 流式实现；forceEngine === 'js' 时直接跳过 WASM
-// （主线程在 WASM 路径超时后会用这个模式在 Worker 内重试，避免回退到主线程冻结界面）。
+// 'wasm-unsafe-eval'）时回退到零依赖的纯 JS 流式实现。
 // createStreamingHasher returns { update, digest, engine }. hash-wasm must be a static import because
 // Vite emits a worker as a single file and a runtime dynamic import would force code splitting. When
 // WASM cannot be initialised (for example a CSP without 'wasm-unsafe-eval') it falls back to the
-// dependency-free pure-JS implementation; forceEngine === 'js' skips WASM entirely, which the main
-// thread uses to retry inside a worker after a WASM-path timeout instead of freezing the main thread.
-async function createStreamingHasher(forceEngine) {
-  if (forceEngine === 'js') return createSha256()
+// dependency-free pure-JS implementation.
+async function createStreamingHasher() {
   try {
     const hasher = await createSHA256()
     return { engine: 'wasm', update: chunk => hasher.update(chunk), digest: () => hasher.digest() }
@@ -33,8 +30,8 @@ function toHex(buffer) {
   return [...new Uint8Array(buffer)].map(value => value.toString(16).padStart(2, '0')).join('')
 }
 
-async function streamingHex(file, post, forceEngine) {
-  const hasher = await createStreamingHasher(forceEngine)
+async function streamingHex(file, post) {
+  const hasher = await createStreamingHasher()
   for (let offset = 0; offset < file.size; offset += BLOCK_SIZE) {
     const end = Math.min(offset + BLOCK_SIZE, file.size)
     const block = new Uint8Array(await file.slice(offset, end).arrayBuffer())
@@ -45,7 +42,7 @@ async function streamingHex(file, post, forceEngine) {
 }
 
 self.onmessage = async event => {
-  const { id, file, directLimit, forceEngine } = event.data || {}
+  const { id, file, directLimit } = event.data || {}
   if (!id) return
   const limit = Number(directLimit) || DEFAULT_DIRECT_LIMIT
   const post = value => { try { self.postMessage({ id, type: 'progress', value }) } catch {} }
@@ -58,7 +55,7 @@ self.onmessage = async event => {
       self.postMessage({ id, type: 'done', hex: toHex(digest), engine: 'native' })
       return
     }
-    const { hex, engine } = await streamingHex(file, post, forceEngine)
+    const { hex, engine } = await streamingHex(file, post)
     self.postMessage({ id, type: 'done', hex, engine })
   } catch (err) {
     self.postMessage({ id, type: 'error', message: String((err && err.message) || err) })

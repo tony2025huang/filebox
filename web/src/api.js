@@ -35,100 +35,41 @@ codeKeys.HOST_KEY_CHANGED = 'sync.hostKeyChanged'
 
 import { createSha256 } from './sha256Fallback.js'
 
-// lastHashInfo 记录最近一次校验实际走的实现与实测吞吐，供上传界面与排查使用（v032 诊断）。
-// 没有它就无法回答「5GB 文件到底是 WASM 还是纯 JS 兜底」这类问题。
-// lastHashInfo records which implementation actually hashed the last file plus the measured
-// throughput, so upload diagnostics can answer questions like "WASM or the JS fallback?".
-let lastHashInfo = null
-
-// getLastHashInfo 返回最近一次 computeFileSHA256 的诊断信息（engine/bytes/elapsedMs/mbps）。
-// getLastHashInfo returns the diagnostics of the most recent computeFileSHA256 call.
-export function getLastHashInfo() { return lastHashInfo }
-
-const HASH_INFO_LOG_BYTES = 64 * 1024 * 1024
-
-function toHex(buffer) {
-  return [...new Uint8Array(buffer)].map(value => value.toString(16).padStart(2, '0')).join('')
-}
-
-function nowMs() {
-  return (globalThis.performance?.now ? globalThis.performance.now() : Date.now())
-}
-
-function reportHashInfo(engine, bytes, elapsedMs, onInfo) {
-  const mbps = Number((bytes / 1024 / 1024 / Math.max(elapsedMs, 1) * 1000).toFixed(1))
-  const info = { engine, bytes, elapsedMs: Math.round(elapsedMs), mbps }
-  lastHashInfo = info
-  try { onInfo(info) } catch {}
-  // 大文件才打印，避免小文件刷屏；这行日志就是下次定位性能问题的直接证据。
-  // Only log for large files to avoid spam; this line is the direct evidence for the next perf check.
-  if (bytes >= HASH_INFO_LOG_BYTES) {
-    console.info(`[filebox] checksum engine=${info.engine} bytes=${info.bytes} elapsed=${info.elapsedMs}ms rate=${info.mbps}MB/s`)
-  }
-  return info
-}
-
 // computeFileSHA256 computes the client checksum and reports progress for the upload row.
-// computeFileSHA256 计算客户端 SHA-256，并向上传项报告校验进度；第三个参数回传本次实际使用的实现与实测吞吐。
-export async function computeFileSHA256(file, onProgress = () => {}, onInfo = () => {}) {
+// computeFileSHA256 计算客户端 SHA-256，并向上传项报告校验进度。
+export async function computeFileSHA256(file, onProgress = () => {}) {
   // 校验一律优先在 Worker 内进行：≤ 阈值走原生 WebCrypto，超过阈值走 Worker 内的流式哈希
   // （WASM 优先、纯 JS 兜底），因此主线程任何时候都不会被哈希阻塞（v031-A/B）。
   // Hashing always runs in the worker first: native WebCrypto up to the threshold, streaming
   // (WASM first, pure JS fallback) beyond it, so the main thread never blocks (v031-A/B).
   const directLimit = Number(globalThis.FILEBOX_HASH_DIRECT_LIMIT) || 256 * 1024 * 1024
-  const started = nowMs()
-  let hex = ''
-  let engine = 'unknown'
+  const viaWorker = await computeSHA256InWorker(file, onProgress, directLimit)
+  if (viaWorker) return viaWorker
 
-  const first = await computeSHA256InWorker(file, onProgress, directLimit, false)
-  if (first) {
-    hex = first.hex
-    engine = first.engine
-  } else if (file.size <= directLimit) {
+  if (file.size <= directLimit) {
     onProgress(0)
-    hex = toHex(await crypto.subtle.digest('SHA-256', await file.arrayBuffer()))
-    engine = 'native-main'
+    const digest = await crypto.subtle.digest('SHA-256', await file.arrayBuffer())
     onProgress(100)
-  } else {
-    // 大文件超时/报错时，先在 Worker 内用纯 JS 重试一次：整文件回退到主线程会让界面冻结数分钟，
-    // 这正是要避免的降级方式；只有重试也失败才走主线程。
-    // On timeout or worker error for a large file, retry inside a worker with the pure-JS hasher first:
-    // falling back to the main thread would freeze the UI for minutes, which is the outcome to avoid.
-    const retry = await computeSHA256InWorker(file, onProgress, directLimit, true)
-    if (retry) {
-      hex = retry.hex
-      engine = retry.engine
-    } else {
-      const blockSize = 8 * 1024 * 1024
-      const hasher = createSha256()
-      for (let offset = 0; offset < file.size; offset += blockSize) {
-        const block = new Uint8Array(await file.slice(offset, Math.min(offset + blockSize, file.size)).arrayBuffer())
-        hasher.update(block)
-        onProgress(Math.round(Math.min(file.size, offset + block.length) / file.size * 100))
-      }
-      hex = hasher.digest()
-      engine = 'js-main'
-    }
+    return [...new Uint8Array(digest)].map(value => value.toString(16).padStart(2, '0')).join('')
   }
-  reportHashInfo(engine, file.size, nowMs() - started, onInfo)
-  // 降级必须显式可见：旧标签页引用已被替换的 Worker 分片时会静默变慢，只有告警能让用户知道要硬刷新。
-  // Degradation must be visible: a stale tab referencing a replaced worker chunk silently gets slower, so
-  // only an explicit warning tells the user to hard-refresh.
-  if (file.size >= HASH_INFO_LOG_BYTES) {
-    if (engine === 'js-main') {
-      console.warn('[filebox] checksum fell back to the MAIN thread (worker unavailable; if this repeats, hard-refresh the page)')
-    } else if (engine === 'js') {
-      console.warn('[filebox] checksum is using the pure-JS worker fallback (WebAssembly unavailable in this browser)')
-    }
+
+  // Worker 不可用时的最后兜底：主线程流式哈希，仅保留一个 8MB 分块在内存中。
+  // Last-resort fallback when no worker is available: main-thread streaming with one 8MB block.
+  const blockSize = 8 * 1024 * 1024
+  const hasher = createSha256()
+  for (let offset = 0; offset < file.size; offset += blockSize) {
+    const block = new Uint8Array(await file.slice(offset, Math.min(offset + blockSize, file.size)).arrayBuffer())
+    hasher.update(block)
+    onProgress(Math.round(Math.min(file.size, offset + block.length) / file.size * 100))
   }
-  return hex
+  return hasher.digest()
 }
 
-// computeSHA256InWorker 在 Web Worker 内计算文件摘要，返回 { hex, engine }；Worker 不可用、报错或超时
-// 时返回 null 由调用方决定降级方式。forceJs 为 true 时跳过 WASM（用于 WASM 失败后的重试）。
-// computeSHA256InWorker hashes the file inside a Web Worker and resolves { hex, engine }, or null when
-// the worker is unavailable, errors or times out. forceJs skips WASM (used for the retry).
-function computeSHA256InWorker(file, onProgress, directLimit, forceJs) {
+// computeSHA256InWorker 在 Web Worker 内计算文件摘要；Worker 不可用、报错或超时（大文件按 120 秒/256MiB
+// 估算上限）时返回 null，由调用方回退到主线程实现。文件对象按结构化克隆传入 Worker。
+// computeSHA256InWorker hashes the file inside a Web Worker and returns null when the worker is
+// unavailable, errors, or exceeds its deadline (120s plus 30s per 256MiB) so the caller can fall back.
+function computeSHA256InWorker(file, onProgress, directLimit) {
   return new Promise(resolve => {
     let worker
     try {
@@ -146,32 +87,27 @@ function computeSHA256InWorker(file, onProgress, directLimit, forceJs) {
       resolve(value)
     }
     // 看门狗：Worker 分片被替换后模块加载失败可能不触发 onerror，只依赖总超时会白等十几分钟；
-    // 90 秒内没有任何消息（进度或结果）即判定 Worker 不可用并立即降级。
-    // Watchdog: a replaced worker chunk may fail to load without firing onerror, so waiting for the total
-    // deadline wastes minutes; no message within 90s means the worker is unusable, degrade immediately.
-    let lastMessageAt = nowMs()
-    watchdog = setInterval(() => { if (nowMs() - lastMessageAt > 90000) finish(null) }, 5000)
+    // 90 秒内没有任何消息（进度或结果）即判定不可用并立即降级。只影响失败场景，不改变正常吞吐。
+    // Watchdog: a replaced worker chunk can fail to load without firing onerror. No message within 90s
+    // means the worker is unusable. Failure path only: normal throughput is unchanged.
+    let lastMessageAt = Date.now()
+    watchdog = setInterval(() => { if (Date.now() - lastMessageAt > 90000) finish(null) }, 5000)
     const streamingBlocks = Math.max(0, Math.ceil((file.size - directLimit) / (256 * 1024 * 1024)))
-    // 纯 JS 重试的预算按 ~8MB/s 的最差情况给两倍余量，避免大文件被误判超时。
-    // The forced-JS retry budget assumes an 8MB/s worst case with 2x headroom.
-    const timeoutMs = forceJs
-      ? Math.max(300000, Math.ceil(file.size / (8 * 1024 * 1024)) * 1000 * 2)
-      : 120000 + streamingBlocks * 30000
-    const timer = setTimeout(() => finish(null), timeoutMs)
+    const timer = setTimeout(() => finish(null), 120000 + streamingBlocks * 30000)
     worker.onmessage = event => {
-      lastMessageAt = nowMs()
+      lastMessageAt = Date.now()
       const data = event.data || {}
       if (data.id !== id) return
       if (data.type === 'progress') {
         onProgress(Number(data.value) || 0)
         return
       }
-      finish(data.type === 'done' && typeof data.hex === 'string' ? { hex: data.hex, engine: data.engine || 'worker' } : null)
+      finish(data.type === 'done' && typeof data.hex === 'string' ? data.hex : null)
     }
     worker.onerror = () => finish(null)
     worker.onmessageerror = () => finish(null)
     try {
-      worker.postMessage({ id, file, directLimit, forceEngine: forceJs ? 'js' : '' })
+      worker.postMessage({ id, file, directLimit })
     } catch {
       finish(null)
     }
