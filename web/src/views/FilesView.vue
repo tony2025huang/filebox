@@ -691,7 +691,12 @@ function startUpload(item) {
         })
       }
       if (!transferIsCurrent(item, generation) || item.paused || item.terminating) return
-      if (item.file.size > 0) {
+      // 超过客户端上限的大文件跳过了哈希（item.sha256 为空），此时不能调用按哈希查重的
+      // /api/files/check（该接口要求至少一个哈希，空哈希会返回 400「文件校验值缺失」），
+      // 直接进入上传流程；服务端会在组装时算出 sha256（v036）。
+      // A skipped hash means /api/files/check cannot be called (it requires a hash and answers 400
+      // otherwise), so go straight to the upload; the server computes sha256 while assembling (v036).
+      if (item.file.size > 0 && item.sha256) {
         const check = await transferApi(item, generation, '/api/files/check', { method: 'POST', body: JSON.stringify({ sha256: item.sha256, size: item.file.size, name: item.file.name, ...(item.dir ? { dir: item.dir } : {}) }) })
         if (!transferIsCurrent(item, generation) || item.paused || item.terminating) return
         if (check.data?.instant) {
