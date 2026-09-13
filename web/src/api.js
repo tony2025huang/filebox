@@ -111,6 +111,16 @@ export async function computeFileSHA256(file, onProgress = () => {}, onInfo = ()
     }
   }
   reportHashInfo(engine, file.size, nowMs() - started, onInfo)
+  // 降级必须显式可见：旧标签页引用已被替换的 Worker 分片时会静默变慢，只有告警能让用户知道要硬刷新。
+  // Degradation must be visible: a stale tab referencing a replaced worker chunk silently gets slower, so
+  // only an explicit warning tells the user to hard-refresh.
+  if (file.size >= HASH_INFO_LOG_BYTES) {
+    if (engine === 'js-main') {
+      console.warn('[filebox] checksum fell back to the MAIN thread (worker unavailable; if this repeats, hard-refresh the page)')
+    } else if (engine === 'js') {
+      console.warn('[filebox] checksum is using the pure-JS worker fallback (WebAssembly unavailable in this browser)')
+    }
+  }
   return hex
 }
 
@@ -128,11 +138,19 @@ function computeSHA256InWorker(file, onProgress, directLimit, forceJs) {
       return
     }
     const id = `hash-${Date.now()}-${Math.random().toString(16).slice(2)}`
+    let watchdog = null
     const finish = value => {
       clearTimeout(timer)
+      if (watchdog !== null) { clearInterval(watchdog); watchdog = null }
       try { worker.terminate() } catch {}
       resolve(value)
     }
+    // 看门狗：Worker 分片被替换后模块加载失败可能不触发 onerror，只依赖总超时会白等十几分钟；
+    // 90 秒内没有任何消息（进度或结果）即判定 Worker 不可用并立即降级。
+    // Watchdog: a replaced worker chunk may fail to load without firing onerror, so waiting for the total
+    // deadline wastes minutes; no message within 90s means the worker is unusable, degrade immediately.
+    let lastMessageAt = nowMs()
+    watchdog = setInterval(() => { if (nowMs() - lastMessageAt > 90000) finish(null) }, 5000)
     const streamingBlocks = Math.max(0, Math.ceil((file.size - directLimit) / (256 * 1024 * 1024)))
     // 纯 JS 重试的预算按 ~8MB/s 的最差情况给两倍余量，避免大文件被误判超时。
     // The forced-JS retry budget assumes an 8MB/s worst case with 2x headroom.
@@ -141,6 +159,7 @@ function computeSHA256InWorker(file, onProgress, directLimit, forceJs) {
       : 120000 + streamingBlocks * 30000
     const timer = setTimeout(() => finish(null), timeoutMs)
     worker.onmessage = event => {
+      lastMessageAt = nowMs()
       const data = event.data || {}
       if (data.id !== id) return
       if (data.type === 'progress') {
@@ -150,6 +169,7 @@ function computeSHA256InWorker(file, onProgress, directLimit, forceJs) {
       finish(data.type === 'done' && typeof data.hex === 'string' ? { hex: data.hex, engine: data.engine || 'worker' } : null)
     }
     worker.onerror = () => finish(null)
+    worker.onmessageerror = () => finish(null)
     try {
       worker.postMessage({ id, file, directLimit, forceEngine: forceJs ? 'js' : '' })
     } catch {

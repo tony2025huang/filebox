@@ -1,5 +1,13 @@
 # Requirement Change Log
 
+## 2026-09-12 - v033 修复部署后旧标签页引用失效静态资源导致的静默降级
+
+- **现象**：部署后浏览器控制台报 `Failed to load module script: The server responded with a non-JavaScript MIME type of "text/html"`（旧 worker 分片 `hashWorker-*.js` 已被新构建替换），校验速率掉到几百 KB/s。
+- **根因**：`spa` 处理器对**任何**未命中的路径都回退 `index.html`，于是缺失的静态资源（`/assets/...`）返回 **200 + text/html**；浏览器按模块脚本严格校验 MIME 直接失败，Worker 无法启动 → 静默降级。同时 `index.html` 未设置 `Cache-Control`，可被启发式缓存，使旧页面长期引用已删除的哈希资源。
+- **修复**：资源形态的路径（`assets/` 前缀或带扩展名）未命中时返回 **404**（不再回退 SPA）；`index.html` 设 `Cache-Control: no-cache`（每次校验，部署后旧页面立即刷新到新资源）；`assets/` 下哈希资源设 `public, max-age=31536000, immutable`。SPA 路由（如 `/files`）行为不变。
+- **前端加固**：Worker 90 秒内无任何消息即判定不可用并立即降级（此前模块加载失败可能不触发 `onerror`，只靠总超时会白等十几分钟）；新增 `onmessageerror` 处理；降级到 Worker 内纯 JS 或主线程时打印明确告警，提示硬刷新。
+- 验证：缺失分片 → 404、`index.html` → `no-cache`、`assets/*` → `immutable`、`/files` → 200 text/html；7 个 node 测试与 `go test ./...` 全绿。
+
 ## 2026-09-12 - v032 校验可观测性 + 大文件降级路径修复
 
 - **诊断**：`computeFileSHA256` 新增第三个回调并导出 `getLastHashInfo()`，回传本次校验**实际使用**的实现（`native` / `wasm` / `js` / `js-main`）与实测吞吐；≥64MiB 的文件额外打印一行控制台日志 `[filebox] checksum engine=… bytes=… elapsed=…ms rate=…MB/s`；收集上传页的展开明细显示引擎与速率。用于判定「5GB 文件只有 10–30MB/s」是 WASM 未生效（纯 JS 兜底 ~21MB/s）还是磁盘读取受限。

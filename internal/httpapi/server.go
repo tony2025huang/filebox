@@ -593,7 +593,20 @@ func (s *Server) spa(api http.Handler) http.Handler {
 		if name != "" {
 			if file, err := s.config.Static.Open(name); err == nil {
 				file.Close()
+				// 构建产物里的 assets/ 文件名带内容哈希，可以长期缓存；其他静态文件保持默认校验行为。
+				// Hashed build assets are immutable; other static files keep the default revalidation.
+				if strings.HasPrefix(name, "assets/") {
+					w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+				}
 				static.ServeHTTP(w, r)
+				return
+			}
+			// 资源形态的路径（assets/ 或带扩展名）缺失时必须返回 404。此前一律回退 index.html，浏览器会
+			// 把 200 + text/html 当成“模块脚本”，报 MIME 错误并让旧标签页静默降级到更慢的实现（v033）。
+			// Missing asset-shaped paths must 404. Falling back to index.html answered module requests with
+			// 200 + text/html, causing MIME errors and silently degrading stale tabs (v033).
+			if strings.HasPrefix(name, "assets/") || filepath.Ext(name) != "" {
+				http.Error(w, "not found", http.StatusNotFound)
 				return
 			}
 		}
@@ -603,6 +616,9 @@ func (s *Server) spa(api http.Handler) http.Handler {
 			return
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		// index.html 必须每次校验：否则部署后旧页面仍引用已被替换的哈希资源（v033）。
+		// index.html must revalidate, otherwise a deploy leaves stale pages pointing at replaced assets.
+		w.Header().Set("Cache-Control", "no-cache")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(index)
 	})
