@@ -547,6 +547,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/admin/users/{id}/clear-files", s.requireAdmin(s.clearUserFiles))
 	mux.HandleFunc("GET /api/admin/recycle", s.requireAdmin(s.listRecycleFiles))
 	mux.HandleFunc("POST /api/admin/recycle/purge", s.requireAdmin(s.purgeRecycleBin))
+	mux.HandleFunc("POST /api/admin/recycle/move", s.requireAdmin(s.moveRecycleFiles))
 	mux.HandleFunc("DELETE /api/admin/recycle/{id}", s.requireAdmin(s.deleteRecycleFile))
 	mux.HandleFunc("DELETE /api/admin/locks/ip/{ip}", s.requireAdmin(s.deleteIPLock))
 	mux.HandleFunc("DELETE /api/admin/locks/user/{id}", s.requireAdmin(s.deleteUserLock))
