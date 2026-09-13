@@ -1967,6 +1967,11 @@ func (s *Server) uploadInit(w http.ResponseWriter, r *http.Request) {
 		mimeType = "application/octet-stream"
 	}
 	task := store.UploadTask{ID: taskID, UserID: user.ID, Name: name, Size: input.Size, ChunkSize: chunkSize, TotalChunks: totalChunks, Status: "pending", Mime: mimeType, SHA256: input.SHA256, MD5: input.MD5, StorageDir: relativeDir, Resolve: input.Resolve}
+	// 上传开始前按需回收该用户长期无活动的未完成上传预留：一条死预留会把配额挡到 24 小时的周期
+	// 清理为止，而界面上看不到这部分占用，用户只会看到"已用远低于配额却提示配额不足"（v037）。
+	// Reclaim long-idle unfinished upload reservations before starting: a dead reservation otherwise
+	// blocks the quota until the 24h sweep while staying invisible in the UI (v037).
+	s.releaseStaleUploadReservations(r.Context(), user.ID)
 	if err := s.store.CreateUploadTask(r.Context(), task); err != nil {
 		var quotaErr *store.QuotaError
 		if errors.As(err, &quotaErr) {
