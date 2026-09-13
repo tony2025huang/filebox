@@ -37,6 +37,11 @@ type QuotaError struct {
 	UsedBytes  int64
 	QuotaBytes int64
 	FileSize   int64
+	// PendingBytes 是未完成上传（pending/active）已预留的字节数。界面只显示 UsedBytes，不带这个值时
+	// 用户会看到"已用远低于配额却提示配额不足"而无法理解原因（v039）。
+	// PendingBytes is the quota reserved by unfinished uploads; without it the UI shows a used value far
+	// below the quota next to a quota error, which users cannot explain (v039).
+	PendingBytes int64
 }
 
 func (e *QuotaError) Error() string { return ErrQuota.Error() }
@@ -2011,7 +2016,7 @@ func (s *Store) CreateUploadTask(ctx context.Context, task UploadTask) error {
 	// pending chunks, and the merged replacement until complete succeeds.
 	if used-replacingSize+pending+task.Size > quota {
 		tx.Rollback()
-		return &QuotaError{UsedBytes: used, QuotaBytes: quota, FileSize: task.Size}
+		return &QuotaError{UsedBytes: used, QuotaBytes: quota, FileSize: task.Size, PendingBytes: pending}
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
 	_, err = tx.ExecContext(ctx, "INSERT INTO upload_tasks(id, user_id, collection_id, remark, name, size, mime, chunk_size, total_chunks, status, sha256, md5, storage_dir, resolve, created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)", task.ID, task.UserID, task.CollectionID, task.Remark, task.Name, task.Size, task.Mime, task.ChunkSize, task.TotalChunks, task.SHA256, task.MD5, task.StorageDir, task.Resolve, now, now)

@@ -1975,7 +1975,7 @@ func (s *Server) uploadInit(w http.ResponseWriter, r *http.Request) {
 	if err := s.store.CreateUploadTask(r.Context(), task); err != nil {
 		var quotaErr *store.QuotaError
 		if errors.As(err, &quotaErr) {
-			rejectInit(http.StatusForbidden, "超出用户配额", "quota_exceeded", map[string]any{"code": "QUOTA_EXCEEDED", "usedBytes": quotaErr.UsedBytes, "quotaBytes": quotaErr.QuotaBytes, "fileSize": quotaErr.FileSize})
+			rejectInit(http.StatusForbidden, "超出用户配额", "quota_exceeded", map[string]any{"code": "QUOTA_EXCEEDED", "usedBytes": quotaErr.UsedBytes, "quotaBytes": quotaErr.QuotaBytes, "fileSize": quotaErr.FileSize, "pendingBytes": quotaErr.PendingBytes})
 			return
 		}
 		log.Printf("create upload task: %v", err)
