@@ -3787,6 +3787,12 @@ func (s *Store) ListFilesSorted(ctx context.Context, userID int64, admin bool, k
 	if !admin {
 		where += " AND user_id = ?"
 		args = append(args, userID)
+	} else {
+		// 管理员的"全库"视图排除回收站保留账户（users.id = 0）：它的文件只应出现在回收站视图里，
+		// 否则清空自己名下文件后仍会看到这些文件，看起来像"没有清干净"（v040）。
+		// The admin's all-files view excludes the recycle-bin owner (users.id = 0): those files belong to
+		// the recycle view only, otherwise a cleared library still lists them (v040).
+		where += " AND user_id <> 0"
 	}
 	if dir != "" {
 		if admin {
