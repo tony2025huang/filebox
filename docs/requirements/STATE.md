@@ -1,6 +1,33 @@
 # FileBox Requirement State
 
-Updated: 2026-09-12 (v027 clear-all reauth hardening / trigger race / docs)
+Updated: 2026-09-12 (v031 checksum performance: worker-wide hashing + WASM fast path; v030 collection storage layout, share tree, upload queue grouping)
+
+| Requirement | State | Notes |
+|---|---|---|
+| v031 checksum performance (worker covers all sizes) | done | `computeFileSHA256` always hashes in the worker first: native WebCrypto up to `FILEBOX_HASH_DIRECT_LIMIT` (256MiB), streaming beyond it, so files over 256MiB no longer block the main thread. The main thread only handles the case where no worker can be created. |
+| v031 WASM fast path + shared fallback module | done | New `web/src/sha256Fallback.js` holds the dependency-free streaming SHA-256 shared by the main thread and the worker; the worker statically imports `hash-wasm@4.11.0` for the WASM streaming path and falls back to the shared module when WASM cannot be initialised. Worker chunk 0.67kB → 21.4kB (tree-shaken to sha256 only). Measured on Node/V8 (64MiB): 203.7MB/s WASM vs 23.4MB/s pure JS (8.7x, identical digests); 1GiB ≈ 5.0s vs 44s. |
+| v031 CSP for WebAssembly | done | `script-src 'self'` → `script-src 'self' 'wasm-unsafe-eval'` (allows WebAssembly compilation only, not `unsafe-eval`); verified in the live response header. |
+| v031 tests | done | `web/tests/sha256Fallback.test.mjs` (block boundaries 0/1/55/56/57/63/64/65/127/128/129/1MiB+1 with unaligned chunks), `web/tests/wasmSha256.test.mjs` (hash-wasm byte-identical to node:crypto), benchmark script `web/tests/hashBench.mjs`. |
+| v030 collection storage layout + migration CLI | done | Collection uploads now land in `files/<uid>/collections/<name>-<token8>` (ASCII parent, user-language child). `filebox admin migrate-collection-dirs [--dry-run]` rewrites `files.storage_path`, `folders.path` and `upload_tasks.storage_dir` plus the on-disk tree, then prunes the emptied legacy `uploads` directories; there is no startup migration. The folder listing shows the user-language collection name while every other directory keeps the v019 rule (path basename wins). |
+| v030 share page directory tree (#9) | done | The aggregate share page renders a collapsible directory tree from the new `files[].relativePath` field, with per-directory selection feeding the ZIP download. |
+| v030 collection upload queue grouping + transfer detail (#5/#8) | done | Directory uploads collapse into one expandable queue row (file count, total size, aggregate progress, failure reason); each file row expands a transfer detail block (bytes, live EMA rate, status, failure reason). The upload engine still walks the flat queue. |
+| v030 collection password page + clear-all pagination (#4/#3) | done | `.public-password-form` had no CSS rule at all and now matches the site form rhythm; the file library resets to page 1 after a successful clear. |
+
+| Requirement | State | Notes |
+|---|---|---|
+| v029 per-user clear in user management | done | `POST /api/admin/users/{id}/clear-files` (admin only, re-uses the v027 re-auth buckets and second-factor flow, supports `empty-dirs` / `whole-tree`, audits `target=user:<name>`) clears only the target user. The file library's global scope is gone: `POST /api/files/clear-all` rejects `scope != own` with 400 `SCOPE_UNSUPPORTED` and the dialog no longer offers the all-users option. |
+| v029 delete user with optional file retention | done | `DELETE /api/admin/users/{id}` accepts `{"keepFiles": bool}` (default false = delete files). With `keepFiles=true` the ready files move into the recycle bin owned by the reserved account `users.id=0` (login disabled, zero quota, created during migration and hidden from user lists/stats) under `files/0/<former username>/<relative path>` with numeric suffixes on conflicts and same-volume renames (rolled back on failure). |
+| v029 orphan share cleanup on user delete | done | Both delete modes now remove the user's `shares` rows, fixing orphan share records left behind because `shares.created_by` has no foreign key. |
+| v029 recycle bin APIs and UI | done | Admin-only `GET /api/admin/recycle` (grouped by former username, exposes `recycleUser`/`relativePath`), `DELETE /api/admin/recycle/{id}`, `POST /api/admin/recycle/purge`; recycled files remain downloadable through `/api/files/{id}/download`. User management gained a per-row 「清空文件」 action with re-auth and disk-mode options, a delete confirmation with the 「同时删除该用户全部文件」 checkbox (default checked), and a recycle-bin panel with per-file delete and purge, all trilingual. |
+
+| Requirement | State | Notes |
+|---|---|---|
+| v028 clear-all scope, residues and disk handling | done | `ClearFiles(ctx, userID, allUsers)` clears ready files, folder records, unfinished upload tasks and revokes the owner's shares in one transaction, resets quota, and reports counts. HTTP layer removes file content plus `tmp/<taskID>` and applies `diskMode` (`empty-dirs` prunes empty directories bottom-up, `whole-tree` removes `files/<uid>`). Verified by 5 new Go tests and the online checklist. |
+| v028 files sort in table headers | done | Toolbar sort controls removed; 名称/大小/类型/上传时间 headers are clickable (▲/▼ + `aria-sort`, keyboard accessible); the integrity column stays unsortable; folders follow the same params. |
+| v028 drag-drop upload removal | done | Files view and collection upload page lost their drop zones/hints, `dragging` state, `handleDrop`/`collectDrop*` helpers and related CSS; 选择文件 / 上传文件夹 remain. |
+| v028 new-folder button placement | done | The 新建文件夹 button now shares the action row with 选择文件 / 上传文件夹. |
+| v028 transfer failure reason on hover | done | Failure reasons are written to the transfer item and bound as a row-level `title` (active and finished tabs) so hovering anywhere on a failed row shows the cause. |
+| v028 share error distinction | done | Anonymous share endpoints return `SHARE_NOT_FOUND` / `SHARE_REVOKED` / `SHARE_EXPIRED` / `SHARE_CONTENT_MISSING`; the owner's share list marks links whose file is gone with `status=content_missing` + `contentMissing`; frontend maps the codes and i18n carries trilingual strings. |
 
 | Requirement | State | Notes |
 |---|---|---|

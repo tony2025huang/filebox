@@ -200,8 +200,11 @@ type UploadTask struct {
 	TotalChunks  int
 	Status       string
 	Mime         string
+	SHA256       string
+	MD5          string
 	StorageDir   string
 	Resolve      string
+	CompletedAt  string
 }
 
 // CollectionUploadTaskState is the public state of one collection upload task.
@@ -277,6 +280,9 @@ type Share struct {
 	MaxDownloads  int    `json:"maxDownloads"`
 	RevokedAt     string `json:"revokedAt,omitempty"`
 	CreatedAt     string `json:"createdAt"`
+	// ContentMissing 表示链接仍存在但目标文件已被删除/不可用（"我的分享"列表据此提示）。
+	// ContentMissing marks a link whose target file was deleted or is unavailable ("my shares" UI).
+	ContentMissing bool `json:"contentMissing,omitempty"`
 }
 
 // Folder 表示一个用户自定义目录（v011：移除自动年月层后的目录模型）。
@@ -450,6 +456,9 @@ CREATE TABLE IF NOT EXISTS upload_tasks (
   chunk_size INTEGER NOT NULL,
   total_chunks INTEGER NOT NULL,
   status TEXT NOT NULL,
+  sha256 TEXT NOT NULL DEFAULT '',
+  md5 TEXT NOT NULL DEFAULT '',
+  completed_at TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -528,7 +537,12 @@ CREATE TABLE IF NOT EXISTS ip_failures (
 	if err := s.migrateSyncSchema(); err != nil {
 		return err
 	}
-	return s.migrateSyncTriggeredSchema()
+	if err := s.migrateSyncTriggeredSchema(); err != nil {
+		return err
+	}
+	// 回收站归属账户（users.id=0）必须在任何文件迁入回收站之前存在，以满足 files.user_id 外键。
+	// The recycle-bin owner (users.id=0) must exist before files move there (files.user_id FK).
+	return s.EnsureRecycleOwner(context.Background())
 }
 
 // migrateCollectionsSchema creates collection tables and adds the optional task link.
@@ -752,13 +766,21 @@ func (s *Store) migrateUploadTasksSchema() error {
 	if err != nil {
 		return err
 	}
-	if !columns["storage_dir"] {
-		if _, err := s.DB.Exec("ALTER TABLE upload_tasks ADD COLUMN storage_dir TEXT NOT NULL DEFAULT ''"); err != nil {
-			return err
-		}
+	definitions := []struct {
+		name string
+		sql  string
+	}{
+		{"storage_dir", "ALTER TABLE upload_tasks ADD COLUMN storage_dir TEXT NOT NULL DEFAULT ''"},
+		{"resolve", "ALTER TABLE upload_tasks ADD COLUMN resolve TEXT NOT NULL DEFAULT ''"},
+		{"sha256", "ALTER TABLE upload_tasks ADD COLUMN sha256 TEXT NOT NULL DEFAULT ''"},
+		{"md5", "ALTER TABLE upload_tasks ADD COLUMN md5 TEXT NOT NULL DEFAULT ''"},
+		{"completed_at", "ALTER TABLE upload_tasks ADD COLUMN completed_at TEXT NOT NULL DEFAULT ''"},
 	}
-	if !columns["resolve"] {
-		if _, err := s.DB.Exec("ALTER TABLE upload_tasks ADD COLUMN resolve TEXT NOT NULL DEFAULT ''"); err != nil {
+	for _, definition := range definitions {
+		if columns[definition.name] {
+			continue
+		}
+		if _, err := s.DB.Exec(definition.sql); err != nil {
 			return err
 		}
 	}
@@ -1482,14 +1504,227 @@ func (s *Store) ClearAllLocks(ctx context.Context) (int, error) {
 	return int(ipCount + userCount), nil
 }
 
-func (s *Store) DeleteUser(ctx context.Context, id int64) ([]string, error) {
-	// DeleteUser 事务删除账户并返回其文件路径，调用方随后清理物理文件。
-	// DeleteUser transactionally removes the account and returns its file paths for physical cleanup by the caller.
+// RecycleOwnerID 是回收站文件在 users 表中的保留 ID（0）；RecycleOwnerUsername 为其保留用户名。
+// RecycleOwnerID is the reserved users.id (0) that owns recycled files; RecycleOwnerUsername is its name.
+const (
+	RecycleOwnerID       = 0
+	RecycleOwnerUsername = "__recycle_bin__"
+)
+
+// EnsureRecycleOwner 保证回收站归属账户存在（users.id=0，禁用登录、零配额）。
+// EnsureRecycleOwner makes sure the recycle-bin owner account exists (users.id=0, login disabled).
+func (s *Store) EnsureRecycleOwner(ctx context.Context) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err := s.DB.ExecContext(ctx, `INSERT OR IGNORE INTO users(id, username, password_hash, role, quota_bytes, disabled, created_at, updated_at)
+VALUES(?, ?, '', 'user', 0, 1, ?, ?)`, RecycleOwnerID, RecycleOwnerUsername, now, now)
+	return err
+}
+
+// RecycleMove 描述一个文件迁入回收站时的磁盘移动（路径相对 DataDir）。
+// RecycleMove describes one file's disk move into the recycle bin (paths relative to DataDir).
+type RecycleMove struct {
+	From string
+	To   string
+}
+
+// recycleStoragePath 在回收站目标目录内选择不冲突的存储名（重名追加数字后缀）。
+// recycleStoragePath picks a conflict-free storage name inside the recycle target directory.
+func recycleStoragePath(ctx context.Context, tx *sql.Tx, directory, base string) (string, string, error) {
+	for suffix := 0; ; suffix++ {
+		candidate := storageNameCandidate(base, suffix)
+		storagePath := filepath.Join(directory, candidate)
+		var exists int
+		if err := tx.QueryRowContext(ctx, "SELECT COUNT(id) FROM files WHERE storage_path = ?", storagePath).Scan(&exists); err != nil {
+			return "", "", err
+		}
+		if exists == 0 {
+			return candidate, storagePath, nil
+		}
+	}
+}
+
+// DeleteUser 删除账户。keepFiles=true 时先把 ready 文件迁入回收站（users.id=0，目录以原用户名命名）
+// 并改写记录的归属与存储路径；keepFiles=false 时沿用原行为，返回存储路径由调用方物理删除。
+// 两种模式都会删除该用户的分享记录（shares.created_by 无外键，否则会残留孤儿记录）。
+// DeleteUser removes an account. With keepFiles=true the ready files are first moved into the recycle
+// bin (owned by users.id=0, grouped in a directory named after the former username) with rewritten
+// ownership/paths; with keepFiles=false the original behaviour returns the storage paths for the
+// caller to delete physically. Both modes delete the user's share records, because shares.created_by
+// has no foreign key and would otherwise leave orphan rows.
+func (s *Store) DeleteUser(ctx context.Context, id int64, keepFiles bool) ([]string, []RecycleMove, int, error) {
+	var username string
+	if err := s.DB.QueryRowContext(ctx, "SELECT username FROM users WHERE id = ?", id).Scan(&username); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil, 0, ErrNotFound
+		}
+		return nil, nil, 0, err
+	}
+	if keepFiles {
+		if err := s.EnsureRecycleOwner(ctx); err != nil {
+			return nil, nil, 0, err
+		}
+	}
+
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	rows, err := tx.QueryContext(ctx, "SELECT id, storage_path, stored_name, name FROM files WHERE user_id = ? AND status = 'ready'", id)
+	if err != nil {
+		tx.Rollback()
+		return nil, nil, 0, err
+	}
+	type fileRow struct {
+		id         int64
+		storagePath string
+		storedName string
+		name       string
+	}
+	var files []fileRow
+	for rows.Next() {
+		var item fileRow
+		if err := rows.Scan(&item.id, &item.storagePath, &item.storedName, &item.name); err != nil {
+			rows.Close()
+			tx.Rollback()
+			return nil, nil, 0, err
+		}
+		files = append(files, item)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		tx.Rollback()
+		return nil, nil, 0, err
+	}
+
+	userPrefix := filepath.Join("files", strconv.FormatInt(id, 10)) + string(filepath.Separator)
+	recycleRoot := filepath.Join("files", strconv.FormatInt(RecycleOwnerID, 10), username)
+	paths := make([]string, 0, len(files))
+	type target struct {
+		row  fileRow
+		name string
+		path string
+	}
+	var targets []target
+	for _, item := range files {
+		paths = append(paths, item.storagePath)
+		if !keepFiles {
+			continue
+		}
+		relative := strings.TrimPrefix(item.storagePath, userPrefix)
+		base := filepath.Base(relative)
+		subDir := filepath.Dir(relative)
+		if subDir == "." || subDir == string(filepath.Separator) {
+			subDir = ""
+		}
+		newName, newPath, err := recycleStoragePath(ctx, tx, filepath.Join(recycleRoot, subDir), base)
+		if err != nil {
+			tx.Rollback()
+			return nil, nil, 0, err
+		}
+		targets = append(targets, target{row: item, name: newName, path: newPath})
+	}
+
+	var moves []RecycleMove
+	if keepFiles {
+		for _, item := range targets {
+			moves = append(moves, RecycleMove{From: item.row.storagePath, To: item.path})
+		}
+		// 先落盘（同卷 rename），失败即把已移动的文件移回，避免 DB 与磁盘不一致。
+		// Move on disk first (same volume rename); on failure move the already-moved files back.
+		moved := 0
+		for _, move := range moves {
+			if err := os.MkdirAll(filepath.Dir(filepath.Join(s.DataDir, move.To)), 0o755); err != nil {
+				for index := moved - 1; index >= 0; index-- {
+					_ = os.Rename(filepath.Join(s.DataDir, moves[index].To), filepath.Join(s.DataDir, moves[index].From))
+				}
+				tx.Rollback()
+				return nil, nil, 0, err
+			}
+			if err := os.Rename(filepath.Join(s.DataDir, move.From), filepath.Join(s.DataDir, move.To)); err != nil {
+				if errors.Is(err, os.ErrNotExist) {
+					// 磁盘内容缺失仍继续：只迁移记录，避免因历史脏数据阻塞删除。
+					moved++
+					continue
+				}
+				for index := moved - 1; index >= 0; index-- {
+					_ = os.Rename(filepath.Join(s.DataDir, moves[index].To), filepath.Join(s.DataDir, moves[index].From))
+				}
+				tx.Rollback()
+				return nil, nil, 0, err
+			}
+			moved++
+		}
+		for _, item := range targets {
+			if _, err := tx.ExecContext(ctx, "UPDATE files SET user_id = ?, storage_path = ?, stored_name = ?, name = ? WHERE id = ?", RecycleOwnerID, item.path, item.name, item.name, item.row.id); err != nil {
+				tx.Rollback()
+				return nil, nil, 0, err
+			}
+		}
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM shares WHERE created_by = ?", id); err != nil {
+		tx.Rollback()
+		return nil, nil, 0, err
+	}
+	result, err := tx.ExecContext(ctx, "DELETE FROM users WHERE id = ?", id)
+	if err != nil {
+		tx.Rollback()
+		return nil, nil, 0, err
+	}
+	count, _ := result.RowsAffected()
+	if count == 0 {
+		tx.Rollback()
+		return nil, nil, 0, ErrNotFound
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, nil, 0, err
+	}
+	if keepFiles {
+		return nil, moves, len(moves), nil
+	}
+	return paths, nil, 0, nil
+}
+
+// RecycleFile 是回收站中的一个文件条目：RecycleOwner 为以原用户名命名的目录，RelativePath 为其内相对路径。
+// RecycleFile is one recycle-bin entry: RecycleOwner is the directory named after the former user.
+type RecycleFile struct {
+	File
+	RecycleOwner string
+	RelativePath string
+}
+
+// ListRecycleFiles 返回回收站（users.id=0）内的 ready 文件，按原用户名目录与路径排序。
+// ListRecycleFiles returns ready files inside the recycle bin (users.id=0), ordered by owner directory.
+func (s *Store) ListRecycleFiles(ctx context.Context) ([]RecycleFile, error) {
+	rows, err := s.DB.QueryContext(ctx, "SELECT id, user_id, name, stored_name, size, mime, sha256, md5, status, storage_path, created_at, COALESCE(deleted_at, '') FROM files WHERE user_id = ? AND status = 'ready' ORDER BY storage_path", RecycleOwnerID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	root := filepath.ToSlash(filepath.Join("files", strconv.FormatInt(RecycleOwnerID, 10))) + "/"
+	items := make([]RecycleFile, 0)
+	for rows.Next() {
+		var item File
+		if err := rows.Scan(&item.ID, &item.UserID, &item.Name, &item.StoredName, &item.Size, &item.Mime, &item.SHA256, &item.MD5, &item.Status, &item.StoragePath, &item.CreatedAt, &item.DeletedAt); err != nil {
+			return nil, err
+		}
+		relative := strings.TrimPrefix(filepath.ToSlash(item.StoragePath), root)
+		owner, inner := relative, ""
+		if index := strings.Index(relative, "/"); index >= 0 {
+			owner, inner = relative[:index], relative[index+1:]
+		}
+		items = append(items, RecycleFile{File: item, RecycleOwner: owner, RelativePath: inner})
+	}
+	return items, rows.Err()
+}
+
+// PurgeRecycle 清空回收站：删除全部记录并返回存储路径供调用方物理删除。
+// PurgeRecycle deletes every recycle-bin record and returns the storage paths for physical removal.
+func (s *Store) PurgeRecycle(ctx context.Context) ([]string, error) {
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
-	rows, err := tx.QueryContext(ctx, "SELECT storage_path FROM files WHERE user_id = ?", id)
+	rows, err := tx.QueryContext(ctx, "SELECT storage_path FROM files WHERE user_id = ?", RecycleOwnerID)
 	if err != nil {
 		tx.Rollback()
 		return nil, err
@@ -1509,15 +1744,9 @@ func (s *Store) DeleteUser(ctx context.Context, id int64) ([]string, error) {
 		tx.Rollback()
 		return nil, err
 	}
-	result, err := tx.ExecContext(ctx, "DELETE FROM users WHERE id = ?", id)
-	if err != nil {
+	if _, err := tx.ExecContext(ctx, "DELETE FROM files WHERE user_id = ?", RecycleOwnerID); err != nil {
 		tx.Rollback()
 		return nil, err
-	}
-	count, _ := result.RowsAffected()
-	if count == 0 {
-		tx.Rollback()
-		return nil, ErrNotFound
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
@@ -1525,29 +1754,59 @@ func (s *Store) DeleteUser(ctx context.Context, id int64) ([]string, error) {
 	return paths, nil
 }
 
-// ClearUserFiles transactionally soft-deletes a user's ready files, removes their folders, and resets used quota.
-func (s *Store) ClearUserFiles(ctx context.Context, userID int64) ([]string, error) {
+// ClearResult 汇总一次清空操作影响的范围，供 HTTP 层做磁盘清理、审计与触发同步通知。
+// ClearResult summarizes one clear operation for disk cleanup, auditing, and sync notifications.
+type ClearResult struct {
+	Paths         []string // 被清理文件的存储路径（相对 DataDir）
+	TaskIDs       []string // 被清理的未完成上传任务
+	UserIDs       []int64  // 受影响的文件/任务所属用户（去重）
+	FileCount     int
+	TaskCount     int
+	RevokedShares int
+}
+
+// ClearFiles 在单事务内清空指定范围的 ready 文件、目录记录、未完成上传任务与分享记录，
+// 并把对应用户的已用配额归零；磁盘内容与临时分片目录由调用方清理。
+// allUsers=false 时仅处理 userID；allUsers=true 时处理全部用户（由 HTTP 层限制为管理员）。
+// ClearFiles clears ready files, folder records, unfinished upload tasks and share records for the
+// requested scope in one transaction and resets the affected users' used quota; disk content and
+// temporary chunk directories are removed by the caller. allUsers=false scopes to userID, while
+// allUsers=true covers every user (the HTTP layer restricts that to administrators).
+func (s *Store) ClearFiles(ctx context.Context, userID int64, allUsers bool) (ClearResult, error) {
+	var result ClearResult
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
-		return nil, err
+		return result, err
 	}
-	rollback := func(err error) ([]string, error) {
+	rollback := func(err error) (ClearResult, error) {
 		_ = tx.Rollback()
-		return nil, err
+		return ClearResult{}, err
 	}
 
-	rows, err := tx.QueryContext(ctx, "SELECT storage_path FROM files WHERE user_id = ? AND status = 'ready'", userID)
+	filter := ""
+	args := []any{}
+	if !allUsers {
+		filter = " AND user_id = ?"
+		args = append(args, userID)
+	}
+
+	owners := make(map[int64]struct{})
+	rows, err := tx.QueryContext(ctx, "SELECT user_id, storage_path FROM files WHERE status = 'ready'"+filter, args...)
 	if err != nil {
 		return rollback(err)
 	}
-	paths := make([]string, 0)
 	for rows.Next() {
+		var owner int64
 		var path string
-		if err := rows.Scan(&path); err != nil {
+		if err := rows.Scan(&owner, &path); err != nil {
 			rows.Close()
 			return rollback(err)
 		}
-		paths = append(paths, path)
+		result.Paths = append(result.Paths, path)
+		if _, seen := owners[owner]; !seen {
+			owners[owner] = struct{}{}
+			result.UserIDs = append(result.UserIDs, owner)
+		}
 	}
 	if err := rows.Close(); err != nil {
 		return rollback(err)
@@ -1555,29 +1814,79 @@ func (s *Store) ClearUserFiles(ctx context.Context, userID int64) ([]string, err
 	if err := rows.Err(); err != nil {
 		return rollback(err)
 	}
+	result.FileCount = len(result.Paths)
+
+	taskRows, err := tx.QueryContext(ctx, "SELECT id, user_id FROM upload_tasks WHERE status IN ('pending', 'active', 'queued')"+filter, args...)
+	if err != nil {
+		return rollback(err)
+	}
+	for taskRows.Next() {
+		var taskID string
+		var owner int64
+		if err := taskRows.Scan(&taskID, &owner); err != nil {
+			taskRows.Close()
+			return rollback(err)
+		}
+		result.TaskIDs = append(result.TaskIDs, taskID)
+		if _, seen := owners[owner]; !seen {
+			owners[owner] = struct{}{}
+			result.UserIDs = append(result.UserIDs, owner)
+		}
+	}
+	if err := taskRows.Close(); err != nil {
+		return rollback(err)
+	}
+	if err := taskRows.Err(); err != nil {
+		return rollback(err)
+	}
+	result.TaskCount = len(result.TaskIDs)
 
 	now := time.Now().UTC().Format(time.RFC3339)
-	if _, err := tx.ExecContext(ctx, "UPDATE files SET status = 'deleted', deleted_at = ? WHERE user_id = ? AND status = 'ready'", now, userID); err != nil {
+	if _, err := tx.ExecContext(ctx, "UPDATE files SET status = 'deleted', deleted_at = ? WHERE status = 'ready'"+filter, append([]any{now}, args...)...); err != nil {
 		return rollback(err)
 	}
-	if _, err := tx.ExecContext(ctx, "DELETE FROM folders WHERE user_id = ?", userID); err != nil {
+	if _, err := tx.ExecContext(ctx, "DELETE FROM folders WHERE 1 = 1"+filter, args...); err != nil {
 		return rollback(err)
 	}
-	result, err := tx.ExecContext(ctx, "UPDATE users SET used_bytes = 0, updated_at = ? WHERE id = ?", now, userID)
+	if _, err := tx.ExecContext(ctx, "DELETE FROM upload_tasks WHERE status IN ('pending', 'active', 'queued')"+filter, args...); err != nil {
+		return rollback(err)
+	}
+	// 分享按创建者归属撤销：内容清空后链接立即失效，"我的分享"列表状态与实际一致。
+	// Shares are revoked by creator so cleared content immediately invalidates links and the
+	// "my shares" list matches reality. (shares.created_by → users.id，不是 user_id 列)
+	var shareResult sql.Result
+	if allUsers {
+		shareResult, err = tx.ExecContext(ctx, "UPDATE shares SET revoked_at = ? WHERE revoked_at IS NULL", now)
+	} else {
+		shareResult, err = tx.ExecContext(ctx, "UPDATE shares SET revoked_at = ? WHERE revoked_at IS NULL AND created_by = ?", now, userID)
+	}
 	if err != nil {
 		return rollback(err)
 	}
-	count, err := result.RowsAffected()
-	if err != nil {
-		return rollback(err)
+	if affected, affectedErr := shareResult.RowsAffected(); affectedErr == nil {
+		result.RevokedShares = int(affected)
 	}
-	if count == 0 {
-		return rollback(ErrNotFound)
+	if allUsers {
+		if _, err := tx.ExecContext(ctx, "UPDATE users SET used_bytes = 0, updated_at = ?", now); err != nil {
+			return rollback(err)
+		}
+	} else {
+		update, err := tx.ExecContext(ctx, "UPDATE users SET used_bytes = 0, updated_at = ? WHERE id = ?", now, userID)
+		if err != nil {
+			return rollback(err)
+		}
+		count, countErr := update.RowsAffected()
+		if countErr != nil {
+			return rollback(countErr)
+		}
+		if count == 0 {
+			return rollback(ErrNotFound)
+		}
 	}
 	if err := tx.Commit(); err != nil {
-		return nil, err
+		return ClearResult{}, err
 	}
-	return paths, nil
+	return result, nil
 }
 
 func (s *Store) ListUsers(ctx context.Context, keyword string, page, pageSize int) ([]User, int, error) {
@@ -1586,10 +1895,10 @@ func (s *Store) ListUsers(ctx context.Context, keyword string, page, pageSize in
 	pageSize, offset := listPageOffset(page, pageSize)
 	pattern := "%" + escapeLike(keyword) + "%"
 	var total int
-	if err := s.DB.QueryRowContext(ctx, "SELECT COUNT(id) FROM users WHERE username LIKE ? ESCAPE '\\'", pattern).Scan(&total); err != nil {
+	if err := s.DB.QueryRowContext(ctx, "SELECT COUNT(id) FROM users WHERE id <> ? AND username LIKE ? ESCAPE '\\'", RecycleOwnerID, pattern).Scan(&total); err != nil {
 		return nil, 0, err
 	}
-	rows, err := s.DB.QueryContext(ctx, "SELECT id, username, password_hash, role, language, quota_bytes, used_bytes, disabled, failed_attempts, COALESCE(locked_until, ''), COALESCE(must_change_password, 0), COALESCE(totp_secret, ''), COALESCE(totp_enabled, 0), COALESCE(last_used_totp, ''), COALESCE(ip_acl_enabled, 0), COALESCE(ip_whitelist, ''), COALESCE(read_only_from, ''), COALESCE(read_only_until, ''), created_at, updated_at, (SELECT COUNT(id) FROM folders WHERE folders.user_id = users.id), (SELECT COUNT(id) FROM files WHERE files.user_id = users.id AND files.status = 'ready') FROM users WHERE username LIKE ? ESCAPE '\\' ORDER BY id LIMIT ? OFFSET ?", pattern, pageSize, offset)
+	rows, err := s.DB.QueryContext(ctx, "SELECT id, username, password_hash, role, language, quota_bytes, used_bytes, disabled, failed_attempts, COALESCE(locked_until, ''), COALESCE(must_change_password, 0), COALESCE(totp_secret, ''), COALESCE(totp_enabled, 0), COALESCE(last_used_totp, ''), COALESCE(ip_acl_enabled, 0), COALESCE(ip_whitelist, ''), COALESCE(read_only_from, ''), COALESCE(read_only_until, ''), created_at, updated_at, (SELECT COUNT(id) FROM folders WHERE folders.user_id = users.id), (SELECT COUNT(id) FROM files WHERE files.user_id = users.id AND files.status = 'ready') FROM users WHERE id <> ? AND username LIKE ? ESCAPE '\\' ORDER BY id LIMIT ? OFFSET ?", RecycleOwnerID, pattern, pageSize, offset)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -1705,7 +2014,7 @@ func (s *Store) CreateUploadTask(ctx context.Context, task UploadTask) error {
 		return &QuotaError{UsedBytes: used, QuotaBytes: quota, FileSize: task.Size}
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	_, err = tx.ExecContext(ctx, "INSERT INTO upload_tasks(id, user_id, collection_id, remark, name, size, mime, chunk_size, total_chunks, status, storage_dir, resolve, created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)", task.ID, task.UserID, task.CollectionID, task.Remark, task.Name, task.Size, task.Mime, task.ChunkSize, task.TotalChunks, task.StorageDir, task.Resolve, now, now)
+	_, err = tx.ExecContext(ctx, "INSERT INTO upload_tasks(id, user_id, collection_id, remark, name, size, mime, chunk_size, total_chunks, status, sha256, md5, storage_dir, resolve, created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)", task.ID, task.UserID, task.CollectionID, task.Remark, task.Name, task.Size, task.Mime, task.ChunkSize, task.TotalChunks, task.SHA256, task.MD5, task.StorageDir, task.Resolve, now, now)
 	if err != nil {
 		tx.Rollback()
 		return err
@@ -1717,7 +2026,7 @@ func (s *Store) GetUploadTask(ctx context.Context, id string) (UploadTask, error
 	// GetUploadTask 按任务 ID 读取上传任务，并将缺失任务映射为 ErrNotFound。
 	// GetUploadTask loads an upload task by ID and maps a missing task to ErrNotFound.
 	var task UploadTask
-	err := s.DB.QueryRowContext(ctx, "SELECT id, user_id, COALESCE(collection_id, 0), COALESCE(remark, ''), name, size, mime, chunk_size, total_chunks, status, COALESCE(storage_dir, ''), COALESCE(resolve, '') FROM upload_tasks WHERE id = ?", id).Scan(&task.ID, &task.UserID, &task.CollectionID, &task.Remark, &task.Name, &task.Size, &task.Mime, &task.ChunkSize, &task.TotalChunks, &task.Status, &task.StorageDir, &task.Resolve)
+	err := s.DB.QueryRowContext(ctx, "SELECT id, user_id, COALESCE(collection_id, 0), COALESCE(remark, ''), name, size, mime, chunk_size, total_chunks, status, COALESCE(sha256, ''), COALESCE(md5, ''), COALESCE(storage_dir, ''), COALESCE(resolve, ''), COALESCE(completed_at, '') FROM upload_tasks WHERE id = ?", id).Scan(&task.ID, &task.UserID, &task.CollectionID, &task.Remark, &task.Name, &task.Size, &task.Mime, &task.ChunkSize, &task.TotalChunks, &task.Status, &task.SHA256, &task.MD5, &task.StorageDir, &task.Resolve, &task.CompletedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return UploadTask{}, ErrNotFound
 	}
@@ -1775,21 +2084,27 @@ func (s *Store) ListChunks(ctx context.Context, taskID string) (map[int]ChunkInf
 // TaskProgress 描述一个进行中上传任务的实时进度，供服务端推送（SSE）。
 // TaskProgress describes the live progress of an in-flight upload task for server push (SSE).
 type TaskProgress struct {
-	TaskID      string `json:"taskId"`
-	Name        string `json:"name"`
-	TotalChunks int    `json:"totalChunks"`
-	Uploaded    int    `json:"uploaded"`
-	Status      string `json:"status"`
+	TaskID        string `json:"taskId"`
+	Name          string `json:"name"`
+	TotalChunks   int    `json:"totalChunks"`
+	Uploaded      int    `json:"uploaded"`
+	UploadedBytes int64  `json:"uploadedBytes"`
+	TotalBytes    int64  `json:"totalBytes"`
+	Status        string `json:"status"`
+	CompletedAt   string `json:"completedAt,omitempty"`
+	CreatedAt     string `json:"createdAt,omitempty"`
+	UpdatedAt     string `json:"updatedAt,omitempty"`
 }
 
 // ListPendingTaskProgress 返回指定用户的所有 pending 上传任务及其已上传分片数。
 // ListPendingTaskProgress returns all pending upload tasks for a user with their uploaded-chunk counts.
 func (s *Store) ListPendingTaskProgress(ctx context.Context, userID int64) ([]TaskProgress, error) {
-	rows, err := s.DB.QueryContext(ctx, `SELECT t.id, t.name, t.total_chunks, t.status, COUNT(c.task_id) AS uploaded
+	rows, err := s.DB.QueryContext(ctx, `SELECT t.id, t.name, t.total_chunks, t.status, COUNT(c.task_id) AS uploaded,
+		COALESCE(SUM(c.size), 0) AS uploaded_bytes, t.size, COALESCE(t.completed_at, ''), t.created_at, t.updated_at
 		FROM upload_tasks t
 		LEFT JOIN chunks c ON c.task_id = t.id
 		WHERE t.user_id = ? AND t.status = 'pending'
-		GROUP BY t.id, t.name, t.total_chunks, t.status, t.created_at
+		GROUP BY t.id, t.name, t.total_chunks, t.status, t.size, t.completed_at, t.created_at, t.updated_at
 		ORDER BY t.created_at`, userID)
 	if err != nil {
 		return nil, err
@@ -1798,7 +2113,7 @@ func (s *Store) ListPendingTaskProgress(ctx context.Context, userID int64) ([]Ta
 	progress := make([]TaskProgress, 0, 8)
 	for rows.Next() {
 		var p TaskProgress
-		if err := rows.Scan(&p.TaskID, &p.Name, &p.TotalChunks, &p.Status, &p.Uploaded); err != nil {
+		if err := rows.Scan(&p.TaskID, &p.Name, &p.TotalChunks, &p.Status, &p.Uploaded, &p.UploadedBytes, &p.TotalBytes, &p.CompletedAt, &p.CreatedAt, &p.UpdatedAt); err != nil {
 			return nil, err
 		}
 		progress = append(progress, p)
@@ -2053,7 +2368,7 @@ WHERE id = ? AND revoked_at IS NULL AND expires_at > ? AND (max_uploads = 0 OR u
 			return File{}, err
 		}
 	}
-	result, err = tx.ExecContext(ctx, "UPDATE upload_tasks SET status = 'complete', updated_at = ? WHERE id = ? AND status IN ('pending', 'active')", now, task.ID)
+	result, err = tx.ExecContext(ctx, "UPDATE upload_tasks SET status = 'complete', completed_at = ?, updated_at = ? WHERE id = ? AND status IN ('pending', 'active')", now, now, task.ID)
 	if err != nil {
 		tx.Rollback()
 		return File{}, err
@@ -2220,7 +2535,7 @@ FROM shares WHERE file_id = ? ORDER BY created_at DESC, id DESC`, fileID)
 // ListSharesByOwner lists all links created by one user and joins the visible file name.
 // ListSharesByOwner 列出用户创建的全部分享，并 JOIN 返回可见文件名。
 func (s *Store) ListSharesByOwner(ctx context.Context, userID int64) ([]Share, error) {
-	rows, err := s.DB.QueryContext(ctx, `SELECT s.id, s.file_id, f.name, s.token, s.created_by, s.expires_at, s.download_count, s.max_downloads, COALESCE(s.revoked_at, ''), s.created_at
+	rows, err := s.DB.QueryContext(ctx, `SELECT s.id, s.file_id, f.name, s.token, s.created_by, s.expires_at, s.download_count, s.max_downloads, COALESCE(s.revoked_at, ''), s.created_at, f.status
 FROM shares s JOIN files f ON f.id = s.file_id
 WHERE s.created_by = ? ORDER BY s.created_at DESC, s.id DESC`, userID)
 	if err != nil {
@@ -2230,9 +2545,13 @@ WHERE s.created_by = ? ORDER BY s.created_at DESC, s.id DESC`, userID)
 	shares := make([]Share, 0)
 	for rows.Next() {
 		var share Share
-		if err := rows.Scan(&share.ID, &share.FileID, &share.FileName, &share.Token, &share.CreatedBy, &share.ExpiresAt, &share.DownloadCount, &share.MaxDownloads, &share.RevokedAt, &share.CreatedAt); err != nil {
+		var fileStatus string
+		if err := rows.Scan(&share.ID, &share.FileID, &share.FileName, &share.Token, &share.CreatedBy, &share.ExpiresAt, &share.DownloadCount, &share.MaxDownloads, &share.RevokedAt, &share.CreatedAt, &fileStatus); err != nil {
 			return nil, err
 		}
+		// 文件被软删除（status != 'ready'）即视为内容缺失，供列表提示并可一键撤销。
+		// A soft-deleted file (status != 'ready') counts as missing content for the list badge.
+		share.ContentMissing = fileStatus != "ready"
 		shares = append(shares, share)
 	}
 	return shares, rows.Err()
@@ -2654,7 +2973,7 @@ FROM upload_collections WHERE token = ?`, token).Scan(&collection.ID, &collectio
 	} else if err := checkCollectionTaskQuotaTx(ctx, tx, task.UserID, task.Size); err != nil {
 		return CollectionUploadTaskState{}, err
 	}
-	_, err = tx.ExecContext(ctx, "INSERT INTO upload_tasks(id, user_id, collection_id, remark, name, size, mime, chunk_size, total_chunks, status, queue_wait_reason, storage_dir, resolve, created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, '', ?, ?)", task.ID, task.UserID, task.CollectionID, task.Remark, task.Name, task.Size, task.Mime, task.ChunkSize, task.TotalChunks, status, task.StorageDir, now, now)
+	_, err = tx.ExecContext(ctx, "INSERT INTO upload_tasks(id, user_id, collection_id, remark, name, size, mime, chunk_size, total_chunks, status, queue_wait_reason, sha256, md5, storage_dir, resolve, created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, '', ?, ?)", task.ID, task.UserID, task.CollectionID, task.Remark, task.Name, task.Size, task.Mime, task.ChunkSize, task.TotalChunks, status, task.SHA256, task.MD5, task.StorageDir, now, now)
 	if err != nil {
 		return CollectionUploadTaskState{}, err
 	}
@@ -2975,6 +3294,47 @@ func (s *Store) GetFolderByID(ctx context.Context, id, userID int64) (Folder, er
 		return Folder{}, ErrNotFound
 	}
 	return folder, err
+}
+
+// ExpandFolderFileIDs 把目录集合递归展开为其下全部 ready 文件的 ID（v030 #9：勾选目录也能分享）。
+// ExpandFolderFileIDs recursively expands folder IDs into the IDs of every ready file beneath them
+// (v030 #9: selected folders must be shareable too).
+func (s *Store) ExpandFolderFileIDs(ctx context.Context, userID int64, folderIDs []int64) ([]int64, error) {
+	ids := make([]int64, 0)
+	seen := make(map[int64]struct{})
+	for _, folderID := range folderIDs {
+		if folderID <= 0 {
+			continue
+		}
+		var path string
+		if err := s.DB.QueryRowContext(ctx, "SELECT path FROM folders WHERE id = ? AND user_id = ?", folderID, userID).Scan(&path); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				continue
+			}
+			return nil, err
+		}
+		prefix := filepath.Join("files", strconv.FormatInt(userID, 10), path) + string(filepath.Separator)
+		rows, err := s.DB.QueryContext(ctx, "SELECT id FROM files WHERE user_id = ? AND status = 'ready' AND substr(storage_path, 1, length(?)) = ?", userID, prefix, prefix)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var id int64
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			if _, exists := seen[id]; exists {
+				continue
+			}
+			seen[id] = struct{}{}
+			ids = append(ids, id)
+		}
+		if err := rows.Close(); err != nil {
+			return nil, err
+		}
+	}
+	return ids, nil
 }
 
 // ListFolders 返回用户的全部目录（前端自行构建树/面包屑）。
@@ -3516,7 +3876,7 @@ func (s *Store) Stats(ctx context.Context) (map[string]int64, error) {
 	stats := map[string]int64{}
 	now := time.Now().UTC().Format(time.RFC3339)
 	queries := map[string]string{
-		"users":          "SELECT COUNT(id) FROM users",
+		"users":          "SELECT COUNT(id) FROM users WHERE id <> 0",
 		"files":          "SELECT COUNT(id) FROM files WHERE status = 'ready'",
 		"bytes":          "SELECT COALESCE(SUM(size), 0) FROM files WHERE status = 'ready'",
 		"shares":         "SELECT COUNT(id) FROM shares WHERE revoked_at IS NULL AND expires_at > ?",

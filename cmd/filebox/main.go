@@ -349,6 +349,8 @@ func runAdmin(args []string) int {
 		return runAdminClearIPACL(args[1:])
 	case "migrate-v010-paths":
 		return runAdminMigrateV010Paths(args[1:])
+	case "migrate-collection-dirs":
+		return runAdminMigrateCollectionDirs(args[1:])
 	case "backup":
 		return runAdminBackup(args[1:])
 	case "restore":
@@ -475,6 +477,173 @@ func countPrefixFiles(ctx context.Context, db *store.Store, userID int64, prefix
 	escaped = strings.ReplaceAll(escaped, "_", `\_`)
 	_ = db.DB.QueryRowContext(ctx, "SELECT COUNT(id) FROM files WHERE user_id = ? AND storage_path LIKE ? ESCAPE '\\'", userID, escaped+"%").Scan(&count)
 	return count
+}
+
+// runAdminMigrateCollectionDirs 将收集上传的旧落盘布局 files/<uid>/uploads/<token> 迁移到 v030 的
+// files/<uid>/collections/<集合名>-<token 前 8 位>，同时改写 files.storage_path、folders.path 与
+// upload_tasks.storage_dir，并清理遗留的空 uploads 目录。启动期不做自动迁移，必须显式执行。
+// runAdminMigrateCollectionDirs migrates collection uploads from files/<uid>/uploads/<token> to
+// files/<uid>/collections/<name>-<token8>, rewriting files.storage_path, folders.path and
+// upload_tasks.storage_dir, then removing the now-empty legacy uploads directories.
+func runAdminMigrateCollectionDirs(args []string) int {
+	flags := flag.NewFlagSet("filebox admin migrate-collection-dirs", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	dataDir := flags.String("data", "./data", "data directory")
+	dryRun := flags.Bool("dry-run", false, "print the planned moves without touching disk or database")
+	logging := addLoggingFlags(flags)
+	if err := flags.Parse(args); err != nil || flags.NArg() != 0 {
+		printAdminUsage(os.Stderr)
+		return 2
+	}
+	logger, err := logging.newLogger()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 2
+	}
+	defer logger.Close()
+	result, reason := "failure", "command_failed"
+	defer func() {
+		logger.Event("ops", "operator=cli ip=- command=admin migrate-collection-dirs target=all result=%s reason=%s", result, reason)
+	}()
+
+	db, err := store.Open(*dataDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "open storage: %v\n", err)
+		return 1
+	}
+	defer db.Close()
+	ctx := context.Background()
+	migrations, err := db.ListCollectionDirMigrations(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "list collections: %v\n", err)
+		return 1
+	}
+	if len(migrations) == 0 {
+		result, reason = "success", ""
+		fmt.Fprintln(os.Stdout, "no collections; nothing to migrate")
+		return 0
+	}
+	if *dryRun {
+		for _, item := range migrations {
+			fmt.Fprintf(os.Stdout, "plan: %s -> %s\n", item.OldFolderPath, item.NewFolderPath)
+		}
+		result, reason = "success", "dry_run"
+		fmt.Fprintf(os.Stdout, "planned=%d\n", len(migrations))
+		return 0
+	}
+	backupPath := filepath.Join(*dataDir, "filebox.db.bak-collection-dirs")
+	if err := copyFile(filepath.Join(*dataDir, "filebox.db"), backupPath); err != nil {
+		fmt.Fprintf(os.Stderr, "backup database: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(os.Stdout, "database backed up to %s\n", backupPath)
+
+	filesRoot := filepath.Join(*dataDir, "files")
+	movedCount, emptyCount := 0, 0
+	for _, item := range migrations {
+		ownerDir := filepath.Join(filesRoot, strconv.FormatInt(item.OwnerID, 10))
+		oldDisk := filepath.Join(ownerDir, filepath.FromSlash(item.OldFolderPath))
+		newDisk := filepath.Join(ownerDir, filepath.FromSlash(item.NewFolderPath))
+		diskMoved := false
+		if info, statErr := os.Stat(oldDisk); statErr == nil && info.IsDir() {
+			if mkErr := os.MkdirAll(filepath.Dir(newDisk), 0o755); mkErr != nil {
+				fmt.Fprintf(os.Stderr, "create %s: %v\n", filepath.Dir(newDisk), mkErr)
+				return 1
+			}
+			if _, newErr := os.Stat(newDisk); os.IsNotExist(newErr) {
+				if renameErr := os.Rename(oldDisk, newDisk); renameErr != nil {
+					fmt.Fprintf(os.Stderr, "move %s: %v\n", oldDisk, renameErr)
+					return 1
+				}
+			} else if mergeErr := mergeDirContents(oldDisk, newDisk); mergeErr != nil {
+				fmt.Fprintf(os.Stderr, "merge %s: %v\n", oldDisk, mergeErr)
+				return 1
+			}
+			diskMoved = true
+		}
+		if _, _, _, rewriteErr := db.RewriteCollectionStoragePaths(ctx, item); rewriteErr != nil {
+			if diskMoved {
+				_ = os.Rename(newDisk, oldDisk)
+			}
+			fmt.Fprintf(os.Stderr, "rewrite collection %d: %v\n", item.CollectionID, rewriteErr)
+			return 1
+		}
+		if err := db.EnsureFolderPath(ctx, item.OwnerID, item.NewFolderPath); err != nil {
+			fmt.Fprintf(os.Stderr, "ensure folder %s: %v\n", item.NewFolderPath, err)
+		}
+		if err := db.SetFolderDisplayName(ctx, item.OwnerID, item.NewFolderPath, item.Name); err != nil {
+			fmt.Fprintf(os.Stderr, "set folder name %s: %v\n", item.NewFolderPath, err)
+		}
+		if diskMoved {
+			movedCount++
+		} else {
+			emptyCount++
+		}
+		fmt.Fprintf(os.Stdout, "collection %d: %s -> %s (disk=%v)\n", item.CollectionID, item.OldFolderPath, item.NewFolderPath, diskMoved)
+	}
+	// 清理数据目录下遗留的空 uploads 目录（内容已随收集迁移，空目录没有保留价值）。
+	// Remove legacy uploads directories that are now empty (their contents moved with the collections).
+	if entries, readErr := os.ReadDir(filesRoot); readErr == nil {
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+			legacy := filepath.Join(filesRoot, entry.Name(), "uploads")
+			if isEmptyDir(legacy) {
+				_ = os.Remove(legacy)
+			}
+		}
+	}
+	fmt.Fprintf(os.Stdout, "collections=%d migrated_disk=%d no_disk=%d\n", len(migrations), movedCount, emptyCount)
+	result, reason = "success", ""
+	return 0
+}
+
+// mergeDirContents 把 src 的内容并入 dst（同名目录递归合并，同名文件加序号避免覆盖），完成后删除 src。
+// mergeDirContents merges src into dst (recursing into same-named directories and renaming file
+// conflicts with a numeric suffix), then removes src.
+func mergeDirContents(src, dst string) error {
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		from := filepath.Join(src, entry.Name())
+		to := filepath.Join(dst, entry.Name())
+		if _, statErr := os.Stat(to); statErr == nil {
+			if entry.IsDir() {
+				if err := mergeDirContents(from, to); err != nil {
+					return err
+				}
+				continue
+			}
+			to = uniquePath(to)
+		}
+		if err := os.Rename(from, to); err != nil {
+			return err
+		}
+	}
+	return os.Remove(src)
+}
+
+// uniquePath 在目标已存在时追加 -1/-2… 序号，返回可用的路径。
+// uniquePath appends -1/-2… until the candidate path is free.
+func uniquePath(target string) string {
+	ext := filepath.Ext(target)
+	base := strings.TrimSuffix(target, ext)
+	for i := 1; ; i++ {
+		candidate := base + "-" + strconv.Itoa(i) + ext
+		if _, err := os.Stat(candidate); os.IsNotExist(err) {
+			return candidate
+		}
+	}
+}
+
+// isEmptyDir 判断目录是否存在且为空。
+// isEmptyDir reports whether the directory exists and holds no entries.
+func isEmptyDir(dir string) bool {
+	entries, err := os.ReadDir(dir)
+	return err == nil && len(entries) == 0
 }
 
 func copyFile(source, target string) error {
@@ -1728,6 +1897,7 @@ func printAdminUsage(writer io.Writer) {
 	fmt.Fprintln(writer, "       filebox admin migrate-v010-paths --data=./data   # v010 yy/mm → v011 yy-mm")
 	fmt.Fprintln(writer, "       filebox admin backup --data=./data --out=backup.tar.gz [--passphrase-file=FILE] [--encryption-key=BASE64]")
 	fmt.Fprintln(writer, "       filebox admin restore --data=./data --in=backup.tar.gz [--passphrase-file=FILE] [--force --yes]")
+	fmt.Fprintln(writer, "       filebox admin migrate-collection-dirs --data=./data [--dry-run]   # uploads/<token> -> collections/<name>-<token8>")
 }
 
 func printLocksUsage(writer io.Writer) {

@@ -21,6 +21,7 @@ import (
 
 type batchShareGroupRequest struct {
 	FileIDs        []int64 `json:"fileIds"`
+	FolderIDs      []int64 `json:"folderIds"`
 	ExpiresInHours int     `json:"expiresInHours"`
 	MaxDownloads   int     `json:"maxDownloads"`
 }
@@ -63,9 +64,25 @@ func (s *Server) createBatchShareGroup(w http.ResponseWriter, r *http.Request) {
 		s.serviceEvent(r, "batch_share", user.Username, "target=%s result=%s reason=%s", target, result, reason)
 	}()
 	var input batchShareGroupRequest
-	if !decodeJSON(w, r, &input) || len(input.FileIDs) == 0 {
+	if !decodeJSON(w, r, &input) || (len(input.FileIDs) == 0 && len(input.FolderIDs) == 0) {
 		writeError(w, http.StatusBadRequest, "请选择要分享的文件")
 		return
+	}
+	// v030 #9：勾选目录时递归展开为其下全部文件，再走整批事务校验。
+	// v030 #9: expand selected folders recursively before the whole-batch transaction.
+	if len(input.FolderIDs) > 0 {
+		expanded, expandErr := s.store.ExpandFolderFileIDs(r.Context(), user.ID, input.FolderIDs)
+		if expandErr != nil {
+			reason = "expand_failed"
+			log.Printf("expand batch share group folders: %v", expandErr)
+			writeError(w, http.StatusInternalServerError, "读取目录文件失败")
+			return
+		}
+		input.FileIDs = append(input.FileIDs, expanded...)
+		if len(input.FileIDs) == 0 {
+			writeErrorData(w, http.StatusBadRequest, "所选目录中没有可分享的文件", map[string]string{"code": "FOLDER_EMPTY"})
+			return
+		}
 	}
 	if len(input.FileIDs) > 500 {
 		writeError(w, http.StatusBadRequest, "批量操作数量超出上限（最多 500 个）")
@@ -179,10 +196,19 @@ func (s *Server) shareGroupMeta(w http.ResponseWriter, r *http.Request) {
 	}
 	result, reason = "success", ""
 	data := publicShareGroup(group)
+	// 分享者对外显示用户名而非数字 ID（v030 #10）。
+	// Expose the sharer's username instead of the numeric id (v030 #10).
+	if owner, ownerErr := s.store.GetUser(group.CreatedBy); ownerErr == nil {
+		data["createdByName"] = owner.Username
+	}
 	fileItems := make([]map[string]any, 0, len(files))
+	// v030 #9：附带用户相对路径，供分享页渲染完整目录树。
+	// v030 #9: include the user-relative path so the share page can render the full tree.
+	ownerPrefix := filepath.Join("files", strconv.FormatInt(group.CreatedBy, 10)) + string(filepath.Separator)
 	for _, item := range files {
 		fileItems = append(fileItems, map[string]any{
 			"fileId": item.FileID, "name": item.File.Name, "size": item.File.Size, "mime": item.File.Mime, "createdAt": item.File.CreatedAt,
+			"relativePath": filepath.ToSlash(strings.TrimPrefix(item.File.StoragePath, ownerPrefix)),
 		})
 	}
 	data["files"] = fileItems

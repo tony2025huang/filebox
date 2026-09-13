@@ -1,5 +1,43 @@
 # Requirement Change Log
 
+## 2026-09-12 - v031 校验阶段性能：Worker 全覆盖 + WASM 快路径
+
+- **根因**：WebCrypto 无增量摘要 API，大文件回退到手写纯 JS 流式 SHA-256（约 5–20MB/s 且独占主线程）——这正是「校验阶段只有 5–6MB/s、上传阶段 80MB/s」的原因，与限速、网络无关。
+- **A（零依赖）**：新增 `web/src/sha256Fallback.js`，把流式实现从 `api.js` 抽出为主线程与 Worker 共用的模块，消除双份代码漂移。
+- **B（快路径）**：Worker 内静态导入 `hash-wasm@4.11.0`，大文件走 WASM 流式；WASM 初始化失败（如 CSP 未放行）回退纯 JS。Worker 产物 0.67kB → 21.4kB（tree-shake 后仅 sha256）。
+- **覆盖范围**：`computeFileSHA256` 所有大小都先交 Worker（≤256MiB 原生 WebCrypto、>256MiB Worker 内流式），>256MiB 文件不再阻塞主线程。
+- **CSP**：`script-src 'self'` → `script-src 'self' 'wasm-unsafe-eval'`（仅放行 WebAssembly 编译）。
+- **测试与基准**：新增 `web/tests/sha256Fallback.test.mjs`（分组边界 0/1/55/56/57/63/64/65/127/128/129/1MiB+1，非对齐分块）、`web/tests/wasmSha256.test.mjs`（hash-wasm 与 node:crypto 逐字节一致）、`web/tests/hashBench.mjs`；实测 Node/V8 64MiB：WASM **203.7MB/s** vs 纯 JS **23.4MB/s**（8.7×，摘要一致），1GiB 约 5.0s vs 44s。
+- **构建流程变更**：`FilesView.vue` 依赖 `web/src/transferFlow.js` 的 v026 导出（`transferBatches` 等），HEAD 版本没有 → 原「构建前还原到 HEAD」的 3b 流程不再可行，改为按工作区版本构建。
+
+## 2026-09-12 - v030 收集落盘目录、分享目录树、目录上传聚合与进度明细
+
+- **#7 收集落盘目录（显式迁移）**：由 `files/<uid>/uploads/<token>` 改为 `files/<uid>/collections/<收集名>-<token 前 8 位>`（父目录固定 ASCII 便于脚本，子目录跟随用户语言并附 token 唯一后缀）；新增 CLI `filebox admin migrate-collection-dirs [--dry-run]` 迁移 `files.storage_path`/`folders.path`/`upload_tasks.storage_dir` 与磁盘目录，并清理空的遗留 `uploads`（启动期不自动迁移）。目录列表显示用户语言的收集名而非带后缀路径（其余目录仍以路径末段为准，保持 v019 语义）。
+- **#9 分享页目录树**：聚合分享公开页支持完整可折叠目录树（后端 `files[].relativePath`，前端扁平缩进渲染 + 整目录勾选参与 ZIP）。
+- **#5/#8 收集上传队列**：目录来源的文件聚合为一条可展开的目录条目（文件数、总大小、聚合进度、失败原因）；每个文件行可展开传输明细（已传/总量、实时速率 EMA、失败原因）。
+- **#4/#3**：收集密码页补齐此前完全缺失的表单样式；文件库清空成功后分页回到第 1 页。
+- **#1/#10/#11**：上传终态契约单源化（`web/src/transferStatus.js` + node 测试）；分享页显示分享者用户名；管理员按创建者列候选文件。
+- **测试**：新增 `internal/httpapi/collection_dir_migration_test.go`（迁移往返、遗留清理与显示名）与 `internal/store/collection_dirs_test.go`（目录命名安全规则）。迁移实现被测试抓出两个真实缺陷：Windows 反斜杠路径导致 0 命中（需 `replace` 归一化）、前缀判定 `substr` 长度须为「前缀长度+1」。
+
+## 2026-09-12 - v029 清空能力迁入用户管理 + 删除用户可选保留文件（回收站）
+
+- 按用户清空：新增 `POST /api/admin/users/{id}/clear-files`（仅管理员，复用 v027 两级限速 + 二次认证，支持「仅删空目录 / 删除整个存储目录」，审计 `target=user:<名>`）；`POST /api/files/clear-all` 移除全库语义，`scope != own` 返回 400 `SCOPE_UNSUPPORTED`；前端文件库清空弹窗移除「所有用户的文件（管理员）」选项。
+- 删除用户可选保留文件：`DELETE /api/admin/users/{id}` 接受 `{"keepFiles": true|false}`（**默认 false=删除文件**）。保留时把 ready 文件迁入**回收站**——归属保留账户 `users.id=0`（禁用登录、零配额、启动迁移时自动创建，用户列表/统计中隐藏），路径改写为 `files/0/<原用户名>/<原相对路径>`（重名自动加序号），磁盘同卷 rename（失败回滚）。
+- 附带修复：删除用户时清理其 `shares` 记录（`shares.created_by` 无外键，此前会残留孤儿分享）。
+- 回收站接口（仅管理员）：`GET /api/admin/recycle`（按原用户名分组，返回 `recycleUser`/`relativePath`）、`DELETE /api/admin/recycle/{id}`、`POST /api/admin/recycle/purge`；回收站文件可复用 `/api/files/{id}/download` 下载。
+- 前端：用户管理行新增「清空文件」按钮与弹窗（二次认证 + 磁盘处理），删除用户改为确认弹窗并含「同时删除该用户全部文件」复选框（默认勾选）；新增「回收站」面板（按用户名分组、单文件永久删除、清空回收站）与三语 i18n。
+- 测试：新增 `internal/httpapi/v029_test.go`（按用户清空权限/二次认证/不影响他人、保留文件迁入回收站并可从回收站删除、默认删除分支）；`v028_test.go` 全库用例改为 `TestClearAllGlobalScopeRemoved`；`cmd/filebox/main_test.go` 备份恢复用户计数排除保留账户。`go test ./...` 全绿；在线验证通过。
+
+## 2026-09-12 - v028 清空语义修复、文件库交互与分享错误区分
+
+- **清空全部文件语义修复（用户反馈 #1）**：`ClearFiles(ctx, userID, allUsers)` 取代按用户清理——单事务软删 ready 文件、删除目录记录、**删除未完成上传任务**、**按创建者软撤销分享**、重置配额；HTTP 层删除文件内容与 `tmp/<taskID>`，并按 `diskMode` 执行「仅删空目录（自底向上回收）」或「删除整个存储目录」。新增 `scope`（own/all，`all` 仅管理员，否则 403 `SCOPE_FORBIDDEN`）与 `diskMode`（empty-dirs/whole-tree）；审计/服务事件记录范围与文件·任务·分享计数。前端清空弹窗新增范围与磁盘处理单选、范围数量提示（「将清空你名下的 N 个文件」）与本地化成功提示。
+- **文件库排序（#2）**：移除工具栏排序控件，改为表头（文件名/大小/类型/上传时间）点击排序并显示 ▲/▼ 与 `aria-sort`，支持键盘操作。
+- **移除拖放上传（#3）**：文件库与集合上传页的拖放入口、提示、`dragging` 状态、`handleDrop`/`collectDrop*` 与相关样式全部移除；仅保留「选择文件 / 上传文件夹」。
+- **新建文件夹归位（#4）**：与「选择文件 / 上传文件夹」同一操作行。
+- **传输失败原因（#5）**：失败原因统一写入条目并绑定到整行 `title`（含已完成/失败页签），悬停任意位置可见具体原因。
+- **分享错误区分（#6）**：匿名分享端点返回稳定错误码 `SHARE_NOT_FOUND` / `SHARE_REVOKED` / `SHARE_EXPIRED` / `SHARE_CONTENT_MISSING`（链接不存在 vs 分享内容不存在），前端 `codeKeys` 与三语 i18n 同步；「我的分享」对内容已缺失的链接显示 `content_missing` 状态与提示。
+- 测试：新增 `internal/httpapi/v028_test.go`（5 用例）；`go test ./...` 与 web node 测试全绿；前端按「构建前临时还原 `transferFlow.js` 到 HEAD、构建后还原工作区」方式重建（产物不含 v026 未合并改动）。
+
 ## 2026-09-12 - v027 clear-all reauth hardening, trigger race, docs
 
 - `POST /api/files/clear-all` 二次认证加固：新增"尝试桶（10/分钟，含正确尝试）+ 失败桶（5/分钟，仅失败）"两级限速（key = userID + 来源 IP），失败含限速统一返回 `429 REAUTH_RATE_LIMITED`，失败计入来源 IP 失败窗口（R-IPBAN）；**刻意不接入账号级锁定**（避免持被盗 JWT 者锁死受害者账号）；`bcrypt`/TOTP 计算受尝试桶约束，无法被无限放大（修复前 12 次错误密码全 401、锁表为空）。

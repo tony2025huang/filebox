@@ -702,9 +702,9 @@ func (s *Server) collectionUploadInit(w http.ResponseWriter, r *http.Request) {
 		s.collectionFailure(w, r, input.Name, "invalid_name", http.StatusBadRequest, "文件名或文件大小无效", nil)
 		return
 	}
-	// dir 可选：相对收集目录根（uploads/<token>）的嵌套目录。复用与私有上传同一套共享校验，
+	// dir 可选：相对收集目录根（collections/<集合名>-<token 前 8 位>）的嵌套目录。复用与私有上传同一套共享校验，
 	// 逐段拒绝绝对路径、..、反斜杠、控制字符与 Windows 保留字符，杜绝穿越与逃逸。
-	// dir is optional and relative to the collection root (uploads/<token>); the shared
+	// dir is optional and relative to the collection root (collections/<name>-<token8>); the shared
 	// validator rejects absolute paths, .., backslashes, control chars and Windows reserved
 	// chars per segment, matching private uploads.
 	dir, err := validateUploadDir(input.Dir)
@@ -757,14 +757,27 @@ func (s *Server) collectionUploadInit(w http.ResponseWriter, r *http.Request) {
 		s.collectionFailure(w, r, name, "read_only", http.StatusForbidden, "收集者处于只读时段，暂不接受上传", map[string]string{"code": "READ_ONLY"})
 		return
 	}
-	storageDir := filepath.Join("files", strconv.FormatInt(owner.ID, 10), "uploads", token)
-	folderPath := filepath.ToSlash(filepath.Join("uploads", token))
+	// v030 #7：落盘目录改为 ASCII 父目录 collections/<集合名>-<token 前 8 位>；收集名跟随用户语言，
+	// 父目录固定 ASCII 便于脚本与 CLI 处理。同一 token 已存在的目录优先复用，收集改名后不会分裂成两个目录。
+	// v030 #7: store under the ASCII parent "collections/<name>-<token8>"; an existing folder for the
+	// same token is reused so renaming a collection does not split its directory.
+	collectionFolderPath := filepath.ToSlash(filepath.Join("collections", store.CollectionDirName(collection.Name, token)))
+	if existing, ok, findErr := s.store.FindCollectionFolderPath(r.Context(), owner.ID, token); findErr == nil && ok {
+		collectionFolderPath = existing
+	}
+	folderPath := collectionFolderPath
+	storageDir := filepath.Join("files", strconv.FormatInt(owner.ID, 10), filepath.FromSlash(folderPath))
 	if dir != "" {
 		storageDir = filepath.Join(storageDir, filepath.FromSlash(dir))
 		folderPath = filepath.ToSlash(filepath.Join(folderPath, filepath.FromSlash(dir)))
 	}
 	if err := s.store.EnsureFolderPath(r.Context(), owner.ID, folderPath); err != nil {
 		log.Printf("ensure collection folder: %v", err)
+	}
+	// 收集根目录的显示名用收集名（不含 token 后缀），落盘路径仍保留唯一后缀（v030 #7）。
+	// The collection root folder displays the collection name while its path keeps the unique suffix (v030 #7).
+	if err := s.store.SetFolderDisplayName(r.Context(), owner.ID, collectionFolderPath, strings.TrimSpace(collection.Name)); err != nil {
+		log.Printf("set collection folder display name: %v", err)
 	}
 	input.MD5 = strings.ToLower(strings.TrimSpace(input.MD5))
 	input.SHA256 = strings.ToLower(strings.TrimSpace(input.SHA256))
@@ -774,8 +787,8 @@ func (s *Server) collectionUploadInit(w http.ResponseWriter, r *http.Request) {
 			linked, linkErr := s.store.CreateCollectionFile(r.Context(), token, file.ID, name, strings.TrimSpace(input.Remark))
 			if linkErr == nil {
 				s.recordAudit(r, nil, "anonymous", "upload_collect", name, "success", "collection_upload")
-				s.serviceEvent(r, "upload_collect", "anonymous", "name=%s size=%d owner=%s owner_id=%d collection=%d dir=uploads/%s result=success reason=collection_upload", name, input.Size, owner.Username, owner.ID, collection.ID, maskedCollectionToken(collection.Token))
-				writeData(w, http.StatusOK, "上传完成", map[string]any{"instant": true, "file": publicFile(linked.File)})
+				s.serviceEvent(r, "upload_collect", "anonymous", "name=%s size=%d owner=%s owner_id=%d collection=%d dir=collections/%s result=success reason=collection_upload", name, input.Size, owner.Username, owner.ID, collection.ID, maskedCollectionToken(collection.Token))
+				writeData(w, http.StatusOK, "上传完成", map[string]any{"instant": true, "state": "complete", "completedAt": linked.File.CreatedAt, "file": publicFile(linked.File)})
 				return
 			}
 			if errors.Is(linkErr, store.ErrCollectionLimit) || errors.Is(linkErr, store.ErrCollectionExpired) || errors.Is(linkErr, store.ErrCollectionRevoked) {
@@ -804,7 +817,7 @@ func (s *Server) collectionUploadInit(w http.ResponseWriter, r *http.Request) {
 	if mimeType == "" {
 		mimeType = "application/octet-stream"
 	}
-	taskState, err := s.store.CreateCollectionUploadTaskWithState(r.Context(), store.UploadTask{ID: taskID, UserID: owner.ID, CollectionID: collection.ID, Remark: strings.TrimSpace(input.Remark), Name: name, Size: input.Size, ChunkSize: chunkSize, TotalChunks: totalChunks, Status: "pending", Mime: mimeType, StorageDir: storageDir}, token)
+	taskState, err := s.store.CreateCollectionUploadTaskWithState(r.Context(), store.UploadTask{ID: taskID, UserID: owner.ID, CollectionID: collection.ID, Remark: strings.TrimSpace(input.Remark), Name: name, Size: input.Size, ChunkSize: chunkSize, TotalChunks: totalChunks, Status: "pending", Mime: mimeType, SHA256: input.SHA256, MD5: input.MD5, StorageDir: storageDir}, token)
 	if errors.Is(err, store.ErrCollectionLimit) || errors.Is(err, store.ErrCollectionExpired) || errors.Is(err, store.ErrCollectionRevoked) {
 		rejectState(err)
 		return
@@ -836,6 +849,8 @@ func (s *Server) collectionUploadInit(w http.ResponseWriter, r *http.Request) {
 // collectionUploadChunk writes one anonymous chunk after token/task validation.
 // collectionUploadChunk 在 token 和任务校验后写入一个匿名分片。
 func (s *Server) collectionUploadChunk(w http.ResponseWriter, r *http.Request) {
+	releaseTaskLock := s.lockUploadTask(r.PathValue("taskID"))
+	defer releaseTaskLock()
 	collection, owner, task, err := s.loadCollectionTask(r)
 	if err != nil {
 		s.writeCollectionTaskError(w, r, err)
@@ -1005,27 +1020,29 @@ func (s *Server) collectionUploadTaskState(w http.ResponseWriter, r *http.Reques
 }
 
 func (s *Server) collectionUploadStatus(w http.ResponseWriter, r *http.Request) {
-	collection, _, task, err := s.loadCollectionTask(r)
-	if err != nil {
-		s.writeCollectionTaskError(w, r, err)
-		return
-	}
-	if !s.allowCollectionRequest(r, collection) {
-		s.collectionFailure(w, r, maskedCollectionToken(collection.Token), "rate_limited", http.StatusTooManyRequests, "请求过于频繁，请稍后重试", nil)
-		return
-	}
-	chunks, err := s.store.ListChunks(r.Context(), task.ID)
-	if err != nil {
-		log.Printf("list public upload chunks: %v", err)
-		s.collectionFailure(w, r, task.ID, "status_failed", http.StatusInternalServerError, "读取上传进度失败", nil)
-		return
-	}
-	indexes := make([]int, 0, len(chunks))
-	for index := range chunks {
-		indexes = append(indexes, index)
-	}
-	sort.Ints(indexes)
-	writeData(w, http.StatusOK, "读取成功", map[string]any{"taskId": task.ID, "chunkSize": task.ChunkSize, "totalChunks": task.TotalChunks, "uploadedChunks": indexes})
+  collection, _, task, err := s.loadCollectionTask(r)
+  if err != nil {
+    s.writeCollectionTaskError(w, r, err)
+    return
+  }
+  if !s.allowCollectionRequest(r, collection) {
+    s.collectionFailure(w, r, maskedCollectionToken(collection.Token), "rate_limited", http.StatusTooManyRequests, "请求过于频繁，请稍后重试", nil)
+    return
+  }
+  chunks, err := s.store.ListChunks(r.Context(), task.ID)
+  if err != nil {
+    log.Printf("list public upload chunks: %v", err)
+    s.collectionFailure(w, r, task.ID, "status_failed", http.StatusInternalServerError, "读取上传进度失败", nil)
+    return
+  }
+  indexes := make([]int, 0, len(chunks))
+  var uploadedBytes int64
+  for index, chunk := range chunks {
+    indexes = append(indexes, index)
+    uploadedBytes += chunk.Size
+  }
+  sort.Ints(indexes)
+  writeData(w, http.StatusOK, "读取成功", map[string]any{"taskId": task.ID, "size": task.Size, "uploadedBytes": uploadedBytes, "chunkSize": task.ChunkSize, "totalChunks": task.TotalChunks, "status": task.Status, "state": task.Status, "completedAt": task.CompletedAt, "uploadedChunks": indexes})
 }
 
 // collectionUploadComplete merges chunks, verifies hashes, and records the remark.
@@ -1069,6 +1086,12 @@ func (s *Server) collectionUploadComplete(w http.ResponseWriter, r *http.Request
 		r.URL.RawQuery = query.Encode()
 		preloaded = true
 	}
+	taskID := r.PathValue("taskID")
+	if taskID == "" {
+		taskID = r.URL.Query().Get("taskId")
+	}
+	releaseTaskLock := s.lockUploadTask(taskID)
+	defer releaseTaskLock()
 	collection, owner, task, err := s.loadCollectionTaskWithAuth(r, false)
 	if err != nil {
 		s.writeCollectionTaskError(w, r, err)
@@ -1078,7 +1101,7 @@ func (s *Server) collectionUploadComplete(w http.ResponseWriter, r *http.Request
 	defer func() {
 		if auditReason == "" {
 			s.recordAudit(r, nil, "anonymous", "upload_collect", task.Name, "success", "collection_upload")
-			s.serviceEvent(r, "upload_collect", "anonymous", "name=%s size=%d owner=%s owner_id=%d collection=%d dir=uploads/%s result=success reason=collection_upload", task.Name, task.Size, owner.Username, owner.ID, collection.ID, maskedCollectionToken(collection.Token))
+			s.serviceEvent(r, "upload_collect", "anonymous", "name=%s size=%d owner=%s owner_id=%d collection=%d dir=collections/%s result=success reason=collection_upload", task.Name, task.Size, owner.Username, owner.ID, collection.ID, maskedCollectionToken(collection.Token))
 		} else {
 			s.recordAudit(r, nil, "anonymous", "upload_collect_fail", task.Name, "failure", auditReason)
 			s.serviceEvent(r, "upload_collect_fail", "anonymous", "name=%s size=%d owner=%s owner_id=%d collection=%d dir=uploads/%s result=failure reason=%s", task.Name, task.Size, owner.Username, owner.ID, collection.ID, maskedCollectionToken(collection.Token), auditReason)
@@ -1175,7 +1198,7 @@ func (s *Server) collectionUploadComplete(w http.ResponseWriter, r *http.Request
 		return
 	}
 	shaHex, md5Hex := hex.EncodeToString(sha.Sum(nil)), hex.EncodeToString(md5Hash.Sum(nil))
-	if (input.SHA256 != "" && !strings.EqualFold(input.SHA256, shaHex)) || (input.MD5 != "" && !strings.EqualFold(input.MD5, md5Hex)) {
+	if (input.SHA256 != "" && !strings.EqualFold(input.SHA256, shaHex)) || (input.MD5 != "" && !strings.EqualFold(input.MD5, md5Hex)) || (task.SHA256 != "" && !strings.EqualFold(task.SHA256, shaHex)) || (task.MD5 != "" && !strings.EqualFold(task.MD5, md5Hex)) {
 		auditReason = "checksum_mismatch"
 		writeError(w, http.StatusBadRequest, "文件校验值不匹配")
 		return
@@ -1231,5 +1254,71 @@ func (s *Server) collectionUploadComplete(w http.ResponseWriter, r *http.Request
 	cleanupFinal = false
 	auditReason = ""
 	s.notifyFileBoxChange(task.UserID, userDirFromStorageDir(task.StorageDir))
-	writeData(w, http.StatusOK, "上传完成", publicFile(completed))
+	completedAt := completed.CreatedAt
+	if finishedTask, taskErr := s.store.GetUploadTask(r.Context(), task.ID); taskErr == nil && finishedTask.CompletedAt != "" {
+		completedAt = finishedTask.CompletedAt
+	}
+	result := publicFile(completed)
+	result["state"] = "complete"
+	result["completedAt"] = completedAt
+	writeData(w, http.StatusOK, "上传完成", result)
+}
+
+// collectionUploadCancel cancels one anonymous task and releases its queue slot immediately.
+// collectionUploadCancel 取消单个匿名任务并立即释放收集队列槽位。
+func (s *Server) collectionUploadCancel(w http.ResponseWriter, r *http.Request) {
+	token := r.PathValue("token")
+	taskID := r.PathValue("taskID")
+	releaseTaskLock := s.lockUploadTask(taskID)
+	defer releaseTaskLock()
+	collection, err := s.store.GetUploadCollectionByToken(r.Context(), token)
+	if errors.Is(err, store.ErrNotFound) {
+		s.collectionFailure(w, r, maskedCollectionToken(token), "not_found", http.StatusNotFound, "收集链接不存在", nil)
+		return
+	}
+	if err != nil {
+		log.Printf("load collection for cancel: %v", err)
+		s.collectionFailure(w, r, maskedCollectionToken(token), "load_failed", http.StatusInternalServerError, "读取收集链接失败", nil)
+		return
+	}
+	if decision := s.authorizeCollectionRequest(r, collection); decision != collectionAuthAllow {
+		s.writeCollectionAuthResult(w, r, collection, decision)
+		return
+	}
+	if !s.allowCollectionRequest(r, collection) {
+		s.collectionFailure(w, r, maskedCollectionToken(collection.Token), "rate_limited", http.StatusTooManyRequests, "请求过于频繁，请稍后重试", nil)
+		return
+	}
+	task, err := s.store.GetUploadTask(r.Context(), taskID)
+	if err != nil || task.CollectionID != collection.ID || task.UserID != collection.CreatedBy {
+		s.collectionFailure(w, r, taskID, "task_not_found", http.StatusNotFound, "上传任务不存在", nil)
+		return
+	}
+	if task.Status == "complete" {
+		writeData(w, http.StatusOK, "上传任务已完成", map[string]any{"state": "complete", "completedAt": task.CompletedAt})
+		return
+	}
+	if task.Status != "pending" && task.Status != "active" && task.Status != "queued" {
+		s.collectionFailure(w, r, taskID, "task_not_found", http.StatusNotFound, "上传任务不存在", nil)
+		return
+	}
+	if err := s.store.DeleteUploadTask(r.Context(), taskID); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			if latest, latestErr := s.store.GetUploadTask(r.Context(), taskID); latestErr == nil && latest.Status == "complete" {
+				writeData(w, http.StatusOK, "上传任务已完成", map[string]any{"state": "complete", "completedAt": latest.CompletedAt})
+				return
+			}
+			s.collectionFailure(w, r, taskID, "task_not_found", http.StatusNotFound, "上传任务不存在", nil)
+			return
+		}
+		log.Printf("cancel collection upload %s: %v", taskID, err)
+		s.collectionFailure(w, r, taskID, "cancel_failed", http.StatusInternalServerError, "取消上传失败", nil)
+		return
+	}
+	if removeErr := os.RemoveAll(filepath.Join(s.config.DataDir, "tmp", taskID)); removeErr != nil {
+		log.Printf("remove collection task temporary directory %s: %v", taskID, removeErr)
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	s.serviceEvent(r, "upload_collect_cancel", "anonymous", "task=%s collection=%s result=success", taskID, maskedCollectionToken(token))
+	writeData(w, http.StatusOK, "上传已取消", map[string]any{"state": "cancelled", "cancelledAt": now})
 }

@@ -87,7 +87,9 @@ func TestUploadCollectionLifecycleAndAnonymousUpload(t *testing.T) {
 	if len(items) != 1 || items[0].(map[string]any)["remark"] != "来自访客" || int64(items[0].(map[string]any)["fileId"].(float64)) != fileID {
 		t.Fatalf("collection files = %#v", items)
 	}
-	ownerFiles := testJSONRequest(t, handler, http.MethodGet, "/api/files?dir="+url.QueryEscape("uploads/"+collectionToken), token, "")
+	// v030 #7：收集落盘目录为 collections/<收集名>-<token 前 8 位>。
+	collectionDir := "collections/外部收集-" + collectionToken[:8]
+	ownerFiles := testJSONRequest(t, handler, http.MethodGet, "/api/files?dir="+url.QueryEscape(collectionDir), token, "")
 	if ownerFiles.Code != http.StatusOK || responseData(t, ownerFiles)["total"] != float64(1) {
 		t.Fatalf("owner collection directory = %d: %s", ownerFiles.Code, ownerFiles.Body.String())
 	}

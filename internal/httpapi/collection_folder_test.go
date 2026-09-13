@@ -90,17 +90,27 @@ func TestCollectionUploadDirUsesSharedValidation(t *testing.T) {
 	if err := db.DB.QueryRow("SELECT storage_dir FROM upload_tasks WHERE id = ?", taskID).Scan(&storageDir); err != nil {
 		t.Fatalf("task storage_dir: %v", err)
 	}
-	wantDir := filepath.ToSlash(filepath.Join("files", itoa(ownerID), "uploads", token, "folderA", "sub"))
+	// v030 #7：落盘目录为 collections/<收集名>-<token 前 8 位>，嵌套 dir 追加在其下。
+	collectionDir := "collections/dir-uploads-" + token[:8]
+	wantDir := filepath.ToSlash(filepath.Join("files", itoa(ownerID), collectionDir, "folderA", "sub"))
 	if filepath.ToSlash(storageDir) != wantDir {
 		t.Fatalf("storage_dir = %q want %q", storageDir, wantDir)
 	}
 	// EnsureFolderPath created the nested folder records for owner navigation.
 	var folders int
-	if err := db.DB.QueryRow("SELECT COUNT(*) FROM folders WHERE user_id = ? AND path = ?", ownerID, "uploads/"+token+"/folderA/sub").Scan(&folders); err != nil {
+	if err := db.DB.QueryRow("SELECT COUNT(*) FROM folders WHERE user_id = ? AND path = ?", ownerID, collectionDir+"/folderA/sub").Scan(&folders); err != nil {
 		t.Fatalf("folder lookup: %v", err)
 	}
 	if folders != 1 {
 		t.Fatalf("nested folder record missing, folders=%d", folders)
+	}
+	// 收集根目录的显示名是收集名，不带 token 后缀（v030 #7）。
+	var displayName string
+	if err := db.DB.QueryRow("SELECT name FROM folders WHERE user_id = ? AND path = ?", ownerID, collectionDir).Scan(&displayName); err != nil {
+		t.Fatalf("collection folder name lookup: %v", err)
+	}
+	if displayName != "dir-uploads" {
+		t.Fatalf("collection folder name = %q want %q", displayName, "dir-uploads")
 	}
 
 	// No traversal folders were ever persisted.
@@ -154,7 +164,7 @@ func TestCollectionUploadDirFolderNotExposedThroughMeta(t *testing.T) {
 	if meta.Code != http.StatusOK {
 		t.Fatalf("meta = %d: %s", meta.Code, meta.Body.String())
 	}
-	for _, marker := range []string{"uploads/", "storage_dir", "folderA"} {
+	for _, marker := range []string{"uploads/", "collections/", "storage_dir", "folderA"} {
 		if strings.Contains(meta.Body.String(), marker) {
 			t.Fatalf("meta leaked internal storage marker %q: %s", marker, meta.Body.String())
 		}

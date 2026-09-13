@@ -9,7 +9,7 @@
         <h1>{{ t('batchShare.title') }}</h1>
         <dl class="share-meta">
           <div><dt>{{ t('batchShare.fileCount') }}</dt><dd>{{ files.length }}</dd></div>
-          <div><dt>{{ t('share.owner') }}</dt><dd>{{ meta.createdBy ? meta.createdBy : t('batchShare.owner') }}</dd></div>
+          <div><dt>{{ t('share.owner') }}</dt><dd>{{ meta.createdByName || (meta.createdBy ? meta.createdBy : t('batchShare.owner')) }}</dd></div>
           <div><dt>{{ t('share.expiresAt') }}</dt><dd>{{ formatDate(meta.expiresAt) }}</dd></div>
           <div v-if="meta.maxDownloads"><dt>{{ t('share.availableDownloads', { count: Math.max(0, meta.maxDownloads - meta.downloadCount) }) }}</dt><dd>{{ t('share.downloads', { count: meta.downloadCount }) }}</dd></div>
         </dl>
@@ -19,11 +19,20 @@
           <button type="button" class="primary-button batch-share-zip" :disabled="downloadLoading || !selectedCount" @click="downloadZip"><Archive :size="17" /> {{ t('batchShare.downloadZip', { count: selectedCount }) }}</button>
         </div>
         <div class="batch-share-list">
-          <div v-for="file in files" :key="file.fileId" class="batch-share-file" :class="{ selected: selected.has(file.fileId) }">
-            <input type="checkbox" :checked="selected.has(file.fileId)" :aria-label="t('files.selectFile', { name: file.name })" @change="toggleSelect(file.fileId)" />
-            <div class="batch-share-file-main"><strong :title="file.name">{{ file.name }}</strong><small>{{ formatBytes(file.size) }} · {{ file.mime || t('common.none') }}</small></div>
-            <button type="button" class="secondary-button" :disabled="downloadLoading" @click="downloadOne(file)"><Download :size="16" /> {{ t('share.download') }}</button>
-          </div>
+          <template v-for="row in visibleRows" :key="row.path">
+            <div v-if="row.type === 'dir'" class="batch-share-dir" :style="{ paddingLeft: `${12 + row.depth * 18}px` }">
+              <button type="button" class="icon-button dir-toggle" :aria-expanded="row.open" :aria-label="row.name" @click="toggleDir(row.path)"><ChevronDown v-if="row.open" :size="16" /><ChevronRight v-else :size="16" /></button>
+              <input type="checkbox" :checked="row.ids.length > 0 && row.ids.every(id => selected.has(id))" :aria-label="row.name" @change="toggleSelectDir(row.ids)" />
+              <FolderOpen v-if="row.open" :size="16" class="dir-icon" /><Folder v-else :size="16" class="dir-icon" />
+              <strong :title="row.path">{{ row.name }}</strong>
+              <small>{{ t('batchShare.fileCount') }} {{ row.ids.length }}</small>
+            </div>
+            <div v-else class="batch-share-file" :class="{ selected: selected.has(row.file.fileId) }" :style="row.depth ? { paddingLeft: `${12 + row.depth * 18}px` } : null">
+              <input type="checkbox" :checked="selected.has(row.file.fileId)" :aria-label="t('files.selectFile', { name: row.file.name })" @change="toggleSelect(row.file.fileId)" />
+              <div class="batch-share-file-main"><strong :title="row.name">{{ row.name }}</strong><small>{{ formatBytes(row.file.size) }} · {{ row.file.mime || t('common.none') }}</small></div>
+              <button type="button" class="secondary-button" :disabled="downloadLoading" @click="downloadOne(row.file)"><Download :size="16" /> {{ t('share.download') }}</button>
+            </div>
+          </template>
           <div v-if="!files.length" class="empty-state compact-empty"><Archive :size="30" /><span>{{ t('batchShare.noFiles') }}</span></div>
         </div>
         <BrandFooter />
@@ -35,7 +44,7 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue'
 import { RouterLink, useRoute } from 'vue-router'
-import { Archive, ArrowLeft, Download, LoaderCircle, RefreshCw, XCircle } from 'lucide-vue-next'
+import { Archive, ArrowLeft, ChevronDown, ChevronRight, Download, Folder, FolderOpen, LoaderCircle, RefreshCw, XCircle } from 'lucide-vue-next'
 import { api, batchDownloadFilename, localizeError } from '../api'
 import { brand, loadBrand } from '../brand'
 import BrandFooter from '../components/BrandFooter.vue'
@@ -52,8 +61,40 @@ const selectedCount = computed(() => selected.value.size)
 const allSelected = computed(() => files.value.length > 0 && files.value.every(file => selected.value.has(file.fileId)))
 const downloadExhausted = computed(() => meta.value.maxDownloads > 0 && (meta.value.downloadAvailable === false || meta.value.downloadCount >= meta.value.maxDownloads))
 
+// v030 #9：按 relativePath 构建目录树，折叠状态记在 path 集合里，渲染时拍平成缩进行。
+// v030 #9: build the directory tree from relativePath; collapse state is a path set, rendered as flattened indented rows.
+const collapsedDirs = ref(new Set())
+const fileTree = computed(() => {
+  const dirs = new Map(); const roots = []
+  for (const file of files.value) {
+    const rel = String(file.relativePath || file.name || '')
+    const parts = rel.split('/').filter(Boolean)
+    const fileName = parts.pop() || file.name || rel
+    let parent = null
+    parts.forEach((part, index) => {
+      const key = parts.slice(0, index + 1).join('/')
+      if (!dirs.has(key)) { const node = { type: 'dir', name: part, path: key, depth: index, ids: [], children: [] }; dirs.set(key, node); if (parent) parent.children.push(node); else roots.push(node) }
+      parent = dirs.get(key)
+    })
+    const entry = { type: 'file', name: fileName, path: rel, depth: parts.length, file }
+    if (parent) parent.children.push(entry); else roots.push(entry)
+    for (let key = parent?.path; key; key = key.includes('/') ? key.slice(0, key.lastIndexOf('/')) : '') dirs.get(key)?.ids.push(file.fileId)
+  }
+  const sortDir = entries => { entries.sort((a, b) => (a.type === b.type ? a.name.localeCompare(b.name) : (a.type === 'dir' ? -1 : 1))); entries.forEach(entry => entry.type === 'dir' && sortDir(entry.children)) }
+  sortDir(roots)
+  return roots
+})
+const visibleRows = computed(() => {
+  const rows = []
+  const emit = entries => { for (const entry of entries) { if (entry.type === 'dir') { const open = !collapsedDirs.value.has(entry.path); rows.push({ ...entry, open }); if (open) emit(entry.children) } else rows.push(entry) } }
+  emit(fileTree.value)
+  return rows
+})
+
 function toggleSelect(id) { if (selected.value.has(id)) selected.value.delete(id); else selected.value.add(id) }
 function toggleSelectAll() { if (allSelected.value) selected.value.clear(); else files.value.forEach(file => selected.value.add(file.fileId)) }
+function toggleDir(path) { const next = new Set(collapsedDirs.value); if (next.has(path)) next.delete(path); else next.add(path); collapsedDirs.value = next }
+function toggleSelectDir(ids) { const all = ids.length > 0 && ids.every(id => selected.value.has(id)); ids.forEach(id => { if (all) selected.value.delete(id); else selected.value.add(id) }) }
 async function loadMeta() { loading.value = true; error.value = ''; downloadError.value = ''; try { const body = await api(`/api/shared-groups/${encodeURIComponent(token.value)}/meta`); meta.value = body.data; files.value = body.data.files || [] } catch (err) { error.value = err.message } finally { loading.value = false } }
 async function requestDownload(path, options, fallbackName) {
   if (downloadLoading.value) return

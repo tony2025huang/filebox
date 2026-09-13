@@ -71,6 +71,8 @@ type Server struct {
 	findUploadConflict func(context.Context, int64, string, string) (store.File, error)
 	syncMu             sync.Mutex
 	syncLocks          map[int64]*sync.Mutex
+	uploadTaskMu       sync.Mutex
+	uploadTaskLocks    map[string]*uploadTaskLock
 	syncProgressMu     sync.Mutex
 	syncProgress       map[int64]*syncRunProgress
 	// 触发同步协调器：registry 保存 enabled 触发任务快照，states 保存每个任务的
@@ -85,6 +87,40 @@ type Server struct {
 	triggerCancel   context.CancelFunc
 	triggerStarted  bool
 	triggerRunHook  func(context.Context, store.SyncTask) // 测试注入；nil 时走 executeSyncTask
+}
+
+// uploadTaskLock serializes chunk, complete, and cancel operations for one task.
+// uploadTaskLock 串行化同一任务的分片、完成和取消操作。
+type uploadTaskLock struct {
+	mu   sync.Mutex
+	refs int
+}
+
+// lockUploadTask returns a release function and removes idle lock entries.
+// lockUploadTask 返回释放函数，并清理不再使用的任务锁条目。
+func (s *Server) lockUploadTask(taskID string) func() {
+	s.uploadTaskMu.Lock()
+	if s.uploadTaskLocks == nil {
+		s.uploadTaskLocks = make(map[string]*uploadTaskLock)
+	}
+	entry := s.uploadTaskLocks[taskID]
+	if entry == nil {
+		entry = &uploadTaskLock{}
+		s.uploadTaskLocks[taskID] = entry
+	}
+	entry.refs++
+	s.uploadTaskMu.Unlock()
+
+	entry.mu.Lock()
+	return func() {
+		entry.mu.Unlock()
+		s.uploadTaskMu.Lock()
+		entry.refs--
+		if entry.refs == 0 && s.uploadTaskLocks[taskID] == entry {
+			delete(s.uploadTaskLocks, taskID)
+		}
+		s.uploadTaskMu.Unlock()
+	}
 }
 
 const uploadChunkIdleTimeout = 30 * time.Second
@@ -348,7 +384,7 @@ func NewServer(db *store.Store, config Config) *Server {
 	if config.JWTExpiry <= 0 {
 		config.JWTExpiry = 7 * 24 * time.Hour
 	}
-	server := &Server{store: db, config: config, rateLimiter: rateLimiter{buckets: make(map[int64]*rate.Limiter), lastSeen: make(map[int64]time.Time), publicBuckets: make(map[string]*rate.Limiter), publicLastSeen: make(map[string]time.Time)}, findUploadConflict: db.FindUploadConflict, syncLocks: make(map[int64]*sync.Mutex), syncProgress: make(map[int64]*syncRunProgress), triggerTasks: make(map[int64]store.SyncTask), triggerStates: make(map[int64]*syncTriggerState), triggerDebounce: 30 * time.Second}
+	server := &Server{store: db, config: config, rateLimiter: rateLimiter{buckets: make(map[int64]*rate.Limiter), lastSeen: make(map[int64]time.Time), publicBuckets: make(map[string]*rate.Limiter), publicLastSeen: make(map[string]time.Time)}, findUploadConflict: db.FindUploadConflict, syncLocks: make(map[int64]*sync.Mutex), uploadTaskLocks: make(map[string]*uploadTaskLock), syncProgress: make(map[int64]*syncRunProgress), triggerTasks: make(map[int64]store.SyncTask), triggerStates: make(map[int64]*syncTriggerState), triggerDebounce: 30 * time.Second}
 	server.startBatchDownloadTempCleanup()
 	return server
 }
@@ -467,6 +503,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/collections/{token}/upload-chunk", s.collectionUploadChunk)
 	mux.HandleFunc("GET /api/collections/{token}/upload-status/{taskID}", s.collectionUploadStatus)
 	mux.HandleFunc("GET /api/collections/{token}/upload-queue/{taskID}", s.collectionUploadTaskState)
+	mux.HandleFunc("DELETE /api/collections/{token}/upload-task/{taskID}", s.collectionUploadCancel)
 	mux.HandleFunc("POST /api/collections/{token}/upload-complete/{taskID}", s.collectionUploadComplete)
 	mux.HandleFunc("POST /api/collections/{token}/upload-complete", s.collectionUploadComplete)
 	mux.HandleFunc("POST /api/folders", s.requireAuth(s.createFolder))
@@ -507,6 +544,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/admin/users/{id}/totp", s.requireAdmin(s.updateUserTOTP))
 	mux.HandleFunc("PUT /api/admin/users/{id}/ip-acl", s.requireAdmin(s.updateUserIPACL))
 	mux.HandleFunc("GET /api/admin/locks", s.requireAdmin(s.listLocks))
+	mux.HandleFunc("POST /api/admin/users/{id}/clear-files", s.requireAdmin(s.clearUserFiles))
+	mux.HandleFunc("GET /api/admin/recycle", s.requireAdmin(s.listRecycleFiles))
+	mux.HandleFunc("POST /api/admin/recycle/purge", s.requireAdmin(s.purgeRecycleBin))
+	mux.HandleFunc("DELETE /api/admin/recycle/{id}", s.requireAdmin(s.deleteRecycleFile))
 	mux.HandleFunc("DELETE /api/admin/locks/ip/{ip}", s.requireAdmin(s.deleteIPLock))
 	mux.HandleFunc("DELETE /api/admin/locks/user/{id}", s.requireAdmin(s.deleteUserLock))
 
@@ -528,7 +569,7 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:; connect-src 'self'; frame-src 'self'; frame-ancestors 'none'")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'wasm-unsafe-eval'; img-src 'self' data:; connect-src 'self'; frame-src 'self'; frame-ancestors 'none'")
 		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
 		next.ServeHTTP(w, r)
 	})
@@ -1510,6 +1551,8 @@ func (s *Server) clearAllFiles(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		Password string `json:"password"`
 		Code     string `json:"code"`
+		Scope    string `json:"scope"`
+		DiskMode string `json:"diskMode"`
 	}
 	if !decodeJSON(w, r, &input) {
 		return
@@ -1517,11 +1560,27 @@ func (s *Server) clearAllFiles(w http.ResponseWriter, r *http.Request) {
 	if s.rejectReadOnly(w, r, user, "clear_all", "all") {
 		return
 	}
+	// v029：全库清空已从文件库移出（改为管理员在「用户管理」按用户清空），此处只保留本人范围。
+	// v029: the global wipe moved to user management (per-user clear), so only the own scope remains here.
+	if requested := strings.TrimSpace(input.Scope); requested != "" && requested != "own" {
+		writeErrorData(w, http.StatusBadRequest, "清空范围无效：请在用户管理中按用户清空", map[string]string{"code": "SCOPE_UNSUPPORTED"})
+		return
+	}
+	scope := "own"
+	diskMode := strings.TrimSpace(input.DiskMode)
+	if diskMode == "" {
+		diskMode = "empty-dirs"
+	}
+	if diskMode != "empty-dirs" && diskMode != "whole-tree" {
+		writeErrorData(w, http.StatusBadRequest, "磁盘清理方式无效", map[string]string{"code": "INVALID_DISK_MODE"})
+		return
+	}
 
+	target := scope
 	auditResult, auditReason := "failure", "clear_failed"
 	defer func() {
-		s.recordAudit(r, &user.ID, user.Username, "clear_all", "all", auditResult, auditReason)
-		s.serviceEvent(r, "clear_all", user.Username, "target=all result=%s reason=%s", auditResult, auditReason)
+		s.recordAudit(r, &user.ID, user.Username, "clear_all", target, auditResult, auditReason)
+		s.serviceEvent(r, "clear_all", user.Username, "target=%s result=%s reason=%s", target, auditResult, auditReason)
 	}()
 
 	decision, err := s.clearFilesReauth(r.Context(), r, user, input.Password, input.Code)
@@ -1550,24 +1609,127 @@ func (s *Server) clearAllFiles(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "验证失败")
 		return
 	}
-	paths, err := s.store.ClearUserFiles(r.Context(), user.ID)
+	result, err := s.store.ClearFiles(r.Context(), user.ID, scope == "all")
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusUnauthorized, "请先登录")
 		return
 	}
 	if err != nil {
-		log.Printf("clear user files: %v", err)
+		log.Printf("clear files: %v", err)
+		auditReason = "clear_failed"
 		writeError(w, http.StatusInternalServerError, "清空文件失败")
 		return
 	}
-	for _, path := range paths {
+	for _, path := range result.Paths {
 		if err := os.RemoveAll(filepath.Join(s.config.DataDir, path)); err != nil {
 			log.Printf("remove cleared file content %q: %v", path, err)
 		}
 	}
+	for _, taskID := range result.TaskIDs {
+		if err := os.RemoveAll(filepath.Join(s.config.DataDir, "tmp", taskID)); err != nil {
+			log.Printf("remove cleared upload task temp dir %q: %v", taskID, err)
+		}
+	}
+	if err := s.cleanClearedStorage(result.UserIDs, diskMode); err != nil {
+		log.Printf("clean cleared storage: %v", err)
+	}
+	for ownerID, dirs := range userDirsByOwner(result.Paths) {
+		s.notifyFileBoxChange(ownerID, dirs...)
+	}
 	auditResult, auditReason = "success", "clear_all"
-	s.notifyFileBoxChange(user.ID, userDirsFromStoragePaths(paths)...)
-	writeData(w, http.StatusOK, "文件已清空", map[string]any{"count": len(paths)})
+	s.serviceEvent(r, "clear_all", user.Username, "target=%s scope=%s disk=%s files=%d tasks=%d shares=%d result=success", target, scope, diskMode, result.FileCount, result.TaskCount, result.RevokedShares)
+	writeData(w, http.StatusOK, "文件已清空", map[string]any{
+		"count": result.FileCount, "files": result.FileCount, "tasks": result.TaskCount,
+		"shares": result.RevokedShares, "scope": scope, "diskMode": diskMode,
+	})
+}
+
+// userDirsByOwner 把文件存储路径按所属用户分组为用户相对目录（供触发同步通知）。
+// userDirsByOwner groups file storage paths into user-relative directories per owner so
+// triggered sync tasks are notified with the right user scope.
+func userDirsByOwner(paths []string) map[int64][]string {
+	result := make(map[int64][]string)
+	seen := make(map[string]struct{})
+	for _, path := range paths {
+		parts := strings.Split(filepath.ToSlash(path), "/")
+		if len(parts) < 3 || parts[0] != "files" {
+			continue
+		}
+		ownerID, err := strconv.ParseInt(parts[1], 10, 64)
+		if err != nil {
+			continue
+		}
+		dir := strings.Join(parts[2:len(parts)-1], "/")
+		key := strconv.FormatInt(ownerID, 10) + "\x00" + dir
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		result[ownerID] = append(result[ownerID], dir)
+	}
+	return result
+}
+
+// pruneEmptyDirs 自底向上删除 root 下的空目录（含 root 自身），非空目录保持不动。
+// pruneEmptyDirs removes empty directories under root bottom-up (including root itself) and
+// never touches a non-empty directory.
+func pruneEmptyDirs(root string) error {
+	if _, err := os.Stat(root); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	dirs := make([]string, 0, 8)
+	if err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return nil
+		}
+		if entry.IsDir() {
+			dirs = append(dirs, path)
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	// 深目录先删，父目录随后才能变空（WalkDir 天然自浅至深，倒序即为自深至浅）。
+	// Deepest first so parents become empty in turn (WalkDir is shallow-first, so reverse it).
+	for index := len(dirs) - 1; index >= 0; index-- {
+		if err := os.Remove(dirs[index]); err != nil && !errors.Is(err, os.ErrNotExist) {
+			if !isDirectoryNotEmpty(err) {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// isDirectoryNotEmpty 判断错误是否为"目录非空"（Windows/Linux 文案不同）。
+// isDirectoryNotEmpty reports whether the error means a non-empty directory.
+func isDirectoryNotEmpty(err error) bool {
+	message := err.Error()
+	return strings.Contains(message, "directory not empty") || strings.Contains(message, "Directory not empty")
+}
+
+// cleanClearedStorage 按磁盘模式清理受影响用户的存储目录：empty-dirs 仅删空目录，
+// whole-tree 删除用户整个 files/<uid> 目录树（上传完成路径会按需重建目录）。
+// cleanClearedStorage cleans affected users' storage by disk mode: empty-dirs removes only empty
+// directories, while whole-tree removes each user's files/<uid> tree (upload completion recreates
+// directories on demand).
+func (s *Server) cleanClearedStorage(userIDs []int64, diskMode string) error {
+	for _, ownerID := range userIDs {
+		userRoot := filepath.Join(s.config.DataDir, "files", strconv.FormatInt(ownerID, 10))
+		if diskMode == "whole-tree" {
+			if err := os.RemoveAll(userRoot); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := pruneEmptyDirs(userRoot); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func totpURL(username, secret string) string {
@@ -1736,6 +1898,8 @@ func (s *Server) uploadInit(w http.ResponseWriter, r *http.Request) {
 		rejectInit(http.StatusBadRequest, "目录无效", "invalid_dir", nil)
 		return
 	}
+	input.SHA256 = strings.ToLower(strings.TrimSpace(input.SHA256))
+	input.MD5 = strings.ToLower(strings.TrimSpace(input.MD5))
 	// v011：上传目标目录自动补齐目录记录，保证导航与上传一致。
 	// v011: upload target directories get folder records created so navigation stays consistent with uploads.
 	if err := s.store.EnsureFolderPath(r.Context(), user.ID, dir); err != nil {
@@ -1786,7 +1950,7 @@ func (s *Server) uploadInit(w http.ResponseWriter, r *http.Request) {
 	if mimeType == "" {
 		mimeType = "application/octet-stream"
 	}
-	task := store.UploadTask{ID: taskID, UserID: user.ID, Name: name, Size: input.Size, ChunkSize: chunkSize, TotalChunks: totalChunks, Status: "pending", Mime: mimeType, StorageDir: relativeDir, Resolve: input.Resolve}
+	task := store.UploadTask{ID: taskID, UserID: user.ID, Name: name, Size: input.Size, ChunkSize: chunkSize, TotalChunks: totalChunks, Status: "pending", Mime: mimeType, SHA256: input.SHA256, MD5: input.MD5, StorageDir: relativeDir, Resolve: input.Resolve}
 	if err := s.store.CreateUploadTask(r.Context(), task); err != nil {
 		var quotaErr *store.QuotaError
 		if errors.As(err, &quotaErr) {
@@ -1806,13 +1970,23 @@ func (s *Server) uploadInit(w http.ResponseWriter, r *http.Request) {
 func (s *Server) deleteUploadTask(w http.ResponseWriter, r *http.Request) {
 	user := currentUser(r.Context())
 	taskID := r.PathValue("taskID")
+	releaseTaskLock := s.lockUploadTask(taskID)
+	defer releaseTaskLock()
 	task, err := s.store.GetUploadTask(r.Context(), taskID)
-	if errors.Is(err, store.ErrNotFound) || err != nil || (task.UserID != user.ID && user.Role != "admin") || task.Status != "pending" {
+	if errors.Is(err, store.ErrNotFound) || err != nil || (task.UserID != user.ID && user.Role != "admin") || (task.Status != "pending" && task.Status != "active" && task.Status != "queued" && task.Status != "complete") {
 		writeErrorData(w, http.StatusNotFound, "上传任务不存在", map[string]string{"code": "task_not_found"})
+		return
+	}
+	if task.Status == "complete" {
+		writeData(w, http.StatusOK, "上传任务已完成", map[string]any{"state": "complete", "completedAt": task.CompletedAt})
 		return
 	}
 	if err := s.store.DeleteUploadTask(r.Context(), taskID); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
+			if latest, latestErr := s.store.GetUploadTask(r.Context(), taskID); latestErr == nil && latest.Status == "complete" {
+				writeData(w, http.StatusOK, "上传任务已完成", map[string]any{"state": "complete", "completedAt": latest.CompletedAt})
+				return
+			}
 			writeErrorData(w, http.StatusNotFound, "上传任务不存在", map[string]string{"code": "task_not_found"})
 			return
 		}
@@ -1824,7 +1998,7 @@ func (s *Server) deleteUploadTask(w http.ResponseWriter, r *http.Request) {
 		log.Printf("remove upload task temporary directory %s: %v", taskID, err)
 	}
 	s.serviceEvent(r, "upload_cancel", user.Username, "task=%s result=success", taskID)
-	writeData(w, http.StatusOK, "上传任务已删除", nil)
+	writeData(w, http.StatusOK, "上传任务已删除", map[string]any{"state": "cancelled", "cancelledAt": time.Now().UTC().Format(time.RFC3339)})
 }
 
 func (s *Server) uploadChunk(w http.ResponseWriter, r *http.Request) {
@@ -1832,6 +2006,8 @@ func (s *Server) uploadChunk(w http.ResponseWriter, r *http.Request) {
 	// uploadChunk streams one exact-sized chunk to disk and records its hash.
 	user := currentUser(r.Context())
 	taskID := r.PathValue("taskID")
+	releaseTaskLock := s.lockUploadTask(taskID)
+	defer releaseTaskLock()
 	if s.rejectReadOnly(w, r, user, "upload_chunk", taskID) {
 		return
 	}
@@ -2122,6 +2298,8 @@ func (s *Server) uploadStatus(w http.ResponseWriter, r *http.Request) {
 		"chunkSize":      task.ChunkSize,
 		"totalChunks":    task.TotalChunks,
 		"status":         task.Status,
+		"state":          task.Status,
+		"completedAt":    task.CompletedAt,
 		"uploadedChunks": indices,
 	})
 }
@@ -2239,7 +2417,7 @@ func (s *Server) checkInstantUpload(w http.ResponseWriter, r *http.Request) {
 		// Without a name there is no same-name check; keep pure instant-upload semantics.
 		s.recordAudit(r, &user.ID, user.Username, "upload", input.Name, "success", "instant")
 		s.serviceEvent(r, "upload", user.Username, "name=%s size=%d result=success reason=instant", input.Name, input.Size)
-		writeData(w, http.StatusOK, "检查完成", map[string]any{"instant": true, "file": publicFile(file)})
+		writeData(w, http.StatusOK, "检查完成", map[string]any{"instant": true, "state": "complete", "completedAt": file.CreatedAt, "file": publicFile(file)})
 		return
 	}
 	conflict, conflictErr := s.findUploadConflict(r.Context(), user.ID, relativeDir, name)
@@ -2263,7 +2441,7 @@ func (s *Server) checkInstantUpload(w http.ResponseWriter, r *http.Request) {
 	// Instant-upload hit: record an audit row (previously nothing was logged); the target is the submitted name.
 	s.recordAudit(r, &user.ID, user.Username, "upload", input.Name, "success", "instant")
 	s.serviceEvent(r, "upload", user.Username, "name=%s size=%d result=success reason=instant", input.Name, input.Size)
-	writeData(w, http.StatusOK, "检查完成", map[string]any{"instant": true, "file": publicFile(file)})
+	writeData(w, http.StatusOK, "检查完成", map[string]any{"instant": true, "state": "complete", "completedAt": file.CreatedAt, "file": publicFile(file)})
 }
 
 // validateOrEmpty 返回去除首尾空白后的字符串（非法时返回空）。
@@ -2275,6 +2453,8 @@ func (s *Server) completeUpload(w http.ResponseWriter, r *http.Request) {
 	// completeUpload computes SHA-256 and MD5 from temporary content, then commits the record and final path in one transaction.
 	user := currentUser(r.Context())
 	taskID := r.PathValue("taskID")
+	releaseTaskLock := s.lockUploadTask(taskID)
+	defer releaseTaskLock()
 	if s.rejectReadOnly(w, r, user, "upload", taskID) {
 		return
 	}
@@ -2368,7 +2548,7 @@ func (s *Server) completeUpload(w http.ResponseWriter, r *http.Request) {
 	shaHex := hex.EncodeToString(sha.Sum(nil))
 	md5Hex := hex.EncodeToString(md5Hash.Sum(nil))
 	hashSummary = shaHex[:12]
-	if (input.SHA256 != "" && !strings.EqualFold(input.SHA256, shaHex)) || (input.MD5 != "" && !strings.EqualFold(input.MD5, md5Hex)) {
+	if (input.SHA256 != "" && !strings.EqualFold(input.SHA256, shaHex)) || (input.MD5 != "" && !strings.EqualFold(input.MD5, md5Hex)) || (task.SHA256 != "" && !strings.EqualFold(task.SHA256, shaHex)) || (task.MD5 != "" && !strings.EqualFold(task.MD5, md5Hex)) {
 		auditReason = "checksum_mismatch"
 		serviceReason = "checksum_mismatch"
 		writeError(w, http.StatusBadRequest, "文件校验值不匹配")
@@ -2425,7 +2605,14 @@ func (s *Server) completeUpload(w http.ResponseWriter, r *http.Request) {
 	auditResult, auditReason = "success", ""
 	serviceResult, serviceReason = "success", ""
 	s.notifyFileBoxChange(user.ID, userDirFromStorageDir(task.StorageDir))
-	writeData(w, http.StatusOK, "上传完成", publicFile(completed))
+	completedAt := completed.CreatedAt
+	if finishedTask, taskErr := s.store.GetUploadTask(r.Context(), task.ID); taskErr == nil && finishedTask.CompletedAt != "" {
+		completedAt = finishedTask.CompletedAt
+	}
+	result := publicFile(completed)
+	result["state"] = "complete"
+	result["completedAt"] = completedAt
+	writeData(w, http.StatusOK, "上传完成", result)
 }
 
 func (s *Server) listFiles(w http.ResponseWriter, r *http.Request) {
@@ -2458,7 +2645,23 @@ func (s *Server) listFiles(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "排序方向无效")
 		return
 	}
-	files, total, err := s.store.ListFilesSorted(r.Context(), user.ID, user.Role == "admin", strings.TrimSpace(r.URL.Query().Get("keyword")), dir, fileSort, page, pageSize)
+	// v030 #11：管理员可带 userId 查看指定用户的文件（用于编辑他人聚合分享时挑选其名下文件）。
+	// v030 #11: administrators may scope the listing to one user (used when editing someone else's
+	// aggregate share and picking files owned by that share's creator).
+	scopeUserID := user.ID
+	scopeAdmin := user.Role == "admin"
+	if scopeAdmin {
+		if raw := strings.TrimSpace(r.URL.Query().Get("userId")); raw != "" {
+			if target, parseErr := strconv.ParseInt(raw, 10, 64); parseErr == nil && target > 0 {
+				scopeUserID = target
+				scopeAdmin = false
+			} else {
+				writeErrorData(w, http.StatusBadRequest, "用户编号无效", map[string]string{"code": "INVALID_USER_ID"})
+				return
+			}
+		}
+	}
+	files, total, err := s.store.ListFilesSorted(r.Context(), scopeUserID, scopeAdmin, strings.TrimSpace(r.URL.Query().Get("keyword")), dir, fileSort, page, pageSize)
 	if err != nil {
 		log.Printf("list files: %v", err)
 		writeError(w, http.StatusInternalServerError, "获取文件列表失败")
@@ -2704,12 +2907,28 @@ func (s *Server) batchShare(w http.ResponseWriter, r *http.Request) {
 	}()
 	var input struct {
 		FileIDs        []int64 `json:"fileIds"`
+		FolderIDs      []int64 `json:"folderIds"`
 		ExpiresInHours int     `json:"expiresInHours"`
 		MaxDownloads   int     `json:"maxDownloads"`
 	}
-	if !decodeJSON(w, r, &input) || len(input.FileIDs) == 0 {
+	if !decodeJSON(w, r, &input) || (len(input.FileIDs) == 0 && len(input.FolderIDs) == 0) {
 		writeError(w, http.StatusBadRequest, "请选择要分享的文件")
 		return
+	}
+	// v030 #9：勾选的目录递归展开为其下全部文件，与直接勾选的文件合并（任一越权仍整批拒绝）。
+	// v030 #9: selected folders expand recursively into their files and merge with the picked ones.
+	if len(input.FolderIDs) > 0 {
+		expanded, expandErr := s.store.ExpandFolderFileIDs(r.Context(), user.ID, input.FolderIDs)
+		if expandErr != nil {
+			log.Printf("expand batch share folders: %v", expandErr)
+			writeError(w, http.StatusInternalServerError, "读取目录文件失败")
+			return
+		}
+		input.FileIDs = append(input.FileIDs, expanded...)
+		if len(input.FileIDs) == 0 {
+			writeErrorData(w, http.StatusBadRequest, "所选目录中没有可分享的文件", map[string]string{"code": "FOLDER_EMPTY"})
+			return
+		}
 	}
 	// 限制批量操作数量，避免单次请求消耗过多资源。
 	// Cap batch size to avoid excessive resource use from a single request.
@@ -3124,6 +3343,11 @@ func shareStatus(share store.Share) (string, int64) {
 	if share.RevokedAt != "" {
 		return "revoked", 0
 	}
+	// 内容缺失优先于有效期/Limit 展示：链接即使未过期也取不到内容，需提示并可撤销。
+	// Missing content outranks expiry/limit: even an unexpired link cannot serve anything.
+	if share.ContentMissing {
+		return "content_missing", 0
+	}
 	deadline, err := time.Parse(time.RFC3339, share.ExpiresAt)
 	if err != nil || !time.Now().UTC().Before(deadline) {
 		return "expired", 0
@@ -3140,7 +3364,7 @@ func managedShareData(share store.Share) map[string]any {
 		"id": share.ID, "fileId": share.FileID, "fileName": share.FileName, "token": share.Token, "url": "/" + share.Token,
 		"createdBy": share.CreatedBy, "expiresAt": share.ExpiresAt, "downloadCount": share.DownloadCount,
 		"maxDownloads": share.MaxDownloads, "revokedAt": share.RevokedAt, "createdAt": share.CreatedAt,
-		"status": status, "remainingSeconds": remaining,
+		"status": status, "remainingSeconds": remaining, "contentMissing": share.ContentMissing,
 	}
 }
 
@@ -3363,25 +3587,30 @@ func (s *Server) shareMeta(w http.ResponseWriter, r *http.Request) {
 		if revoked, revokedErr := s.store.GetShareByTokenIncludingRevoked(r.Context(), token); revokedErr == nil && revoked.RevokedAt != "" {
 			shareOwnerID = &revoked.CreatedBy
 			reason = "share_revoked"
+			writeErrorData(w, http.StatusNotFound, "分享链接已撤销", map[string]string{"code": "SHARE_REVOKED"})
+			return
 		}
-		writeError(w, http.StatusNotFound, "分享不存在")
+		reason = "share_not_found"
+		writeErrorData(w, http.StatusNotFound, "分享链接不存在", map[string]string{"code": "SHARE_NOT_FOUND"})
 		return
 	}
 	shareOwnerID = &share.CreatedBy
 	file, err := s.store.FindFile(r.Context(), share.FileID)
 	if err != nil || file.Status != "ready" {
-		reason = "share_denied"
-		writeError(w, http.StatusNotFound, "分享不存在")
+		// 链接本身有效，但文件已被删除/不可用——与"链接不存在"区分开，避免误导访客。
+		// The link is valid but its file is gone/unavailable: distinguish it from a missing link.
+		reason = "share_content_missing"
+		writeErrorData(w, http.StatusNotFound, "分享内容不存在", map[string]string{"code": "SHARE_CONTENT_MISSING"})
 		return
 	}
 	if !shareActive(share.ExpiresAt) {
 		reason = "share_expired"
-		writeError(w, http.StatusNotFound, "分享链接已过期")
+		writeErrorData(w, http.StatusNotFound, "分享链接已过期", map[string]string{"code": "SHARE_EXPIRED"})
 		return
 	}
 	owner, err := s.store.GetUser(share.CreatedBy)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "分享不存在")
+		writeErrorData(w, http.StatusNotFound, "分享链接不存在", map[string]string{"code": "SHARE_NOT_FOUND"})
 		return
 	}
 	result, reason = "success", ""
@@ -3422,11 +3651,13 @@ func writeShareAuthorizationError(w http.ResponseWriter, reason string) {
 	case "share_limit":
 		writeErrorData(w, http.StatusForbidden, "分享次数已用完", map[string]string{"code": "SHARE_DOWNLOAD_LIMIT"})
 	case "share_expired":
-		writeError(w, http.StatusForbidden, "分享链接已过期")
+		writeErrorData(w, http.StatusForbidden, "分享链接已过期", map[string]string{"code": "SHARE_EXPIRED"})
 	case "share_revoked":
-		writeError(w, http.StatusForbidden, "分享已撤销")
+		writeErrorData(w, http.StatusForbidden, "分享链接已撤销", map[string]string{"code": "SHARE_REVOKED"})
+	case "share_content_missing":
+		writeErrorData(w, http.StatusNotFound, "分享内容不存在", map[string]string{"code": "SHARE_CONTENT_MISSING"})
 	default:
-		writeError(w, http.StatusForbidden, "分享下载被拒绝")
+		writeErrorData(w, http.StatusForbidden, "分享下载被拒绝", map[string]string{"code": "SHARE_DENIED"})
 	}
 }
 
@@ -3451,22 +3682,22 @@ func (s *Server) shareDownload(w http.ResponseWriter, r *http.Request) {
 		if revoked, revokedErr := s.store.GetShareByTokenIncludingRevoked(r.Context(), token); revokedErr == nil && revoked.RevokedAt != "" {
 			shareOwnerID = &revoked.CreatedBy
 			reason = "share_revoked"
-			writeError(w, http.StatusNotFound, "分享不存在")
+			writeErrorData(w, http.StatusNotFound, "分享链接已撤销", map[string]string{"code": "SHARE_REVOKED"})
 			return
 		}
-		writeError(w, http.StatusNotFound, "分享不存在")
+		writeErrorData(w, http.StatusNotFound, "分享链接不存在", map[string]string{"code": "SHARE_NOT_FOUND"})
 		return
 	}
 	shareOwnerID = &share.CreatedBy
 	file, err := s.store.FindFile(r.Context(), share.FileID)
 	if err != nil || file.Status != "ready" {
-		reason = "share_denied"
-		writeError(w, http.StatusNotFound, "分享不存在")
+		reason = "share_content_missing"
+		writeErrorData(w, http.StatusNotFound, "分享内容不存在", map[string]string{"code": "SHARE_CONTENT_MISSING"})
 		return
 	}
 	if !shareActive(share.ExpiresAt) {
 		reason = "share_expired"
-		writeError(w, http.StatusForbidden, "分享链接已过期")
+		writeErrorData(w, http.StatusForbidden, "分享链接已过期", map[string]string{"code": "SHARE_EXPIRED"})
 		return
 	}
 	// 先打开文件再扣次：物理内容缺失（404）不应消耗分享额度，避免"0 字节交付烧光次数"。
@@ -3475,7 +3706,7 @@ func (s *Server) shareDownload(w http.ResponseWriter, r *http.Request) {
 	handle, err := os.Open(filepath.Join(s.config.DataDir, file.StoragePath))
 	if err != nil {
 		reason = "content_not_found"
-		writeError(w, http.StatusNotFound, "文件内容不存在")
+		writeErrorData(w, http.StatusNotFound, "分享内容不存在", map[string]string{"code": "SHARE_CONTENT_MISSING"})
 		return
 	}
 	defer handle.Close()
@@ -3517,28 +3748,28 @@ func (s *Server) sharePreview(w http.ResponseWriter, r *http.Request) {
 		if revoked, revokedErr := s.store.GetShareByTokenIncludingRevoked(r.Context(), token); revokedErr == nil && revoked.RevokedAt != "" {
 			shareOwnerID = &revoked.CreatedBy
 			reason = "share_revoked"
-			writeError(w, http.StatusNotFound, "分享不存在")
+			writeErrorData(w, http.StatusNotFound, "分享链接已撤销", map[string]string{"code": "SHARE_REVOKED"})
 			return
 		}
-		writeError(w, http.StatusNotFound, "分享不存在")
+		writeErrorData(w, http.StatusNotFound, "分享链接不存在", map[string]string{"code": "SHARE_NOT_FOUND"})
 		return
 	}
 	shareOwnerID = &share.CreatedBy
 	file, err := s.store.FindFile(r.Context(), share.FileID)
 	if err != nil || file.Status != "ready" {
-		reason = "share_denied"
-		writeError(w, http.StatusNotFound, "分享不存在")
+		reason = "share_content_missing"
+		writeErrorData(w, http.StatusNotFound, "分享内容不存在", map[string]string{"code": "SHARE_CONTENT_MISSING"})
 		return
 	}
 	if !shareActive(share.ExpiresAt) {
 		reason = "share_expired"
-		writeError(w, http.StatusForbidden, "分享链接已过期")
+		writeErrorData(w, http.StatusForbidden, "分享链接已过期", map[string]string{"code": "SHARE_EXPIRED"})
 		return
 	}
 	handle, err := os.Open(filepath.Join(s.config.DataDir, file.StoragePath))
 	if err != nil {
 		reason = "content_not_found"
-		writeError(w, http.StatusNotFound, "文件内容不存在")
+		writeErrorData(w, http.StatusNotFound, "分享内容不存在", map[string]string{"code": "SHARE_CONTENT_MISSING"})
 		return
 	}
 	defer handle.Close()
@@ -3852,7 +4083,15 @@ func (s *Server) listFolders(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		folder.Path = normalized
-		folder.Name = filepath.Base(normalized)
+		// 收集目录（collections/<收集名>-<token 前 8 位>）的落盘路径带 token 唯一后缀，界面必须显示用户语言的
+		// 收集名，因此这类目录以记录里的 name 为准（v030 #7）。其他目录仍以路径末段为准，保持 v019 的既有
+		// 语义：历史 name 字段可能是过期数据，路径才是权威来源。
+		// Collection directories keep a unique token suffix on disk but must display the user-language
+		// collection name, so they trust the stored name (v030 #7). Every other directory still derives
+		// its name from the path basename, preserving the v019 rule that legacy names may be stale.
+		if !strings.HasPrefix(normalized, "collections/") || strings.TrimSpace(folder.Name) == "" {
+			folder.Name = filepath.Base(normalized)
+		}
 		items = append(items, folder)
 	}
 	sort.SliceStable(items, func(i, j int) bool {
@@ -4366,12 +4605,24 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request) {
 	if user, getErr := s.store.GetUser(id); getErr == nil {
 		target = user.Username
 	}
-	paths, err := s.store.DeleteUser(r.Context(), id)
+	// keepFiles 默认 false（删除文件）；true 时把该用户文件迁入回收站（按原用户名目录存放）。
+	// keepFiles defaults to false (delete files); true moves them into the recycle bin grouped by username.
+	var input struct {
+		KeepFiles *bool `json:"keepFiles"`
+	}
+	if r.Body != nil && r.ContentLength != 0 {
+		if !decodeJSON(w, r, &input) {
+			return
+		}
+	}
+	keepFiles := input.KeepFiles != nil && *input.KeepFiles
+	paths, moves, recycled, err := s.store.DeleteUser(r.Context(), id, keepFiles)
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "用户不存在")
 		return
 	}
 	if err != nil {
+		log.Printf("delete user: %v", err)
 		writeError(w, http.StatusInternalServerError, "删除用户失败")
 		return
 	}
@@ -4380,11 +4631,193 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request) {
 			log.Printf("remove deleted user file: %v", removeErr)
 		}
 	}
-	if removeErr := os.RemoveAll(filepath.Join(s.config.DataDir, "files", strconv.FormatInt(id, 10))); removeErr != nil {
-		log.Printf("remove deleted user directory: %v", removeErr)
+	if !keepFiles {
+		if removeErr := os.RemoveAll(filepath.Join(s.config.DataDir, "files", strconv.FormatInt(id, 10))); removeErr != nil {
+			log.Printf("remove deleted user directory: %v", removeErr)
+		}
+	} else {
+		// 文件已迁入回收站，原用户目录只剩空壳：回收空目录（含残留的 tmp 分片）。
+		// Files moved to the recycle bin; prune the empty user tree plus leftover temp chunks.
+		if pruneErr := pruneEmptyDirs(filepath.Join(s.config.DataDir, "files", strconv.FormatInt(id, 10))); pruneErr != nil {
+			log.Printf("prune deleted user directory: %v", pruneErr)
+		}
+		if removeErr := os.RemoveAll(filepath.Join(s.config.DataDir, "files", strconv.FormatInt(id, 10))); removeErr != nil {
+			log.Printf("remove deleted user directory: %v", removeErr)
+		}
+		_ = moves
 	}
-	s.serviceEvent(r, "user_delete", admin.Username, "target=%s result=success", target)
-	writeData(w, http.StatusOK, "用户已删除", nil)
+	s.serviceEvent(r, "user_delete", admin.Username, "target=%s keep_files=%t recycled=%d result=success", target, keepFiles, recycled)
+	writeData(w, http.StatusOK, "用户已删除", map[string]any{"recycled": recycled, "keepFiles": keepFiles})
+}
+
+// clearUserFiles 让管理员清空指定用户的全部文件（v029：该能力从文件库迁移到用户管理）。
+// clearUserFiles lets an administrator clear one user's files (v029: moved from the file library).
+func (s *Server) clearUserFiles(w http.ResponseWriter, r *http.Request) {
+	admin := currentUser(r.Context())
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || id <= store.RecycleOwnerID {
+		writeErrorData(w, http.StatusBadRequest, "用户编号无效", map[string]string{"code": "INVALID_USER_ID"})
+		return
+	}
+	var input struct {
+		Password string `json:"password"`
+		Code     string `json:"code"`
+		DiskMode string `json:"diskMode"`
+	}
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	diskMode := strings.TrimSpace(input.DiskMode)
+	if diskMode == "" {
+		diskMode = "empty-dirs"
+	}
+	if diskMode != "empty-dirs" && diskMode != "whole-tree" {
+		writeErrorData(w, http.StatusBadRequest, "磁盘清理方式无效", map[string]string{"code": "INVALID_DISK_MODE"})
+		return
+	}
+	target, getErr := s.store.GetUser(id)
+	if errors.Is(getErr, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "用户不存在")
+		return
+	}
+	if getErr != nil {
+		log.Printf("load clear target: %v", getErr)
+		writeError(w, http.StatusInternalServerError, "清空文件失败")
+		return
+	}
+	auditResult, auditReason := "failure", "clear_failed"
+	defer func() {
+		s.recordAudit(r, &admin.ID, admin.Username, "clear_all", "user:"+target.Username, auditResult, auditReason)
+		s.serviceEvent(r, "clear_all", admin.Username, "target=%s result=%s reason=%s", target.Username, auditResult, auditReason)
+	}()
+	// 二次认证沿用 clear-all 的两级限速与"失败计入 IP、不锁账号"策略。
+	// Re-authentication reuses the clear-all buckets and the "IP failure, never lock the account" policy.
+	decision, err := s.clearFilesReauth(r.Context(), r, admin, input.Password, input.Code)
+	if err != nil {
+		log.Printf("clear user files reauth: %v", err)
+		auditReason = "reauth_failed"
+		writeError(w, http.StatusInternalServerError, "清空文件失败")
+		return
+	}
+	if decision != clearReauthAllow {
+		if settings, settingsErr := s.store.GetLogSettings(r.Context()); settingsErr != nil {
+			log.Printf("clear user files reauth settings: %v", settingsErr)
+		} else {
+			s.recordIPFailure(r, settings)
+		}
+		if decision == clearReauthRateLimited {
+			auditReason = "reauth_rate_limited"
+			writeErrorData(w, http.StatusTooManyRequests, "验证尝试过于频繁，请稍后重试", map[string]string{"code": "REAUTH_RATE_LIMITED"})
+			return
+		}
+		auditReason = "reauth_failed"
+		writeError(w, http.StatusUnauthorized, "验证失败")
+		return
+	}
+	result, err := s.store.ClearFiles(r.Context(), id, false)
+	if err != nil {
+		log.Printf("clear user files: %v", err)
+		auditReason = "clear_failed"
+		writeError(w, http.StatusInternalServerError, "清空文件失败")
+		return
+	}
+	for _, path := range result.Paths {
+		if removeErr := os.RemoveAll(filepath.Join(s.config.DataDir, path)); removeErr != nil {
+			log.Printf("remove cleared file content %q: %v", path, removeErr)
+		}
+	}
+	for _, taskID := range result.TaskIDs {
+		if removeErr := os.RemoveAll(filepath.Join(s.config.DataDir, "tmp", taskID)); removeErr != nil {
+			log.Printf("remove cleared upload task temp dir %q: %v", taskID, removeErr)
+		}
+	}
+	if err := s.cleanClearedStorage([]int64{id}, diskMode); err != nil {
+		log.Printf("clean cleared user storage: %v", err)
+	}
+	for ownerID, dirs := range userDirsByOwner(result.Paths) {
+		s.notifyFileBoxChange(ownerID, dirs...)
+	}
+	auditResult, auditReason = "success", "clear_all"
+	s.serviceEvent(r, "clear_all", admin.Username, "target=%s disk=%s files=%d tasks=%d shares=%d result=success", target.Username, diskMode, result.FileCount, result.TaskCount, result.RevokedShares)
+	writeData(w, http.StatusOK, "已清空该用户文件", map[string]any{
+		"count": result.FileCount, "files": result.FileCount, "tasks": result.TaskCount,
+		"shares": result.RevokedShares, "diskMode": diskMode, "username": target.Username,
+	})
+}
+
+// listRecycleFiles 返回回收站内的文件（管理员），按原用户名目录分组展示。
+// listRecycleFiles lists recycle-bin files for administrators, grouped by the former username directory.
+func (s *Server) listRecycleFiles(w http.ResponseWriter, r *http.Request) {
+	items, err := s.store.ListRecycleFiles(r.Context())
+	if err != nil {
+		log.Printf("list recycle files: %v", err)
+		writeError(w, http.StatusInternalServerError, "读取回收站失败")
+		return
+	}
+	result := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		result = append(result, map[string]any{
+			"id": item.ID, "name": item.Name, "size": item.Size, "mime": item.Mime, "createdAt": item.CreatedAt,
+			"recycleUser": item.RecycleOwner, "relativePath": item.RelativePath,
+		})
+	}
+	writeData(w, http.StatusOK, "获取成功", map[string]any{"items": result, "total": len(result)})
+}
+
+// purgeRecycleBin 清空回收站（管理员）：删除全部记录与物理内容。
+// purgeRecycleBin empties the recycle bin (administrators): records and physical content.
+func (s *Server) purgeRecycleBin(w http.ResponseWriter, r *http.Request) {
+	admin := currentUser(r.Context())
+	paths, err := s.store.PurgeRecycle(r.Context())
+	if err != nil {
+		log.Printf("purge recycle bin: %v", err)
+		writeError(w, http.StatusInternalServerError, "清空回收站失败")
+		return
+	}
+	for _, path := range paths {
+		if removeErr := os.Remove(filepath.Join(s.config.DataDir, path)); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+			log.Printf("remove recycled file %q: %v", path, removeErr)
+		}
+	}
+	if pruneErr := pruneEmptyDirs(filepath.Join(s.config.DataDir, "files", strconv.Itoa(store.RecycleOwnerID))); pruneErr != nil {
+		log.Printf("prune recycle directory: %v", pruneErr)
+	}
+	s.serviceEvent(r, "recycle_purge", admin.Username, "count=%d result=success", len(paths))
+	writeData(w, http.StatusOK, "回收站已清空", map[string]any{"count": len(paths)})
+}
+
+// deleteRecycleFile 永久删除回收站内的单个文件（管理员）。
+// deleteRecycleFile permanently removes one recycle-bin file (administrators).
+func (s *Server) deleteRecycleFile(w http.ResponseWriter, r *http.Request) {
+	admin := currentUser(r.Context())
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "文件编号无效")
+		return
+	}
+	file, err := s.store.FindFile(r.Context(), id)
+	if err != nil || file.UserID != store.RecycleOwnerID {
+		writeError(w, http.StatusNotFound, "文件不存在")
+		return
+	}
+	path, err := s.store.DeleteFile(r.Context(), id, store.RecycleOwnerID, true)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "文件不存在")
+		return
+	}
+	if err != nil {
+		log.Printf("delete recycle file: %v", err)
+		writeError(w, http.StatusInternalServerError, "删除文件失败")
+		return
+	}
+	if removeErr := os.Remove(filepath.Join(s.config.DataDir, path)); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+		log.Printf("remove recycled file %q: %v", path, removeErr)
+	}
+	if pruneErr := pruneEmptyDirs(filepath.Join(s.config.DataDir, "files", strconv.Itoa(store.RecycleOwnerID))); pruneErr != nil {
+		log.Printf("prune recycle directory: %v", pruneErr)
+	}
+	s.serviceEvent(r, "recycle_delete", admin.Username, "target=%d result=success", id)
+	writeData(w, http.StatusOK, "文件已删除", nil)
 }
 
 func (s *Server) stats(w http.ResponseWriter, r *http.Request) {

@@ -532,7 +532,9 @@ func TestBackupCheckpointsWALAndRestoreValidatesDatabase(t *testing.T) {
 	}
 	defer restoredDB.Close()
 	var users int
-	if err := restoredDB.DB.QueryRow("SELECT count(*) FROM users").Scan(&users); err != nil {
+	// 排除回收站保留账户（users.id=0，v029 起随 schema 自动创建）。
+	// Exclude the reserved recycle-bin owner (users.id=0, created since v029).
+	if err := restoredDB.DB.QueryRow("SELECT count(*) FROM users WHERE id <> 0").Scan(&users); err != nil {
 		t.Fatal(err)
 	}
 	if users != 1 {
