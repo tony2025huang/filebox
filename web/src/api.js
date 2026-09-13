@@ -35,21 +35,57 @@ codeKeys.HOST_KEY_CHANGED = 'sync.hostKeyChanged'
 
 import { createSha256 } from './sha256Fallback.js'
 
+// lastHashInfo 记录最近一次校验实际使用的实现与实测吞吐（v034 诊断）。没有它就无法回答
+// 「5GB 文件到底是 WASM 还是纯 JS 兜底」「瓶颈是读盘还是计算」这类问题。
+// lastHashInfo records which implementation hashed the last file plus read/hash timings (v034).
+let lastHashInfo = null
+
+// getLastHashInfo 返回最近一次 computeFileSHA256 的诊断信息。
+// getLastHashInfo returns the diagnostics of the most recent computeFileSHA256 call.
+export function getLastHashInfo() { return lastHashInfo }
+
+const HASH_INFO_LOG_BYTES = 64 * 1024 * 1024
+
+function reportHashInfo(engine, bytes, elapsedMs, detail = {}, onInfo = () => {}) {
+  const mbps = Number((bytes / 1024 / 1024 / Math.max(elapsedMs, 1) * 1000).toFixed(1))
+  const info = {
+    engine, bytes, elapsedMs: Math.round(elapsedMs), mbps,
+    readMs: Number(detail.readMs) || 0, hashMs: Number(detail.hashMs) || 0,
+    wasmError: typeof detail.wasmError === 'string' ? detail.wasmError : ''
+  }
+  lastHashInfo = info
+  try { onInfo(info) } catch {}
+  // 只对大文件打印，避免小文件刷屏；这行日志就是定位性能问题的直接证据。
+  // Only log for large files to avoid spam; this line is the direct evidence for a perf investigation.
+  if (bytes >= HASH_INFO_LOG_BYTES) {
+    const timing = info.readMs || info.hashMs ? ` read=${info.readMs}ms hash=${info.hashMs}ms` : ''
+    const why = info.wasmError ? ` wasmError=${JSON.stringify(info.wasmError)}` : ''
+    console.info(`[filebox] checksum engine=${info.engine} bytes=${info.bytes} elapsed=${info.elapsedMs}ms rate=${info.mbps}MB/s${timing}${why}`)
+  }
+  return info
+}
+
 // computeFileSHA256 computes the client checksum and reports progress for the upload row.
-// computeFileSHA256 计算客户端 SHA-256，并向上传项报告校验进度。
-export async function computeFileSHA256(file, onProgress = () => {}) {
+// computeFileSHA256 计算客户端 SHA-256，并向上传项报告校验进度；第三个参数回传本次实际使用的
+// 实现与读写耗时拆分（engine/readMs/hashMs/wasmError）。
+export async function computeFileSHA256(file, onProgress = () => {}, onInfo = () => {}) {
   // 校验一律优先在 Worker 内进行：≤ 阈值走原生 WebCrypto，超过阈值走 Worker 内的流式哈希
   // （WASM 优先、纯 JS 兜底），因此主线程任何时候都不会被哈希阻塞（v031-A/B）。
   // Hashing always runs in the worker first: native WebCrypto up to the threshold, streaming
   // (WASM first, pure JS fallback) beyond it, so the main thread never blocks (v031-A/B).
   const directLimit = Number(globalThis.FILEBOX_HASH_DIRECT_LIMIT) || 256 * 1024 * 1024
+  const started = Date.now()
   const viaWorker = await computeSHA256InWorker(file, onProgress, directLimit)
-  if (viaWorker) return viaWorker
+  if (viaWorker) {
+    reportHashInfo(viaWorker.engine, file.size, Date.now() - started, viaWorker, onInfo)
+    return viaWorker.hex
+  }
 
   if (file.size <= directLimit) {
     onProgress(0)
     const digest = await crypto.subtle.digest('SHA-256', await file.arrayBuffer())
     onProgress(100)
+    reportHashInfo('native-main', file.size, Date.now() - started, {}, onInfo)
     return [...new Uint8Array(digest)].map(value => value.toString(16).padStart(2, '0')).join('')
   }
 
@@ -62,7 +98,9 @@ export async function computeFileSHA256(file, onProgress = () => {}) {
     hasher.update(block)
     onProgress(Math.round(Math.min(file.size, offset + block.length) / file.size * 100))
   }
-  return hasher.digest()
+  const hex = hasher.digest()
+  reportHashInfo('js-main', file.size, Date.now() - started, {}, onInfo)
+  return hex
 }
 
 // computeSHA256InWorker 在 Web Worker 内计算文件摘要；Worker 不可用、报错或超时（大文件按 120 秒/256MiB
@@ -74,7 +112,8 @@ function computeSHA256InWorker(file, onProgress, directLimit) {
     let worker
     try {
       worker = new Worker(new URL('./hashWorker.js', import.meta.url), { type: 'module' })
-    } catch {
+    } catch (err) {
+      console.warn(`[filebox] checksum worker could not start (${String((err && err.message) || err)}); hashing on the main thread`)
       resolve(null)
       return
     }
@@ -91,7 +130,12 @@ function computeSHA256InWorker(file, onProgress, directLimit) {
     // Watchdog: a replaced worker chunk can fail to load without firing onerror. No message within 90s
     // means the worker is unusable. Failure path only: normal throughput is unchanged.
     let lastMessageAt = Date.now()
-    watchdog = setInterval(() => { if (Date.now() - lastMessageAt > 90000) finish(null) }, 5000)
+    watchdog = setInterval(() => {
+      if (Date.now() - lastMessageAt > 90000) {
+        console.warn('[filebox] checksum worker reported nothing for 90s; falling back')
+        finish(null)
+      }
+    }, 5000)
     const streamingBlocks = Math.max(0, Math.ceil((file.size - directLimit) / (256 * 1024 * 1024)))
     const timer = setTimeout(() => finish(null), 120000 + streamingBlocks * 30000)
     worker.onmessage = event => {
@@ -102,10 +146,24 @@ function computeSHA256InWorker(file, onProgress, directLimit) {
         onProgress(Number(data.value) || 0)
         return
       }
-      finish(data.type === 'done' && typeof data.hex === 'string' ? data.hex : null)
+      finish(data.type === 'done' && typeof data.hex === 'string'
+        ? {
+            hex: data.hex,
+            engine: data.engine || 'worker',
+            readMs: Number(data.readMs) || 0,
+            hashMs: Number(data.hashMs) || 0,
+            wasmError: typeof data.wasmError === 'string' ? data.wasmError : ''
+          }
+        : null)
     }
-    worker.onerror = () => finish(null)
-    worker.onmessageerror = () => finish(null)
+    worker.onerror = () => {
+      console.warn('[filebox] checksum worker failed to load (stale asset or blocked module?); falling back')
+      finish(null)
+    }
+    worker.onmessageerror = () => {
+      console.warn('[filebox] checksum worker sent an unreadable message; falling back')
+      finish(null)
+    }
     try {
       worker.postMessage({ id, file, directLimit })
     } catch {
