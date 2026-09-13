@@ -46,6 +46,43 @@ export function getLastHashInfo() { return lastHashInfo }
 
 const HASH_INFO_LOG_BYTES = 64 * 1024 * 1024
 
+// showHashOverlay 把诊断直接显示在页面上：部分 DevTools 级别设置会隐藏 info 日志，页面上则不会被忽略。
+// showHashOverlay renders the diagnostics on the page because some DevTools level settings hide info logs.
+function hashOverlayNode() {
+  if (typeof document === 'undefined' || !document.body) return null
+  let node = document.getElementById('filebox-hash-diag')
+  if (!node) {
+    node = document.createElement('div')
+    node.id = 'filebox-hash-diag'
+    node.style.cssText = 'position:fixed;right:12px;bottom:12px;z-index:2147483647;max-width:60vw;padding:8px 10px;border-radius:6px;background:rgba(16,42,67,.92);color:#fff;font:12px/1.5 ui-monospace,Consolas,monospace;white-space:pre-wrap'
+    document.body.appendChild(node)
+  }
+  return node
+}
+
+// showHashProgress 在计算过程中实时显示百分比与瞬时速率，便于直接观察"校验速率是多少"。
+// showHashProgress shows the live percentage and instantaneous rate while hashing.
+function showHashProgress(percent, bytes, startedAt) {
+  try {
+    const node = hashOverlayNode()
+    if (!node) return
+    const elapsed = Math.max(1, Date.now() - startedAt)
+    const mbps = (bytes * (percent / 100) / 1024 / 1024 / (elapsed / 1000)).toFixed(1)
+    node.textContent = `校验中 ${percent}% · ${mbps} MB/s（平均）\n已用 ${(elapsed / 1000).toFixed(1)}s · 共 ${(bytes / 1024 / 1024 / 1024).toFixed(2)} GiB`
+  } catch {}
+}
+
+function showHashOverlay(info) {
+  try {
+    if (typeof document === 'undefined' || !document.body) return
+    const node = hashOverlayNode()
+    if (!node) return
+    const timing = info.readMs || info.hashMs ? `\nread ${info.readMs}ms / hash ${info.hashMs}ms` : ''
+    const why = info.wasmError ? `\nwasmError: ${info.wasmError}` : ''
+    node.textContent = `校验完成 · 引擎 ${info.engine}\n${(info.bytes / 1024 / 1024 / 1024).toFixed(2)} GiB · ${info.mbps} MB/s · ${(info.elapsedMs / 1000).toFixed(1)}s${timing}${why}`
+  } catch {}
+}
+
 function reportHashInfo(engine, bytes, elapsedMs, detail = {}, onInfo = () => {}) {
   const mbps = Number((bytes / 1024 / 1024 / Math.max(elapsedMs, 1) * 1000).toFixed(1))
   const info = {
@@ -55,12 +92,13 @@ function reportHashInfo(engine, bytes, elapsedMs, detail = {}, onInfo = () => {}
   }
   lastHashInfo = info
   try { onInfo(info) } catch {}
-  // 只对大文件打印，避免小文件刷屏；这行日志就是定位性能问题的直接证据。
-  // Only log for large files to avoid spam; this line is the direct evidence for a perf investigation.
+  // 只对大文件报告，避免小文件刷屏。用 warn 级而非 info：即使控制台级别被收窄到 Warnings+Errors 也能看到。
+  // Only report for large files. warn (not info) so it stays visible even when the console level is narrowed.
   if (bytes >= HASH_INFO_LOG_BYTES) {
     const timing = info.readMs || info.hashMs ? ` read=${info.readMs}ms hash=${info.hashMs}ms` : ''
     const why = info.wasmError ? ` wasmError=${JSON.stringify(info.wasmError)}` : ''
-    console.info(`[filebox] checksum engine=${info.engine} bytes=${info.bytes} elapsed=${info.elapsedMs}ms rate=${info.mbps}MB/s${timing}${why}`)
+    console.warn(`[filebox] checksum engine=${info.engine} bytes=${info.bytes} elapsed=${info.elapsedMs}ms rate=${info.mbps}MB/s${timing}${why}`)
+    showHashOverlay(info)
   }
   return info
 }
@@ -75,7 +113,11 @@ export async function computeFileSHA256(file, onProgress = () => {}, onInfo = ()
   // (WASM first, pure JS fallback) beyond it, so the main thread never blocks (v031-A/B).
   const directLimit = Number(globalThis.FILEBOX_HASH_DIRECT_LIMIT) || 256 * 1024 * 1024
   const started = Date.now()
-  const viaWorker = await computeSHA256InWorker(file, onProgress, directLimit)
+  // 大文件把进度同时画到页面诊断框里，这样"校验速率是多少"不必依赖控制台。
+  // Large files mirror their progress into the on-page diagnostic box so the rate is visible without DevTools.
+  const isLarge = file.size >= HASH_INFO_LOG_BYTES
+  const reportProgress = isLarge ? value => { onProgress(value); showHashProgress(value, file.size, started) } : onProgress
+  const viaWorker = await computeSHA256InWorker(file, reportProgress, directLimit)
   if (viaWorker) {
     reportHashInfo(viaWorker.engine, file.size, Date.now() - started, viaWorker, onInfo)
     return viaWorker.hex
