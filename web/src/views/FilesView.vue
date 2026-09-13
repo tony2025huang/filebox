@@ -465,7 +465,11 @@ async function queueFiles(list, options = {}) {
       for (const candidate of candidates) {
         if (candidate.sha256) {
           fileHash ||= await computeFileSHA256(file)
-          if (fileHash !== candidate.sha256) continue
+          // 超过客户端上限的文件会跳过哈希（返回空串），此时退化为按 名称+大小+目录+相对路径 匹配，
+          // 以便断点续传仍能恢复（v036）。
+          // Files over the client hash limit return an empty string; fall back to matching by
+          // name+size+dir+relPath so resume still restores (v036).
+          if (fileHash && fileHash !== candidate.sha256) continue
         }
         restored = candidate
         break

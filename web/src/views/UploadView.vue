@@ -408,6 +408,9 @@ async function uploadOne(item) {
     const sha256 = await computeFileSHA256(item.file, progress => { if (isCurrent(item, generation)) item.progress = Math.round(progress * 0.2) }, info => { if (isCurrent(item, generation)) { item.hashEngine = info.engine; item.hashRate = info.mbps } })
     throwIfStale(item, generation, controller.signal)
     item.sha256 = sha256
+    // 超过客户端上限的文件跳过校验（sha256 为空）时，补齐进度前段，避免进度条长时间停在 0（v036）。
+    // When the client hash is skipped (empty sha256) advance past the hash segment of the progress bar.
+    if (!sha256 && isCurrent(item, generation)) item.progress = 20
     const init = await request(`/api/collections/${encodeURIComponent(uploadToken)}/upload-init`, { method: 'POST', body: JSON.stringify({ name: item.file.name, size: item.file.size, chunkSize: item.file.size <= 8 * 1024 * 1024 ? item.file.size : 4 * 1024 * 1024, sha256, mime: item.file.type, remark: remark.value, ...(item.dir ? { dir: item.dir } : {}) }), signal: controller.signal })
     if (init.data?.instant) {
        if (item.cancelRequested) { item.state = 'cancelled'; item.running = false; item.status = t('files.finishedCancelled'); return null }

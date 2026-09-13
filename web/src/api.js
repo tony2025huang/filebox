@@ -33,6 +33,7 @@ const shareMessageKeys = { '分享已撤销': 'error.shareRevoked', '分享下�
 
 codeKeys.HOST_KEY_CHANGED = 'sync.hostKeyChanged'
 
+import { clientHashLimit, shouldSkipClientHash } from './hashPolicy.js'
 import { createSha256 } from './sha256Fallback.js'
 
 // lastHashInfo 记录最近一次校验实际使用的实现与实测吞吐（v034 诊断）。没有它就无法回答
@@ -45,6 +46,8 @@ let lastHashInfo = null
 export function getLastHashInfo() { return lastHashInfo }
 
 const HASH_INFO_LOG_BYTES = 64 * 1024 * 1024
+
+// 客户端哈希上限与跳过判定见 ./hashPolicy.js（阈值与边界由 web/tests/hashPolicy.test.mjs 覆盖）。
 
 // showHashOverlay 把诊断直接显示在页面上：部分 DevTools 级别设置会隐藏 info 日志，页面上则不会被忽略。
 // showHashOverlay renders the diagnostics on the page because some DevTools level settings hide info logs.
@@ -77,6 +80,10 @@ function showHashOverlay(info) {
     if (typeof document === 'undefined' || !document.body) return
     const node = hashOverlayNode()
     if (!node) return
+    if (info.engine === 'skipped') {
+      node.textContent = `校验已跳过 · ${(info.bytes / 1024 / 1024 / 1024).toFixed(2)} GiB\n超过客户端上限（${(clientHashLimit() / 1024 / 1024 / 1024).toFixed(1)} GiB），由服务端计算 sha256`
+      return
+    }
     const timing = info.readMs || info.hashMs ? `\nread ${info.readMs}ms / hash ${info.hashMs}ms` : ''
     const why = info.wasmError ? `\nwasmError: ${info.wasmError}` : ''
     node.textContent = `校验完成 · 引擎 ${info.engine}\n${(info.bytes / 1024 / 1024 / 1024).toFixed(2)} GiB · ${info.mbps} MB/s · ${(info.elapsedMs / 1000).toFixed(1)}s${timing}${why}`
@@ -95,9 +102,13 @@ function reportHashInfo(engine, bytes, elapsedMs, detail = {}, onInfo = () => {}
   // 只对大文件报告，避免小文件刷屏。用 warn 级而非 info：即使控制台级别被收窄到 Warnings+Errors 也能看到。
   // Only report for large files. warn (not info) so it stays visible even when the console level is narrowed.
   if (bytes >= HASH_INFO_LOG_BYTES) {
-    const timing = info.readMs || info.hashMs ? ` read=${info.readMs}ms hash=${info.hashMs}ms` : ''
-    const why = info.wasmError ? ` wasmError=${JSON.stringify(info.wasmError)}` : ''
-    console.warn(`[filebox] checksum engine=${info.engine} bytes=${info.bytes} elapsed=${info.elapsedMs}ms rate=${info.mbps}MB/s${timing}${why}`)
+    if (info.engine === 'skipped') {
+      console.warn(`[filebox] checksum skipped bytes=${bytes} (over the ${(clientHashLimit() / 1024 / 1024 / 1024).toFixed(1)}GiB client limit); the server computes sha256`)
+    } else {
+      const timing = info.readMs || info.hashMs ? ` read=${info.readMs}ms hash=${info.hashMs}ms` : ''
+      const why = info.wasmError ? ` wasmError=${JSON.stringify(info.wasmError)}` : ''
+      console.warn(`[filebox] checksum engine=${info.engine} bytes=${info.bytes} elapsed=${info.elapsedMs}ms rate=${info.mbps}MB/s${timing}${why}`)
+    }
     showHashOverlay(info)
   }
   return info
@@ -113,6 +124,12 @@ export async function computeFileSHA256(file, onProgress = () => {}, onInfo = ()
   // (WASM first, pure JS fallback) beyond it, so the main thread never blocks (v031-A/B).
   const directLimit = Number(globalThis.FILEBOX_HASH_DIRECT_LIMIT) || 256 * 1024 * 1024
   const started = Date.now()
+  // 超过客户端上限的文件直接跳过：服务端会算出权威哈希并在完成响应里回传（v036）。
+  // Files over the client limit are skipped outright; the server computes the hash and returns it (v036).
+  if (shouldSkipClientHash(file.size)) {
+    reportHashInfo('skipped', file.size, 0, {}, onInfo)
+    return ''
+  }
   // 大文件把进度同时画到页面诊断框里，这样"校验速率是多少"不必依赖控制台。
   // Large files mirror their progress into the on-page diagnostic box so the rate is visible without DevTools.
   const isLarge = file.size >= HASH_INFO_LOG_BYTES
