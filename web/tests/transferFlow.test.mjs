@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { FairStartGate, emaRate, isUploadTerminal, needsBulkConfirm, uploadResultKind } from '../src/transferFlow.js'
+import { FairStartGate, advanceTransferGeneration, completionTimestamp, emaRate, isTransferGenerationCurrent, isUploadTerminal, needsBulkConfirm, transferBatches, uploadResultKind } from '../src/transferFlow.js'
 
 test('needsBulkConfirm: only plain (non-folder-confirmed) batches over 50 need the generic confirm', () => {
   assert.equal(needsBulkConfirm(51, false), true)
@@ -86,4 +86,27 @@ test('FairStartGate: re-acquire after release respects remaining capacity', asyn
   gate.release()
   const secondOk = await second
   assert.equal(secondOk, true)
+})
+
+test('transfer generations invalidate stale continuations', () => {
+  const item = {}
+  const first = advanceTransferGeneration(item)
+  const second = advanceTransferGeneration(item)
+  assert.equal(first, 1)
+  assert.equal(second, 2)
+  assert.equal(isTransferGenerationCurrent(item, first), false)
+  assert.equal(isTransferGenerationCurrent(item, second), true)
+})
+
+test('transferBatches preserves order and bounds each batch', () => {
+  const values = [1, 2, 3, 4, 5]
+  assert.deepEqual(transferBatches(values, 2), [[1, 2], [3, 4], [5]])
+  assert.deepEqual(values, [1, 2, 3, 4, 5])
+  assert.throws(() => transferBatches(values, 0), /positive integer/)
+})
+
+test('completionTimestamp prefers authoritative response fields', () => {
+  assert.equal(completionTimestamp({ completedAt: 'server-complete', createdAt: 'file-created' }, 'fallback'), 'server-complete')
+  assert.equal(completionTimestamp({ file: { createdAt: 'file-created' } }, 'fallback'), 'file-created')
+  assert.equal(completionTimestamp({}, 'fallback'), 'fallback')
 })

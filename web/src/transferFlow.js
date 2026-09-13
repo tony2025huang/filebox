@@ -53,6 +53,31 @@ export function emaRate(previous, instant, alpha = 0.4) {
  * A waiter whose `valid` predicate turns false is resolved as "not granted"
  * without consuming a slot (e.g. the upload was paused/terminated while
  * queued), so no unbounded timer work is created for large batches. */
+/** Increment the operation generation so late network continuations become stale. */
+export function advanceTransferGeneration(item) {
+  item.transferGeneration = (Number(item.transferGeneration) || 0) + 1
+  return item.transferGeneration
+}
+
+/** Return whether an async continuation still belongs to the current operation. */
+export function isTransferGenerationCurrent(item, generation) {
+  return Boolean(item && Number(item.transferGeneration) === Number(generation))
+}
+
+/** Split an iterable into ordered, bounded batches without mutating the input. */
+export function transferBatches(items, batchSize = 32) {
+  if (!Number.isInteger(batchSize) || batchSize < 1) throw new Error('transferBatches requires a positive integer batch size')
+  const values = Array.from(items || [])
+  const batches = []
+  for (let index = 0; index < values.length; index += batchSize) batches.push(values.slice(index, index + batchSize))
+  return batches
+}
+
+/** Prefer server completion metadata, then nested file metadata, then a fallback. */
+export function completionTimestamp(data, fallback = '') {
+  return data?.completedAt || data?.file?.completedAt || data?.file?.createdAt || data?.createdAt || fallback
+}
+
 export class FairStartGate {
   constructor(limit) {
     if (!Number.isInteger(limit) || limit < 1) throw new Error('FairStartGate requires a positive integer limit')
