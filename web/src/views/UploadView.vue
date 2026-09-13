@@ -40,7 +40,7 @@
                   <div class="transfer-name"><strong :title="row.item.label">{{ row.item.label }}</strong><span>{{ row.item.status }}</span></div>
                   <div class="progress-track"><span :style="{ width: row.item.progress + '%' }"></span></div>
                   <div v-if="row.item.state === 'queued'" class="collection-queued-card" role="status" aria-live="polite"><div class="collection-queued-heading"><LoaderCircle :size="16" class="spin" /><strong>{{ t('collection.queued') }}</strong></div><div class="collection-queued-details"><span v-if="row.item.queuePosition !== null">{{ t('collection.queuePosition', { position: row.item.queuePosition }) }}</span><span>{{ t('collection.waitReasonLabel') }}: {{ queueWaitReasonLabel(row.item) }}</span></div></div>
-                  <div v-if="row.item.showDetail" class="collection-queued-card" role="status" aria-live="polite"><div class="collection-queued-details"><span>{{ formatBytes(row.loaded) }} / {{ formatBytes(row.item.file.size) }}</span><span v-if="row.rate > 0">{{ formatBytes(row.rate) }}/s</span><span>{{ row.item.progress }}%</span></div><div v-if="row.item.failed" class="collection-queued-details"><span>{{ row.item.status }}</span></div></div>
+                  <div v-if="row.item.showDetail" class="collection-queued-card" role="status" aria-live="polite"><div class="collection-queued-details"><span>{{ formatBytes(row.loaded) }} / {{ formatBytes(row.item.file.size) }}</span><span v-if="row.rate > 0">{{ formatBytes(row.rate) }}/s</span><span>{{ row.item.progress }}%</span><span v-if="row.item.hashEngine">{{ row.item.hashEngine }} · {{ row.item.hashRate }} MB/s</span></div><div v-if="row.item.failed" class="collection-queued-details"><span>{{ row.item.status }}</span></div></div>
                 </div>
                 <span class="transfer-percent">{{ row.item.failed ? '' : row.item.progress + '%' }}<small v-if="row.rate > 0">{{ formatBytes(row.rate) }}/s</small></span><button v-if="row.item.state !== 'completed' && row.item.state !== 'cancelled'" type="button" class="icon-button" :title="t('common.cancel')" :aria-label="t('common.cancel')" @click.stop="cancelUpload(row.item)"><X :size="15" /></button>
               </div>
@@ -169,7 +169,7 @@ function createUploadItem(file, relPath = '') {
   const dirParts = parts.length > 1 ? parts.slice(0, -1) : []
   const dir = dirParts.join('/')
   const label = dir ? `${dir}/${file.name}` : file.name
-  return { id: `${Date.now()}-${Math.random()}-${file.name}`, file, relPath: path !== file.name ? path : '', dir, label, progress: 0, status: t('collection.pending'), failed: false, state: 'pending', taskId: '', sha256: '', chunkSize: 0, totalChunks: 0, queuePosition: null, waitReason: '', pollTimer: null, pollController: null, pollFailures: 0, uploadController: null, running: false, cancelRequested: false, generation: viewGeneration.value, groupKey: '', rate: 0, rateSample: null, showDetail: false }
+  return { id: `${Date.now()}-${Math.random()}-${file.name}`, file, relPath: path !== file.name ? path : '', dir, label, progress: 0, status: t('collection.pending'), failed: false, state: 'pending', taskId: '', sha256: '', chunkSize: 0, totalChunks: 0, queuePosition: null, waitReason: '', pollTimer: null, pollController: null, pollFailures: 0, uploadController: null, running: false, cancelRequested: false, generation: viewGeneration.value, groupId: '', groupKey: '', rate: 0, rateSample: null, showDetail: false, hashEngine: '', hashRate: 0 }
 }
 function addFiles(files) {
   let added = 0
@@ -405,7 +405,7 @@ async function uploadOne(item) {
   item.uploadController = controller; item.running = true; item.state = 'pending'
   try {
     item.status = t('collection.checksum')
-    const sha256 = await computeFileSHA256(item.file, progress => { if (isCurrent(item, generation)) item.progress = Math.round(progress * 0.2) })
+    const sha256 = await computeFileSHA256(item.file, progress => { if (isCurrent(item, generation)) item.progress = Math.round(progress * 0.2) }, info => { if (isCurrent(item, generation)) { item.hashEngine = info.engine; item.hashRate = info.mbps } })
     throwIfStale(item, generation, controller.signal)
     item.sha256 = sha256
     const init = await request(`/api/collections/${encodeURIComponent(uploadToken)}/upload-init`, { method: 'POST', body: JSON.stringify({ name: item.file.name, size: item.file.size, chunkSize: item.file.size <= 8 * 1024 * 1024 ? item.file.size : 4 * 1024 * 1024, sha256, mime: item.file.type, remark: remark.value, ...(item.dir ? { dir: item.dir } : {}) }), signal: controller.signal })

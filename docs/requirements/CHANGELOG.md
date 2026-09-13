@@ -1,5 +1,11 @@
 # Requirement Change Log
 
+## 2026-09-12 - v032 校验可观测性 + 大文件降级路径修复
+
+- **诊断**：`computeFileSHA256` 新增第三个回调并导出 `getLastHashInfo()`，回传本次校验**实际使用**的实现（`native` / `wasm` / `js` / `js-main`）与实测吞吐；≥64MiB 的文件额外打印一行控制台日志 `[filebox] checksum engine=… bytes=… elapsed=…ms rate=…MB/s`；收集上传页的展开明细显示引擎与速率。用于判定「5GB 文件只有 10–30MB/s」是 WASM 未生效（纯 JS 兜底 ~21MB/s）还是磁盘读取受限。
+- **降级路径修复**：此前 Worker 超时/报错会回退到**主线程**整文件重算，大文件会冻结界面数分钟；现在大文件先在同一 Worker 内用纯 JS 重试一次（`forceEngine: 'js'`，超时预算按 ~8MB/s 最差情况给两倍余量），只有重试也失败才走主线程。
+- **测试与基准**：新增 `web/tests/hashWorker.test.mjs`（桩 `self` 在 Node 内驱动 Worker 模块，覆盖 native / WASM / 强制纯 JS 三条路径的 engine 上报与摘要一致性）；`web/tests/hashCeilings.mjs` 记录各实现上限（WASM ~190MB/s、纯 JS ~21MB/s、原生 OpenSSL ~1450MB/s；分块 8/32/64MiB 无差别，`Blob.slice().arrayBuffer()` 开销约 10%）。
+
 ## 2026-09-12 - v031 校验阶段性能：Worker 全覆盖 + WASM 快路径
 
 - **根因**：WebCrypto 无增量摘要 API，大文件回退到手写纯 JS 流式 SHA-256（约 5–20MB/s 且独占主线程）——这正是「校验阶段只有 5–6MB/s、上传阶段 80MB/s」的原因，与限速、网络无关。
