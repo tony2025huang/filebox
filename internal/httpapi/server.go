@@ -2607,15 +2607,27 @@ func (s *Server) completeUpload(w http.ResponseWriter, r *http.Request) {
 		}
 		// 覆盖上传直接原子 rename 替换旧文件（POSIX/Windows 均替换存在目标），
 		// 旧物理文件由替换本身清除，不存在"先删旧文件再放新文件"的竞态窗口（G5）。
-		// Overwrite uploads rename over the old file atomically (both platforms replace an
-		// existing target), so the old file is cleared by the replacement itself and no
-		// delete-then-place race window exists (G5).
-		return os.Rename(mergedPath, finalPath)
+		// 注意：真正的落盘走 placeUploadFile —— 它会退避重试并在改名持续失败时复制兜底，
+		// 因为 Windows 上刚写完的大文件可能被安全软件短暂持有（v038）。
+		// The actual placement goes through placeUploadFile, which retries with backoff and falls back to
+		// a copy because Windows security software can briefly hold a freshly written large file (v038).
+		return placeUploadFile(mergedPath, finalPath)
 	})
 	if err != nil {
 		log.Printf("complete upload: %v", err)
 		auditReason = "save_failed"
 		serviceReason = "save_failed"
+		// 落盘/组装失败是终局失败：分片已合并、重试必须重传，保留任务没有续传价值，却会按整份文件
+		// 占用用户配额（历史上因此出现"已用远低于配额却提示配额不足"）。这里立即释放任务与临时文件。
+		// A placement failure is terminal: the merged chunks cannot be resumed and keeping the task would
+		// reserve the full file size against the user's quota, so release it immediately (v038).
+		releaseErr := s.store.DeleteUploadTask(r.Context(), task.ID)
+		_ = os.RemoveAll(filepath.Join(s.config.DataDir, "tmp", task.ID))
+		if releaseErr != nil {
+			log.Printf("upload_release result=failure task=%s name=%s size=%d err=%v", task.ID, task.Name, task.Size, releaseErr)
+		} else {
+			log.Printf("upload_release result=success task=%s reason=complete_failed name=%s size=%d", task.ID, task.Name, task.Size)
+		}
 		writeError(w, http.StatusInternalServerError, "保存文件记录失败")
 		return
 	}
