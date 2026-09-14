@@ -103,7 +103,7 @@ func (s *Server) createCollection(w http.ResponseWriter, r *http.Request) {
 		MaxUploads:   input.MaxUploads, MaxFileBytes: input.MaxFileBytes,
 	})
 	if err != nil {
-		log.Printf("create collection: %v", err)
+		log.Printf("collection_create operator=%s result=failure stage=store err=%v", user.Username, err)
 		writeError(w, http.StatusInternalServerError, "创建收集链接失败")
 		return
 	}
@@ -280,7 +280,7 @@ func (s *Server) deleteCollection(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		log.Printf("revoke collection: %v", err)
+		log.Printf("collection_revoke operator=%s collection_id=%s result=failure err=%v", user.Username, r.PathValue("id"), err)
 		writeError(w, http.StatusInternalServerError, "撤销收集链接失败")
 		return
 	}
@@ -725,7 +725,7 @@ func (s *Server) collectionUploadInit(w http.ResponseWriter, r *http.Request) {
 		// Disk protection rejects collection upload initialization below the configured free-space threshold.
 		_, free, _, diskErr := diskUsageFunc(s.config.DataDir)
 		if diskErr != nil {
-			log.Printf("check collection disk usage: %v", diskErr)
+			log.Printf("collection_disk_check result=failure err=%v", diskErr)
 			s.collectionFailure(w, r, name, "disk_check_failed", http.StatusInternalServerError, "无法检查系统存储空间", nil)
 			return
 		}
@@ -749,7 +749,7 @@ func (s *Server) collectionUploadInit(w http.ResponseWriter, r *http.Request) {
 	}
 	owner, err := s.store.GetUser(collection.CreatedBy)
 	if err != nil {
-		log.Printf("load collection owner: %v", err)
+		log.Printf("collection_upload owner_load result=failure collection_id=%d err=%v", collection.ID, err)
 		s.collectionFailure(w, r, name, "owner_not_found", http.StatusNotFound, "收集链接不存在", nil)
 		return
 	}
@@ -832,7 +832,7 @@ func (s *Server) collectionUploadInit(w http.ResponseWriter, r *http.Request) {
 			s.collectionFailure(w, r, name, "quota_exceeded", http.StatusRequestEntityTooLarge, "配额不足，请联系链接提供方", map[string]string{"code": "COLLECTION_QUOTA_EXCEEDED"})
 			return
 		}
-		log.Printf("create collection upload task: %v", err)
+		log.Printf("collection_upload task_create result=failure size=%d err=%v", input.Size, err)
 		s.collectionFailure(w, r, name, "task_create_failed", http.StatusInternalServerError, "创建上传任务失败", nil)
 		return
 	}
@@ -943,7 +943,7 @@ func (s *Server) collectionUploadChunk(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := s.store.SetChunk(r.Context(), task.ID, index, written, hex.EncodeToString(hash.Sum(nil))); err != nil {
 		_ = os.Remove(path)
-		log.Printf("set public upload chunk: %v", err)
+		log.Printf("collection_upload chunk_save index=%d result=failure err=%v", index, err)
 		s.collectionFailure(w, r, task.Name, "save_failed", http.StatusInternalServerError, "保存上传分片失败", nil)
 		return
 	}
