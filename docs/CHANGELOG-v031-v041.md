@@ -1,4 +1,4 @@
-# FileBox 变更版本汇总（v031 – v041）
+# FileBox 变更版本汇总（v031 – v042）
 
 > 用途：把本阶段（2026-09-12 ~ 09-13）的开发与修复按版本编入本文档，供后续逐项校验。
 > 逐条详细说明另见 `docs/requirements/CHANGELOG.md`；任务书见 `docs/CODEX_TASK_v0XX.md`。
@@ -24,6 +24,16 @@
 1. **6.04 GiB 上传端到端 81 秒**（≈80 MB/s；此前为 370s 客户端校验 + 90s 上传 ≈ 460s）；服务端计算出的 `sha256` 与历史多次一致。
 2. **校验慢的根因不是磁盘、不是 CPU、不是限速**：Worker 内读取 385MB/s、原生 WebCrypto 934MB/s、JS JIT 0.08s 均正常；同一份 WASM 在 Node 188MB/s、在其浏览器 Worker 内仅 21.5MB/s（浏览器侧 WASM 执行差异）。
 3. **`save_failed` 的底层错误此前只进 stderr**（未落结构化日志），现已补 `upload_place` 日志并持续重定向 stderr 到 `filebox-demo\logs\stderr.log`。
+
+| v042 | 修复 | **失败文案跟随用户语言（第一批）**：`codeKeys` 补齐语义已有对应键的码（`SHARE_DENIED`/`INVALID_USER_ID`/`COLLECTION_UNAUTHORIZED`/`COLLECTION_TASK_QUEUED`/`COLLECTION_MAX_UPLOADS_BELOW_USED`）；新增守卫"带稳定码但未映射 → 返回已翻译通用文案"，不再透出裸码或仅中文后端消息；`QUOTA_EXCEEDED` 在 `pendingBytes>0` 时改用 `error.quotaExceededPending`，把"已用/未完成占用/配额/本次文件"一次说清 | `web/src/api.js`、`web/src/i18n.js` | 触发配额拒绝并切换语言观察文案；产物含 `quotaExceededPending` | 已部署 |
+| v042.1 | 修复 | **i18n 字典被误编码导致页面菜单乱码**：v042 用 PowerShell 文本替换写回 `i18n.js`，PS 5.1 按 ANSI/GBK 解码后以 UTF-8 写出 → 整份字典二次编码（129,982→172,474 字节、157 处乱码特征、写入 BOM，既有键值全损）。改法：`git checkout 6eccb6e -- web/src/i18n.js` 恢复，再用 **Edit 工具**重加新键 | `web/src/i18n.js` | Node 健康检查：BOM=false、U+FFFD=0、乱码特征=0、`我的文件`/`回收站`/`系统设置` 均在 | 已部署 |
+| v042.2 | 修复 | **失败文案第二批（本地化收口）**：为剩余差集补 9 个三语键（`error.reauthRateLimited`/`scopeUnsupported`/`invalidDiskMode`/`batchTooLarge`/`batchLimitExceeded`/`folderEmpty`/`folderNotEmpty`/`collectionRateLimited`、`sync.hostKeyUpdateConflict`），`codeKeys` 同步新增 10 条映射（含后端小写码 `task_not_found`）→ 约 40 个后端错误码全部有本地化出口 | `web/src/i18n.js`、`web/src/api.js` | 键值三语各 1 处；`node --check`；8 个 node 测试与 `go test ./...` | 已部署 |
+
+## 工具纪律（v042.1 事故后的硬性约定）
+
+1. **中文/多语言文件只用 Edit / Write 工具修改**，禁止 PowerShell 文本替换后写回（会整份损坏）。
+2. **交给 PowerShell 执行的 `.ps1` 必须纯 ASCII**（PS 5.1 按 ANSI 读取脚本，中文字面量会导致解析失败）。
+3. 校验中文时用 **Node 脚本按 UTF-8 读取**，只输出布尔/计数（U+FFFD、乱码特征、已知键值是否存在）。
 
 ## 待办（尚未实施）
 
