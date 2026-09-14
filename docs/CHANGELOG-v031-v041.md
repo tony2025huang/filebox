@@ -29,6 +29,12 @@
 | v042.1 | 修复 | **i18n 字典被误编码导致页面菜单乱码**：v042 用 PowerShell 文本替换写回 `i18n.js`，PS 5.1 按 ANSI/GBK 解码后以 UTF-8 写出 → 整份字典二次编码（129,982→172,474 字节、157 处乱码特征、写入 BOM，既有键值全损）。改法：`git checkout 6eccb6e -- web/src/i18n.js` 恢复，再用 **Edit 工具**重加新键 | `web/src/i18n.js` | Node 健康检查：BOM=false、U+FFFD=0、乱码特征=0、`我的文件`/`回收站`/`系统设置` 均在 | 已部署 |
 | v042.2 | 修复 | **失败文案第二批（本地化收口）**：为剩余差集补 9 个三语键（`error.reauthRateLimited`/`scopeUnsupported`/`invalidDiskMode`/`batchTooLarge`/`batchLimitExceeded`/`folderEmpty`/`folderNotEmpty`/`collectionRateLimited`、`sync.hostKeyUpdateConflict`），`codeKeys` 同步新增 10 条映射（含后端小写码 `task_not_found`）→ 约 40 个后端错误码全部有本地化出口 | `web/src/i18n.js`、`web/src/api.js` | 键值三语各 1 处；`node --check`；8 个 node 测试与 `go test ./...` | 已部署 |
 
+| v042.4 | 审计 | **日志审计第 1 批**：`collection.go` 6 处与用户上传直接相关的失败点改为结构化（`collection_create`/`collection_revoke`/`collection_disk_check`/`collection_upload owner_load|task_create|chunk_save`），全部保留 `err=…` 原始错误 | `internal/httpapi/collection.go` | 源码含新字段；`go test ./...`；日志可用 `result=failure` 检索 | 已部署 |
+| v042.5 | 审计 | **第 2 批**：`collection.go` 其余读写失败点 13 处（列表/取单个/更新/元数据/加载收集者/建立目录/显示名/秒传匹配等）→ `result=failure err=%v`，仅改格式串、参数不变 | `internal/httpapi/collection.go` | 同上 | 已部署 |
+| v042.6 | 审计 | **第 3 批（规则 1）**：`log.Printf("<说明>: %v", errVar)` → `"<说明> result=failure err=%v"`，一次 127 处（`server.go` 79 / `sync.go` 25 / `share_group.go` 13 / `collection.go` 10）；含编码自检与构建失败回退 | `internal/httpapi/{server,sync,share_group,collection}.go` | 编码自检 4/4（`U+FFFD=0`、中文字符数未丢失）；`go build`、`go test ./...`、8 个 node 测试 | 已部署 |
+| v042.7 | 审计 | **收尾（规则 2）**：多占位符 + 末尾 error 形态 25 处（清除文件/临时目录删除、回收站文件删除、批量分享回滚、批量删除目录树、同步凭据解密与上传回滚、TOTP 密钥迁移等） | 同上 + `sync_filebox.go`、`recycle_purge.go` | 编码自检 6/6；构建与测试全绿 | 已部署 |
+| — | 审计结果 | **累计 171 处**失败日志结构化，`result=failure` 行达 **199 行**；剩余 6 处为设计上的信息类（同步跳过、`released N stale reservation(s)`、host-key 首信任等），保留原样 | — | `grep 'result=failure'` 可直接定位失败上下文与底层错误 | — |
+
 ## 工具纪律（v042.1 事故后的硬性约定）
 
 1. **中文/多语言文件只用 Edit / Write 工具修改**，禁止 PowerShell 文本替换后写回（会整份损坏）。
