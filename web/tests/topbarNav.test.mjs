@@ -1,4 +1,4 @@
-import { test } from 'node:test'
+﻿import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mobileNavItems, navKeyForPath, TOPBAR_SECTIONS } from '../src/topbarNav.js'
 
@@ -11,6 +11,7 @@ test('navKeyForPath resolves active topbar section from route path', () => {
   assert.equal(navKeyForPath('/sync'), 'sync')
   assert.equal(navKeyForPath('/logs'), 'logs')
   assert.equal(navKeyForPath('/admin'), 'admin')
+  assert.equal(navKeyForPath('/recycle'), 'recycle')
   // Unknown routes simply highlight nothing rather than a wrong section.
   assert.equal(navKeyForPath('/change-password'), '')
   assert.equal(navKeyForPath('/totally-unknown'), '')
@@ -19,7 +20,7 @@ test('navKeyForPath resolves active topbar section from route path', () => {
 test('TOPBAR_SECTIONS keeps stable order with admin last and labelled keys', () => {
   assert.deepEqual(
     TOPBAR_SECTIONS.map((section) => section.key),
-    ['files', 'collections', 'shares', 'sync', 'logs', 'admin'],
+    ['files', 'collections', 'shares', 'sync', 'logs', 'admin', 'recycle'],
   )
   for (const section of TOPBAR_SECTIONS) {
     assert.equal(typeof section.to, 'string')
@@ -37,7 +38,13 @@ test('mobileNavItems filters admin-only section for regular users', () => {
   const admin = mobileNavItems({ isAdmin: true })
   assert.deepEqual(
     admin.map((section) => section.key),
-    ['files', 'collections', 'shares', 'sync', 'logs', 'admin'],
+    ['files', 'collections', 'shares', 'sync', 'logs', 'admin', 'recycle'],
   )
   assert.equal(mobileNavItems({ isAdmin: true }).some((section) => section.key === 'admin'), true)
+  // v041：回收站是管理员专属入口——管理员能看到，普通用户看不到，路由也能解析出该 section。
+  // v041: the recycle bin is admin-only, visible to admins, hidden from regular users, and routable.
+  assert.equal(mobileNavItems({ isAdmin: true }).some((section) => section.key === 'recycle'), true)
+  assert.equal(mobileNavItems({ isAdmin: false }).some((section) => section.key === 'recycle'), false)
+  assert.equal(navKeyForPath('/recycle'), 'recycle')
 })
+
