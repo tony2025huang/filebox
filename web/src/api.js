@@ -28,7 +28,7 @@ const settingsMessageKeys = {
   'å¯†ç å¤æ‚åº¦æ— æ•ˆ': 'error.invalidPasswordComplexity', 'IP é”å®šçª—å£æ— æ•ˆ': 'error.invalidIPLockWindow', 'IP é”å®šé˜ˆå€¼æ— æ•ˆ': 'error.invalidIPLockThreshold', 'IP è§£é”æ—¶é•¿æ— æ•ˆ': 'error.invalidIPUnlockMinutes'
 }
 
-const codeKeys = { DISK_FULL: 'error.diskFull', PASSWORD_CHANGE_REQUIRED: 'error.passwordChangeRequired', REGISTER_DISABLED: 'error.registerDisabled', FILE_TOO_LARGE: 'error.fileTooLarge', SHARE_DOWNLOAD_LIMIT: 'error.shareLimit', SHARE_NOT_FOUND: 'error.shareNotFound', SHARE_REVOKED: 'error.shareRevoked', SHARE_EXPIRED: 'error.shareExpired', SHARE_CONTENT_MISSING: 'error.shareContentMissing', BATCH_DELETE_EMPTY: 'error.batchDeleteEmpty', INVALID_FILE_ID: 'error.invalidFileId', INVALID_READ_ONLY_WINDOW: 'readOnly.invalidWindow', READ_ONLY: 'readOnly.error', COLLECTION_LIMIT: 'collection.limitReached', COLLECTION_EXPIRED: 'collection.expired', COLLECTION_REVOKED: 'collection.revoked', COLLECTION_FILE_TOO_LARGE: 'collection.fileTooLarge', COLLECTION_QUOTA_EXCEEDED: 'collection.quotaExceeded', QUOTA_EXCEEDED: 'error.quotaExceeded', SYNC_TASK_RUNNING: 'sync.confirmRunning' }
+const codeKeys = { DISK_FULL: 'error.diskFull', PASSWORD_CHANGE_REQUIRED: 'error.passwordChangeRequired', REGISTER_DISABLED: 'error.registerDisabled', FILE_TOO_LARGE: 'error.fileTooLarge', SHARE_DOWNLOAD_LIMIT: 'error.shareLimit', SHARE_NOT_FOUND: 'error.shareNotFound', SHARE_REVOKED: 'error.shareRevoked', SHARE_EXPIRED: 'error.shareExpired', SHARE_CONTENT_MISSING: 'error.shareContentMissing', SHARE_DENIED: 'error.shareDenied', BATCH_DELETE_EMPTY: 'error.batchDeleteEmpty', INVALID_FILE_ID: 'error.invalidFileId', INVALID_USER_ID: 'error.invalidUser', INVALID_READ_ONLY_WINDOW: 'readOnly.invalidWindow', READ_ONLY: 'readOnly.error', COLLECTION_LIMIT: 'collection.limitReached', COLLECTION_EXPIRED: 'collection.expired', COLLECTION_REVOKED: 'collection.revoked', COLLECTION_FILE_TOO_LARGE: 'collection.fileTooLarge', COLLECTION_QUOTA_EXCEEDED: 'collection.quotaExceeded', COLLECTION_UNAUTHORIZED: 'collection.passwordWrong', COLLECTION_TASK_QUEUED: 'collection.queued', COLLECTION_MAX_UPLOADS_BELOW_USED: 'collection.maxUploadsBelow', QUOTA_EXCEEDED: 'error.quotaExceeded', SYNC_TASK_RUNNING: 'sync.confirmRunning' }
 const shareMessageKeys = { 'åˆ†äº«å·²æ’¤é”€': 'error.shareRevoked', 'åˆ†äº«ä¸‹è½½è¢«æ‹’ç»': 'error.shareDenied', 'èŽ·å–åˆ†äº«åˆ—è¡¨å¤±è´¥': 'error.shareListFailed', 'èŽ·å–åˆ†äº«æ—¥å¿—å¤±è´¥': 'error.shareLogsFailed', 'å»¶æœŸåˆ†äº«å¤±è´¥': 'error.shareExtendFailed', 'å¢žåŠ åˆ†äº«æ¬¡æ•°å¤±è´¥': 'error.shareIncreaseFailed' }
 
 codeKeys.HOST_KEY_CHANGED = 'sync.hostKeyChanged'
@@ -201,6 +201,14 @@ export function localizeError(error = {}) {
     const used = Number(error.data?.usedBytes) || 0
     const quota = Number(error.data?.quotaBytes) || 0
     const fileSize = Number(error.data?.fileSize) || 0
+    // pendingBytes 是"未完成上传已预留"的额度（v039 起由后端返回）：把它一起显示，
+    // 否则用户会看到"已用远低于配额却提示配额不足"而无从理解（v042）。
+    // pendingBytes is the quota reserved by unfinished uploads; showing it explains a quota error
+    // whose used value looks far below the quota (v042).
+    const pending = Number(error.data?.pendingBytes) || 0
+    if (pending > 0) {
+      return t('error.quotaExceededPending', { used: formatErrorBytes(used), pending: formatErrorBytes(pending), quota: formatErrorBytes(quota), fileSize: formatErrorBytes(fileSize) })
+    }
     return t('error.quotaExceededDetail', { used: formatErrorBytes(used), quota: formatErrorBytes(quota), fileSize: formatErrorBytes(fileSize), short: formatErrorBytes(Math.max(0, used + fileSize - quota)) })
   }
   if (code === 'FILE_TOO_LARGE') {
@@ -215,6 +223,10 @@ export function localizeError(error = {}) {
   if (error.message && messageKeys[error.message]) return t(messageKeys[error.message])
   const statusKeys = { 401: 'error.authRequired', 403: 'error.adminRequired', 409: 'error.conflict', 413: 'error.uploadFailed', 502: 'sync.networkError', 503: 'error.diskFull' }
   if (statusKeys[error.status]) return t(statusKeys[error.status])
+  // 带稳定错误码但上面没有映射：返回已翻译的通用文案，不再透出裸码或仅中文的后端消息（v042）。
+  // A stable but unmapped code yields a translated generic message instead of a raw code or a
+  // Chinese-only backend string, so the failure text follows the user's language (v042).
+  if (code) return t('error.requestFailed')
   return error.backendMessage || error.message || t('error.requestFailed')
 }
 
