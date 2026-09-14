@@ -6,6 +6,11 @@ const supportedLocales = new Set(['zh-CN', 'zh-TW', 'en'])
 // 三套字典刻意使用同一组键，确保所有可见界面状态都有翻译。
 export const zhCN = {
   'error.quotaExceededPending': '配额不足：已用 {used}，未完成上传占用 {pending}，配额 {quota}，本次文件 {fileSize}。',
+  'error.reauthRateLimited': '验证尝试过于频繁，请稍后再试', 'error.scopeUnsupported': '该范围不被支持',
+  'error.invalidDiskMode': '磁盘处理方式无效', 'error.batchTooLarge': '单次批量过大，请减少选择数量',
+  'error.batchLimitExceeded': '超出批量上限', 'error.folderEmpty': '目录为空，无法执行该操作',
+  'error.folderNotEmpty': '目录不为空，无法删除', 'error.collectionRateLimited': '收集链接请求过于频繁，请稍后再试',
+  'sync.hostKeyUpdateConflict': '主机密钥更新冲突，请确认指纹后重试',
   'recycle.title': '回收站', 'recycle.empty': '回收站为空', 'recycle.owner': '原用户', 'recycle.selectAll': '全选',
   'recycle.move': '移动到…', 'recycle.moveTitle': '移动回收站文件', 'recycle.targetUser': '目标用户',
   'recycle.targetDir': '目标目录（不存在会自动创建）', 'recycle.moveConfirm': '确认移动', 'recycle.delete': '永久删除',
@@ -33,6 +38,11 @@ Object.assign(zhCN, {
 
 export const zhTW = {
   'error.quotaExceededPending': '配額不足：已用 {used}，未完成上傳佔用 {pending}，配額 {quota}，本次檔案 {fileSize}。',
+  'error.reauthRateLimited': '驗證嘗試過於頻繁，請稍後再試', 'error.scopeUnsupported': '該範圍不被支援',
+  'error.invalidDiskMode': '磁碟處理方式無效', 'error.batchTooLarge': '單次批量過大，請減少選取數量',
+  'error.batchLimitExceeded': '超出批量上限', 'error.folderEmpty': '目錄為空，無法執行該操作',
+  'error.folderNotEmpty': '目錄不為空，無法刪除', 'error.collectionRateLimited': '收集連結請求過於頻繁，請稍後再試',
+  'sync.hostKeyUpdateConflict': '主機金鑰更新衝突，請確認指紋後重試',
   'recycle.title': '回收站', 'recycle.empty': '回收站是空的', 'recycle.owner': '原使用者', 'recycle.selectAll': '全選',
   'recycle.move': '移動到…', 'recycle.moveTitle': '移動回收站檔案', 'recycle.targetUser': '目標使用者',
   'recycle.targetDir': '目標目錄（不存在會自動建立）', 'recycle.moveConfirm': '確認移動', 'recycle.delete': '永久刪除',
@@ -59,6 +69,11 @@ Object.assign(zhTW, {
 
 export const en = {
   'error.quotaExceededPending': 'Quota exceeded: used {used}, reserved by unfinished uploads {pending}, quota {quota}, this file {fileSize}.',
+  'error.reauthRateLimited': 'Too many verification attempts; try again later', 'error.scopeUnsupported': 'This scope is not supported',
+  'error.invalidDiskMode': 'Invalid disk handling mode', 'error.batchTooLarge': 'Batch too large; select fewer items',
+  'error.batchLimitExceeded': 'Batch limit exceeded', 'error.folderEmpty': 'The folder is empty',
+  'error.folderNotEmpty': 'The folder is not empty', 'error.collectionRateLimited': 'Collection requests are rate limited',
+  'sync.hostKeyUpdateConflict': 'Host key update conflict; confirm the fingerprint and retry',
   'recycle.title': 'Recycle bin', 'recycle.empty': 'The recycle bin is empty', 'recycle.owner': 'Former user', 'recycle.selectAll': 'Select all',
   'recycle.move': 'Move to…', 'recycle.moveTitle': 'Move recycled files', 'recycle.targetUser': 'Target user',
   'recycle.targetDir': 'Target folder (created when missing)', 'recycle.moveConfirm': 'Move', 'recycle.delete': 'Delete permanently',
