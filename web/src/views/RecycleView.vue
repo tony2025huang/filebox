@@ -1,6 +1,6 @@
 ﻿<template>
   <main class="app-shell">
-    <AuthenticatedTopbar :user="user" section="admin" />
+    <AuthenticatedTopbar :user="user" section="recycle" />
     <section class="content-wrap">
       <div class="page-heading">
         <div><p class="eyebrow">WORKSPACE / RECYCLE</p><h1>{{ t('recycle.title') }}</h1><p class="muted">{{ t('recycle.confirmPurge') }}</p></div>
