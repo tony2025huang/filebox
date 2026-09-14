@@ -235,19 +235,19 @@ func (s *Server) createSyncSystem(w http.ResponseWriter, r *http.Request) {
 	}
 	secret, err := s.encryptSyncSecret(input.AuthSecret)
 	if err != nil {
-		log.Printf("encrypt sync credentials: %v", err)
+		log.Printf("encrypt sync credentials result=failure err=%v", err)
 		writeError(w, http.StatusInternalServerError, "保存目标系统失败")
 		return
 	}
 	passphrase, err := s.encryptSyncSecret(input.AuthPassphrase)
 	if err != nil {
-		log.Printf("encrypt sync passphrase: %v", err)
+		log.Printf("encrypt sync passphrase result=failure err=%v", err)
 		writeError(w, http.StatusInternalServerError, "保存目标系统失败")
 		return
 	}
 	item, err := s.store.CreateRemoteSystem(r.Context(), store.RemoteSystem{UserID: user.ID, Name: input.Name, Kind: input.Kind, Host: input.Host, URL: input.URL, Port: input.Port, Username: input.Username, AuthType: input.AuthType, AuthSecret: secret, AuthPassphrase: passphrase, HostKeyFingerprint: input.HostKeyFingerprint})
 	if err != nil {
-		log.Printf("create sync remote system: %v", err)
+		log.Printf("create sync remote system result=failure err=%v", err)
 		writeError(w, http.StatusInternalServerError, "创建目标系统失败")
 		return
 	}
@@ -259,7 +259,7 @@ func (s *Server) listSyncSystems(w http.ResponseWriter, r *http.Request) {
 	user := currentUser(r.Context())
 	items, err := s.store.ListRemoteSystems(r.Context(), user.ID, user.Role == "admin")
 	if err != nil {
-		log.Printf("list sync remote systems: %v", err)
+		log.Printf("list sync remote systems result=failure err=%v", err)
 		writeError(w, http.StatusInternalServerError, "获取目标系统失败")
 		return
 	}
@@ -286,7 +286,7 @@ func (s *Server) updateSyncSystem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		log.Printf("get sync remote system: %v", err)
+		log.Printf("get sync remote system result=failure err=%v", err)
 		writeError(w, http.StatusInternalServerError, "读取目标系统失败")
 		return
 	}
@@ -341,7 +341,7 @@ func (s *Server) updateSyncSystem(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "目标系统不存在")
 		return
 	} else if err != nil {
-		log.Printf("update sync remote system: %v", err)
+		log.Printf("update sync remote system result=failure err=%v", err)
 		writeError(w, http.StatusInternalServerError, "保存目标系统失败")
 		return
 	}
@@ -398,7 +398,7 @@ func (s *Server) updateSyncSystemHostKey(w http.ResponseWriter, r *http.Request)
 		writeErrorData(w, http.StatusConflict, "host key changed; test the connection again", map[string]any{"code": "HOST_KEY_UPDATE_CONFLICT"})
 		return
 	} else if err != nil {
-		log.Printf("update sync host key: %v", err)
+		log.Printf("update sync host key result=failure err=%v", err)
 		writeError(w, http.StatusInternalServerError, "failed to update host key")
 		return
 	}
@@ -432,7 +432,7 @@ func (s *Server) deleteSyncSystem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		log.Printf("delete sync remote system: %v", err)
+		log.Printf("delete sync remote system result=failure err=%v", err)
 		writeError(w, http.StatusInternalServerError, "删除目标系统失败")
 		return
 	}
@@ -456,7 +456,7 @@ func (s *Server) getSyncSystemSecret(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		log.Printf("get sync remote system secret: %v", err)
+		log.Printf("get sync remote system secret result=failure err=%v", err)
 		writeError(w, http.StatusInternalServerError, "读取凭据失败")
 		return
 	}
@@ -546,7 +546,7 @@ func (s *Server) testSyncSystem(w http.ResponseWriter, r *http.Request) {
 		if openErr != nil {
 			if data, changed := hostKeyChangedData(openErr); changed {
 				if updateErr := s.store.UpdateRemoteSystemTest(r.Context(), item.ID, user.ID, user.Role == "admin", testedAt, "failure"); updateErr != nil {
-					log.Printf("update remote system test: %v", updateErr)
+					log.Printf("update remote system test result=failure err=%v", updateErr)
 				}
 				s.recordAudit(r, &user.ID, user.Username, "sync_host_key", strconv.FormatInt(item.ID, 10), "failure", "changed")
 				s.serviceEvent(r, "sync_host_key", user.Username, "target=%d expected=%s observed=%s result=failure", item.ID, data["expectedFingerprint"], data["observedFingerprint"])
@@ -568,7 +568,7 @@ func (s *Server) testSyncSystem(w http.ResponseWriter, r *http.Request) {
 		result = "failure"
 	}
 	if updateErr := s.store.UpdateRemoteSystemTest(r.Context(), item.ID, user.ID, user.Role == "admin", testedAt, result); updateErr != nil {
-		log.Printf("update remote system test: %v", updateErr)
+		log.Printf("update remote system test result=failure err=%v", updateErr)
 	}
 	latencyMs := time.Since(started).Milliseconds()
 	if message != "" {
@@ -633,7 +633,7 @@ func (s *Server) browseLocalFileBox(w http.ResponseWriter, r *http.Request) {
 	includeFiles := r.URL.Query().Get("includeFiles") == "1" || r.URL.Query().Get("includeFiles") == "true"
 	folders, err := s.store.ListFolders(r.Context(), user.ID)
 	if err != nil {
-		log.Printf("list folders for sync browse: %v", err)
+		log.Printf("list folders for sync browse result=failure err=%v", err)
 		writeError(w, http.StatusInternalServerError, "获取目录失败")
 		return
 	}
@@ -650,7 +650,7 @@ func (s *Server) browseLocalFileBox(w http.ResponseWriter, r *http.Request) {
 	if includeFiles {
 		files, err := s.store.ListDirectChildFiles(r.Context(), user.ID, path)
 		if err != nil {
-			log.Printf("list files for sync browse: %v", err)
+			log.Printf("list files for sync browse result=failure err=%v", err)
 			writeError(w, http.StatusInternalServerError, "获取文件列表失败")
 			return
 		}
@@ -854,7 +854,7 @@ func (s *Server) createSyncTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		log.Printf("create sync task: %v", err)
+		log.Printf("create sync task result=failure err=%v", err)
 		writeError(w, http.StatusInternalServerError, "创建同步任务失败")
 		return
 	}
@@ -867,7 +867,7 @@ func (s *Server) listSyncTasks(w http.ResponseWriter, r *http.Request) {
 	user := currentUser(r.Context())
 	items, err := s.store.ListSyncTasks(r.Context(), user.ID, user.Role == "admin")
 	if err != nil {
-		log.Printf("list sync tasks: %v", err)
+		log.Printf("list sync tasks result=failure err=%v", err)
 		writeError(w, http.StatusInternalServerError, "获取同步任务失败")
 		return
 	}
@@ -941,7 +941,7 @@ func (s *Server) updateSyncTask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "同步任务不存在")
 		return
 	} else if err != nil {
-		log.Printf("update sync task: %v", err)
+		log.Printf("update sync task result=failure err=%v", err)
 		writeError(w, http.StatusInternalServerError, "保存同步任务失败")
 		return
 	}
@@ -969,7 +969,7 @@ func (s *Server) deleteSyncTask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "同步任务不存在")
 		return
 	} else if err != nil {
-		log.Printf("delete sync task: %v", err)
+		log.Printf("delete sync task result=failure err=%v", err)
 		writeError(w, http.StatusInternalServerError, "删除同步任务失败")
 		return
 	}
@@ -1095,7 +1095,7 @@ func (s *Server) scheduleSyncTasks(ctx context.Context) {
 	items, err := s.store.ListScheduledSyncTasks(ctx)
 	if err != nil {
 		if !errors.Is(ctx.Err(), context.Canceled) {
-			log.Printf("list scheduled sync tasks: %v", err)
+			log.Printf("list scheduled sync tasks result=failure err=%v", err)
 		}
 		return
 	}
@@ -1396,10 +1396,10 @@ func (s *Server) executeSyncTask(ctx context.Context, task store.SyncTask) store
 		runAt := time.Now().UTC().Format(time.RFC3339)
 		entry := store.SyncLog{TaskID: task.ID, UserID: task.UserID, RunAt: runAt, FinishedAt: runAt, Direction: task.Direction, Result: "failure", Message: "读取任务所有者失败，任务已跳过", Detail: "同步跳过: 任务所有者不可用"}
 		if _, logErr := s.store.CreateSyncLog(context.Background(), entry); logErr != nil {
-			log.Printf("create sync log: %v", logErr)
+			log.Printf("create sync log result=failure err=%v", logErr)
 		}
 		if err := s.store.UpdateSyncTaskResult(context.Background(), task.ID, runAt, "failure"); err != nil {
-			log.Printf("update sync task result: %v", err)
+			log.Printf("update sync task result result=failure err=%v", err)
 		}
 		return entry
 	}
@@ -1407,10 +1407,10 @@ func (s *Server) executeSyncTask(ctx context.Context, task store.SyncTask) store
 		runAt := time.Now().UTC().Format(time.RFC3339)
 		entry := store.SyncLog{TaskID: task.ID, UserID: task.UserID, RunAt: runAt, FinishedAt: runAt, Direction: task.Direction, Result: "failure", Message: "用户在只读时段，任务已跳过", Detail: "同步跳过: 用户在只读时段"}
 		if _, logErr := s.store.CreateSyncLog(context.Background(), entry); logErr != nil {
-			log.Printf("create sync log: %v", logErr)
+			log.Printf("create sync log result=failure err=%v", logErr)
 		}
 		if err := s.store.UpdateSyncTaskResult(context.Background(), task.ID, runAt, "failure"); err != nil {
-			log.Printf("update sync task result: %v", err)
+			log.Printf("update sync task result result=failure err=%v", err)
 		}
 		return entry
 	}
@@ -1418,7 +1418,7 @@ func (s *Server) executeSyncTask(ctx context.Context, task store.SyncTask) store
 	runningEntry, logErr := s.store.CreateSyncLog(context.Background(), store.SyncLog{TaskID: task.ID, UserID: task.UserID, RunAt: runAt, Direction: task.Direction, Result: "running", Message: "执行中"})
 	s.syncProgressSet(task.ID, func(p *syncRunProgress) { p.LogID = runningEntry.ID; p.StartedAt = runAt; p.Direction = task.Direction })
 	if logErr != nil {
-		log.Printf("create sync running log: %v", logErr)
+		log.Printf("create sync running log result=failure err=%v", logErr)
 	}
 	result := syncRunResult{}
 	item, err := s.store.GetRemoteSystem(ctx, task.RemoteSystemID, task.UserID, false)
@@ -1444,11 +1444,11 @@ func (s *Server) executeSyncTask(ctx context.Context, task store.SyncTask) store
 	entry := store.SyncLog{ID: runningEntry.ID, TaskID: task.ID, UserID: task.UserID, RunAt: runAt, FinishedAt: finishedAt, Direction: task.Direction, Result: resultValue, Files: result.files, Bytes: result.bytes, Message: result.message, Detail: detail}
 	if runningEntry.ID > 0 {
 		if logErr := s.store.UpdateSyncLogResult(context.Background(), runningEntry.ID, resultValue, finishedAt, result.files, result.bytes, result.message, detail); logErr != nil {
-			log.Printf("update sync log: %v", logErr)
+			log.Printf("update sync log result=failure err=%v", logErr)
 		}
 	}
 	if err := s.store.UpdateSyncTaskResult(context.Background(), task.ID, runAt, resultValue); err != nil {
-		log.Printf("update sync task result: %v", err)
+		log.Printf("update sync task result result=failure err=%v", err)
 	}
 	s.syncProgressDelete(task.ID)
 	return entry

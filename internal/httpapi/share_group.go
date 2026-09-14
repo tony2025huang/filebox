@@ -74,7 +74,7 @@ func (s *Server) createBatchShareGroup(w http.ResponseWriter, r *http.Request) {
 		expanded, expandErr := s.store.ExpandFolderFileIDs(r.Context(), user.ID, input.FolderIDs)
 		if expandErr != nil {
 			reason = "expand_failed"
-			log.Printf("expand batch share group folders: %v", expandErr)
+			log.Printf("expand batch share group folders result=failure err=%v", expandErr)
 			writeError(w, http.StatusInternalServerError, "读取目录文件失败")
 			return
 		}
@@ -110,7 +110,7 @@ func (s *Server) createBatchShareGroup(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		reason = "create_failed"
-		log.Printf("create batch share group: %v", err)
+		log.Printf("create batch share group result=failure err=%v", err)
 		writeError(w, http.StatusInternalServerError, "创建分享链接失败")
 		return
 	}
@@ -134,7 +134,7 @@ func (s *Server) listShareGroups(w http.ResponseWriter, r *http.Request) {
 	user := currentUser(r.Context())
 	groups, err := s.store.ListShareGroupsByOwner(r.Context(), user.ID, user.Role == "admin")
 	if err != nil {
-		log.Printf("list share groups: %v", err)
+		log.Printf("list share groups result=failure err=%v", err)
 		writeError(w, http.StatusInternalServerError, "获取分享列表失败")
 		return
 	}
@@ -372,7 +372,7 @@ func (s *Server) shareGroupBatchDownload(w http.ResponseWriter, r *http.Request)
 		totalBytes += item.File.Size
 	}
 	if hasSpace, diskErr := s.batchDownloadDiskAvailable(totalBytes); diskErr != nil {
-		log.Printf("check share-group batch download disk usage: %v", diskErr)
+		log.Printf("check share-group batch download disk usage result=failure err=%v", diskErr)
 		writeError(w, http.StatusInternalServerError, "无法检查系统存储空间")
 		return
 	} else if !hasSpace {
@@ -393,7 +393,7 @@ func (s *Server) shareGroupBatchDownload(w http.ResponseWriter, r *http.Request)
 	defer func() {
 		if result != "success" {
 			if refundErr := s.store.RefundShareGroupDownloads(context.Background(), token, 1); refundErr != nil {
-				log.Printf("refund share-group download: %v", refundErr)
+				log.Printf("refund share-group download result=failure err=%v", refundErr)
 			}
 		}
 	}()
@@ -464,7 +464,7 @@ func (s *Server) shareGroupBatchDownload(w http.ResponseWriter, r *http.Request)
 	w.Header().Set("Content-Disposition", contentDisposition(batchDownloadFilename()))
 	w.Header().Set("Content-Length", strconv.FormatInt(info.Size(), 10))
 	if _, err := io.Copy(w, archive); err != nil {
-		log.Printf("stream share-group archive: %v", err)
+		log.Printf("stream share-group archive result=failure err=%v", err)
 		return
 	}
 	result, reason = "success", ""
@@ -505,7 +505,7 @@ func (s *Server) extendShareGroup(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, store.ErrNotFound) {
 			writeError(w, http.StatusNotFound, "分享不存在")
 		} else {
-			log.Printf("extend share group: %v", err)
+			log.Printf("extend share group result=failure err=%v", err)
 			writeError(w, http.StatusInternalServerError, "延期分享失败")
 		}
 		return
@@ -542,7 +542,7 @@ func (s *Server) increaseShareGroup(w http.ResponseWriter, r *http.Request) {
 		} else if errors.Is(err, store.ErrConflict) {
 			writeError(w, http.StatusBadRequest, "分享次数限制无效")
 		} else {
-			log.Printf("increase share group: %v", err)
+			log.Printf("increase share group result=failure err=%v", err)
 			writeError(w, http.StatusInternalServerError, "增加分享次数失败")
 		}
 		return
@@ -567,7 +567,7 @@ func (s *Server) revokeShareGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		log.Printf("revoke share group: %v", err)
+		log.Printf("revoke share group result=failure err=%v", err)
 		writeError(w, http.StatusInternalServerError, "撤销分享失败")
 		return
 	}
@@ -586,7 +586,7 @@ func (s *Server) listShareGroupFiles(w http.ResponseWriter, r *http.Request) {
 	}
 	files, err := s.store.ListShareGroupFiles(r.Context(), group.ID)
 	if err != nil {
-		log.Printf("list share group files: %v", err)
+		log.Printf("list share group files result=failure err=%v", err)
 		writeError(w, http.StatusInternalServerError, "读取分享文件失败")
 		return
 	}
@@ -630,7 +630,7 @@ func (s *Server) addShareGroupFiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		log.Printf("add share group files: %v", err)
+		log.Printf("add share group files result=failure err=%v", err)
 		writeError(w, http.StatusInternalServerError, "添加分享文件失败")
 		return
 	}
@@ -664,7 +664,7 @@ func (s *Server) removeShareGroupFile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "文件不在分享中")
 		return
 	} else if err != nil {
-		log.Printf("remove share group file: %v", err)
+		log.Printf("remove share group file result=failure err=%v", err)
 		writeError(w, http.StatusInternalServerError, "移除分享文件失败")
 		return
 	}
@@ -708,7 +708,7 @@ func (s *Server) updateShareGroup(w http.ResponseWriter, r *http.Request) {
 		} else if errors.Is(err, store.ErrConflict) {
 			writeError(w, http.StatusBadRequest, "分享次数限制无效")
 		} else {
-			log.Printf("update share group: %v", err)
+			log.Printf("update share group result=failure err=%v", err)
 			writeError(w, http.StatusInternalServerError, "编辑分享失败")
 		}
 		return

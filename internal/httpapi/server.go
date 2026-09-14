@@ -391,14 +391,14 @@ func NewServer(db *store.Store, config Config) *Server {
 
 func (s *Server) startBatchDownloadTempCleanup() {
 	if err := cleanupBatchDownloadTempFiles(filepath.Join(s.config.DataDir, "tmp"), time.Now()); err != nil {
-		log.Printf("cleanup batch download temp files: %v", err)
+		log.Printf("cleanup batch download temp files result=failure err=%v", err)
 	}
 	go func() {
 		ticker := time.NewTicker(batchDownloadTempCleanupInterval)
 		defer ticker.Stop()
 		for now := range ticker.C {
 			if err := cleanupBatchDownloadTempFiles(filepath.Join(s.config.DataDir, "tmp"), now); err != nil {
-				log.Printf("cleanup batch download temp files: %v", err)
+				log.Printf("cleanup batch download temp files result=failure err=%v", err)
 			}
 		}
 	}()
@@ -635,7 +635,7 @@ func (s *Server) brand(w http.ResponseWriter, r *http.Request) {
 	// brand returns public branding; the built-in title is used when empty, and empty filing text is omitted.
 	settings, err := s.store.GetBrandSettings(r.Context())
 	if err != nil {
-		log.Printf("get brand settings: %v", err)
+		log.Printf("get brand settings result=failure err=%v", err)
 		writeError(w, http.StatusInternalServerError, "获取品牌设置失败")
 		return
 	}
@@ -721,7 +721,7 @@ func (s *Server) updateBrand(w http.ResponseWriter, r *http.Request) {
 		return
 	} else if reset {
 		if err := s.clearBrandFiles(); err != nil {
-			log.Printf("clear brand files: %v", err)
+			log.Printf("clear brand files result=failure err=%v", err)
 			writeError(w, http.StatusInternalServerError, "清理品牌资源失败")
 			return
 		}
@@ -807,7 +807,7 @@ func (s *Server) updateBrand(w http.ResponseWriter, r *http.Request) {
 	for _, upload := range uploads {
 		filename, err := s.saveBrandUpload(upload)
 		if err != nil {
-			log.Printf("save brand asset: %v", err)
+			log.Printf("save brand asset result=failure err=%v", err)
 			writeError(w, http.StatusInternalServerError, "保存品牌资源失败")
 			return
 		}
@@ -1036,12 +1036,12 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	}
 	settings, settingsErr := s.store.GetLogSettings(r.Context())
 	if settingsErr != nil {
-		log.Printf("get login settings: %v", settingsErr)
+		log.Printf("get login settings result=failure err=%v", settingsErr)
 		loginReason = "settings_unavailable"
 	}
 	ip := s.requestIP(r)
 	if locked, err := s.store.IsIPLocked(r.Context(), ip, settings.IPAutoUnlockEnabled); err != nil {
-		log.Printf("check ip lock: %v", err)
+		log.Printf("check ip lock result=failure err=%v", err)
 	} else if locked {
 		loginReason = "ip_locked"
 		s.recordAudit(r, nil, username, "login", "", "failure", "ip_locked")
@@ -1059,7 +1059,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		loginReason = "user_not_found"
-		log.Printf("get login user: %v", err)
+		log.Printf("get login user result=failure err=%v", err)
 		s.recordIPFailure(r, settings)
 		s.recordAudit(r, nil, username, "login", "", "failure", "user_not_found")
 		writeError(w, http.StatusUnauthorized, "用户名或密码错误")
@@ -1083,14 +1083,14 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		}
 		if parseErr == nil || user.LockedUntil != "" {
 			if err := s.store.ResetLoginState(r.Context(), user.ID); err != nil {
-				log.Printf("reset expired login lock: %v", err)
+				log.Printf("reset expired login lock result=failure err=%v", err)
 			}
 		}
 	}
 	if bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(input.Password)) != nil {
 		loginReason = "wrong_password"
 		if err := s.store.RecordLoginFailure(r.Context(), user.ID, settings.LockThreshold, settings.AutoUnlockEnabled, settings.AutoUnlockMinutes); err != nil {
-			log.Printf("record login failure: %v", err)
+			log.Printf("record login failure result=failure err=%v", err)
 		}
 		s.recordIPFailure(r, settings)
 		s.recordAudit(r, &userID, user.Username, "login", "", "failure", "wrong_password")
@@ -1122,10 +1122,10 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.store.ResetLoginState(r.Context(), user.ID); err != nil {
-		log.Printf("reset login state: %v", err)
+		log.Printf("reset login state result=failure err=%v", err)
 	}
 	if err := s.store.ResetIPFailure(r.Context(), ip); err != nil {
-		log.Printf("reset ip failure: %v", err)
+		log.Printf("reset ip failure result=failure err=%v", err)
 	}
 	token, err := s.issueToken(user)
 	if err != nil {
@@ -1226,7 +1226,7 @@ func validUsername(username string) bool {
 
 func (s *Server) recordIPFailure(r *http.Request, settings store.LogSettings) {
 	if err := s.store.RecordIPFailure(r.Context(), s.requestIP(r), settings.IPLockWindowMinutes, settings.IPLockThreshold, settings.IPAutoUnlockEnabled, settings.IPUnlockMinutes); err != nil {
-		log.Printf("record ip failure: %v", err)
+		log.Printf("record ip failure result=failure err=%v", err)
 	}
 }
 
@@ -1414,7 +1414,7 @@ func (s *Server) totp(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if err := s.store.ResetIPFailure(r.Context(), s.requestIP(r)); err != nil {
-		log.Printf("reset ip failure after totp: %v", err)
+		log.Printf("reset ip failure after totp result=failure err=%v", err)
 	}
 	updated, err := s.store.GetUser(user.ID)
 	if err != nil {
@@ -1602,7 +1602,7 @@ func (s *Server) clearAllFiles(w http.ResponseWriter, r *http.Request) {
 
 	decision, err := s.clearFilesReauth(r.Context(), r, user, input.Password, input.Code)
 	if err != nil {
-		log.Printf("clear all reauth: %v", err)
+		log.Printf("clear all reauth result=failure err=%v", err)
 		auditReason = "reauth_failed"
 		writeError(w, http.StatusInternalServerError, "清空文件失败")
 		return
@@ -1613,7 +1613,7 @@ func (s *Server) clearAllFiles(w http.ResponseWriter, r *http.Request) {
 		// Failures (including throttled ones) feed the source-IP failure window (R-IPBAN).
 		// Account-level lockout is intentionally not applied so a stolen JWT cannot lock the victim out.
 		if settings, settingsErr := s.store.GetLogSettings(r.Context()); settingsErr != nil {
-			log.Printf("clear all reauth settings: %v", settingsErr)
+			log.Printf("clear all reauth settings result=failure err=%v", settingsErr)
 		} else {
 			s.recordIPFailure(r, settings)
 		}
@@ -1632,7 +1632,7 @@ func (s *Server) clearAllFiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		log.Printf("clear files: %v", err)
+		log.Printf("clear files result=failure err=%v", err)
 		auditReason = "clear_failed"
 		writeError(w, http.StatusInternalServerError, "清空文件失败")
 		return
@@ -1648,7 +1648,7 @@ func (s *Server) clearAllFiles(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if err := s.cleanClearedStorage(result.UserIDs, diskMode); err != nil {
-		log.Printf("clean cleared storage: %v", err)
+		log.Printf("clean cleared storage result=failure err=%v", err)
 	}
 	for ownerID, dirs := range userDirsByOwner(result.Paths) {
 		s.notifyFileBoxChange(ownerID, dirs...)
@@ -1771,7 +1771,7 @@ func totpCode(secret string, counter int64) string {
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 	user := currentUser(r.Context())
 	if err := s.store.RevokeUserTokens(r.Context(), user.ID); err != nil {
-		log.Printf("revoke user tokens: %v", err)
+		log.Printf("revoke user tokens result=failure err=%v", err)
 		s.serviceEvent(r, "logout", user.Username, "result=failure")
 		writeError(w, http.StatusInternalServerError, "退出登录失败")
 		return
@@ -1806,7 +1806,7 @@ func (s *Server) updateLanguage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		log.Printf("update user language: %v", err)
+		log.Printf("update user language result=failure err=%v", err)
 		writeError(w, http.StatusInternalServerError, "保存语言设置失败")
 		return
 	}
@@ -1920,12 +1920,12 @@ func (s *Server) uploadInit(w http.ResponseWriter, r *http.Request) {
 	// v011：上传目标目录自动补齐目录记录，保证导航与上传一致。
 	// v011: upload target directories get folder records created so navigation stays consistent with uploads.
 	if err := s.store.EnsureFolderPath(r.Context(), user.ID, dir); err != nil {
-		log.Printf("ensure folder path: %v", err)
+		log.Printf("ensure folder path result=failure err=%v", err)
 	}
 	relativeDir := filepath.Join("files", strconv.FormatInt(user.ID, 10), dir)
 	conflict, conflictErr := s.store.FindUploadConflict(r.Context(), user.ID, relativeDir, name)
 	if conflictErr != nil && !errors.Is(conflictErr, store.ErrNotFound) {
-		log.Printf("find upload conflict: %v", conflictErr)
+		log.Printf("find upload conflict result=failure err=%v", conflictErr)
 		rejectInit(http.StatusInternalServerError, "检查同名文件失败", "conflict_check_failed", nil)
 		return
 	}
@@ -1941,7 +1941,7 @@ func (s *Server) uploadInit(w http.ResponseWriter, r *http.Request) {
 		// Disk protection rejects upload initialization when free space is below the configured threshold.
 		_, free, _, err := diskusage.DiskUsage(s.config.DataDir)
 		if err != nil {
-			log.Printf("check disk usage: %v", err)
+			log.Printf("check disk usage result=failure err=%v", err)
 			rejectInit(http.StatusInternalServerError, "无法检查系统存储空间", "disk_check_failed", nil)
 			return
 		}
@@ -1979,7 +1979,7 @@ func (s *Server) uploadInit(w http.ResponseWriter, r *http.Request) {
 			rejectInit(http.StatusForbidden, "超出用户配额", "quota_exceeded", map[string]any{"code": "QUOTA_EXCEEDED", "usedBytes": quotaErr.UsedBytes, "quotaBytes": quotaErr.QuotaBytes, "fileSize": quotaErr.FileSize, "pendingBytes": quotaErr.PendingBytes})
 			return
 		}
-		log.Printf("create upload task: %v", err)
+		log.Printf("create upload task result=failure err=%v", err)
 		rejectInit(http.StatusInternalServerError, "创建上传任务失败", "task_create_failed", nil)
 		return
 	}
@@ -2066,7 +2066,7 @@ func (s *Server) uploadChunk(w http.ResponseWriter, r *http.Request) {
 	}
 	settings, err := s.store.GetLogSettings(r.Context())
 	if err != nil {
-		log.Printf("get upload settings: %v", err)
+		log.Printf("get upload settings result=failure err=%v", err)
 		s.recordAudit(r, &user.ID, user.Username, "upload_chunk", task.Name, "failure", "settings_failed")
 		s.serviceEvent(r, "upload_chunk", user.Username, "name=%s index=%d result=failure reason=settings_failed", task.Name, index)
 		writeError(w, http.StatusInternalServerError, "读取上传设置失败")
@@ -2124,7 +2124,7 @@ func (s *Server) uploadChunk(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := s.store.SetChunk(r.Context(), task.ID, index, written, hex.EncodeToString(hash.Sum(nil))); err != nil {
 		_ = os.Remove(path)
-		log.Printf("set uploaded chunk: %v", err)
+		log.Printf("set uploaded chunk result=failure err=%v", err)
 		s.recordAudit(r, &user.ID, user.Username, "upload_chunk", task.Name, "failure", "save_failed")
 		s.serviceEvent(r, "upload_chunk", user.Username, "name=%s index=%d result=failure reason=save_failed", task.Name, index)
 		writeError(w, http.StatusInternalServerError, "保存上传分片失败")
@@ -2290,7 +2290,7 @@ func (s *Server) uploadStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		log.Printf("get upload status: %v", err)
+		log.Printf("get upload status result=failure err=%v", err)
 		writeError(w, http.StatusInternalServerError, "读取上传任务失败")
 		return
 	}
@@ -2304,7 +2304,7 @@ func (s *Server) uploadStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	chunks, err := s.store.ListChunks(r.Context(), task.ID)
 	if err != nil {
-		log.Printf("list upload status chunks: %v", err)
+		log.Printf("list upload status chunks result=failure err=%v", err)
 		writeError(w, http.StatusInternalServerError, "读取上传分片失败")
 		return
 	}
@@ -2421,7 +2421,7 @@ func (s *Server) checkInstantUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		log.Printf("find instant upload match: %v", err)
+		log.Printf("find instant upload match result=failure err=%v", err)
 		writeError(w, http.StatusInternalServerError, "检查文件失败")
 		return
 	}
@@ -2455,7 +2455,7 @@ func (s *Server) checkInstantUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !errors.Is(conflictErr, store.ErrNotFound) {
-		log.Printf("find upload conflict during instant check: %v", conflictErr)
+		log.Printf("find upload conflict during instant check result=failure err=%v", conflictErr)
 		writeError(w, http.StatusInternalServerError, "检查文件冲突失败")
 		return
 	}
@@ -2504,7 +2504,7 @@ func (s *Server) completeUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	chunks, err := s.store.ListChunks(r.Context(), task.ID)
 	if err != nil {
-		log.Printf("list uploaded chunks: %v", err)
+		log.Printf("list uploaded chunks result=failure err=%v", err)
 		writeError(w, http.StatusInternalServerError, "读取上传分片失败")
 		return
 	}
@@ -2615,7 +2615,7 @@ func (s *Server) completeUpload(w http.ResponseWriter, r *http.Request) {
 		return placeUploadFile(mergedPath, finalPath)
 	})
 	if err != nil {
-		log.Printf("complete upload: %v", err)
+		log.Printf("complete upload result=failure err=%v", err)
 		auditReason = "save_failed"
 		serviceReason = "save_failed"
 		// 落盘/组装失败是终局失败：分片已合并、重试必须重传，保留任务没有续传价值，却会按整份文件
@@ -2633,7 +2633,7 @@ func (s *Server) completeUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.store.DeleteChunks(r.Context(), task.ID); err != nil {
-		log.Printf("delete uploaded chunks: %v", err)
+		log.Printf("delete uploaded chunks result=failure err=%v", err)
 	}
 	cleanupFinal = false
 	auditResult, auditReason = "success", ""
@@ -2697,7 +2697,7 @@ func (s *Server) listFiles(w http.ResponseWriter, r *http.Request) {
 	}
 	files, total, err := s.store.ListFilesSorted(r.Context(), scopeUserID, scopeAdmin, strings.TrimSpace(r.URL.Query().Get("keyword")), dir, fileSort, page, pageSize)
 	if err != nil {
-		log.Printf("list files: %v", err)
+		log.Printf("list files result=failure err=%v", err)
 		writeError(w, http.StatusInternalServerError, "获取文件列表失败")
 		return
 	}
@@ -2791,7 +2791,7 @@ func (s *Server) batchDownload(w http.ResponseWriter, r *http.Request) {
 		totalBytes += file.Size
 	}
 	if hasSpace, diskErr := s.batchDownloadDiskAvailable(totalBytes); diskErr != nil {
-		log.Printf("check batch download disk usage: %v", diskErr)
+		log.Printf("check batch download disk usage result=failure err=%v", diskErr)
 		writeError(w, http.StatusInternalServerError, "无法检查系统存储空间")
 		return
 	} else if !hasSpace {
@@ -2862,7 +2862,7 @@ func (s *Server) batchDownload(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Disposition", contentDisposition(batchDownloadFilename()))
 	w.Header().Set("Content-Length", strconv.FormatInt(info.Size(), 10))
 	if _, err := io.Copy(w, archive); err != nil {
-		log.Printf("stream batch download archive: %v", err)
+		log.Printf("stream batch download archive result=failure err=%v", err)
 		return
 	}
 	names := make([]string, 0, len(files))
@@ -2954,7 +2954,7 @@ func (s *Server) batchShare(w http.ResponseWriter, r *http.Request) {
 	if len(input.FolderIDs) > 0 {
 		expanded, expandErr := s.store.ExpandFolderFileIDs(r.Context(), user.ID, input.FolderIDs)
 		if expandErr != nil {
-			log.Printf("expand batch share folders: %v", expandErr)
+			log.Printf("expand batch share folders result=failure err=%v", expandErr)
 			writeError(w, http.StatusInternalServerError, "读取目录文件失败")
 			return
 		}
@@ -3017,14 +3017,14 @@ func (s *Server) batchShare(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			if err != nil {
-				log.Printf("create batch share: %v", err)
+				log.Printf("create batch share result=failure err=%v", err)
 				writeError(w, http.StatusInternalServerError, "创建分享链接失败")
 				return
 			}
 			createdTokens = append(createdTokens, token)
 			share, err = s.store.GetShareByToken(r.Context(), token)
 			if err != nil {
-				log.Printf("load batch share: %v", err)
+				log.Printf("load batch share result=failure err=%v", err)
 				writeError(w, http.StatusInternalServerError, "创建分享链接失败")
 				return
 			}
@@ -3111,7 +3111,7 @@ func (s *Server) batchDelete(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err != nil {
-			log.Printf("check batch-delete folders: %v", err)
+			log.Printf("check batch-delete folders result=failure err=%v", err)
 			writeError(w, http.StatusInternalServerError, "检查目录失败")
 			return
 		}
@@ -3195,7 +3195,7 @@ func (s *Server) batchDelete(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if err != nil {
-				log.Printf("batch delete files: %v", err)
+				log.Printf("batch delete files result=failure err=%v", err)
 				writeError(w, http.StatusInternalServerError, "删除文件失败")
 				return
 			}
@@ -3207,20 +3207,20 @@ func (s *Server) batchDelete(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err != nil {
-			log.Printf("delete folder tree: %v", err)
+			log.Printf("delete folder tree result=failure err=%v", err)
 			writeError(w, http.StatusInternalServerError, "删除目录失败")
 			return
 		}
 		paths = append(paths, treePaths...)
 		for _, path := range paths {
 			if err := os.Remove(filepath.Join(s.config.DataDir, path)); err != nil && !errors.Is(err, os.ErrNotExist) {
-				log.Printf("remove batch-deleted file content: %v", err)
+				log.Printf("remove batch-deleted file content result=failure err=%v", err)
 			}
 		}
 		for _, folder := range rootFolders {
 			diskPath := filepath.Join(s.config.DataDir, "files", strconv.FormatInt(user.ID, 10), filepath.FromSlash(folder.Path))
 			if err := os.RemoveAll(diskPath); err != nil {
-				log.Printf("remove batch-deleted folder content: %v", err)
+				log.Printf("remove batch-deleted folder content result=failure err=%v", err)
 			}
 			s.serviceEvent(r, "folder_delete", user.Username, "target=%s result=success", folder.Path)
 			s.recordAudit(r, &user.ID, user.Username, "folder_delete", folder.Path, "success", "folder_delete")
@@ -3241,14 +3241,14 @@ func (s *Server) batchDelete(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err != nil {
-			log.Printf("batch delete files: %v", err)
+			log.Printf("batch delete files result=failure err=%v", err)
 			writeError(w, http.StatusInternalServerError, "删除文件失败")
 			return
 		}
 	}
 	for _, path := range paths {
 		if err := os.Remove(filepath.Join(s.config.DataDir, path)); err != nil && !errors.Is(err, os.ErrNotExist) {
-			log.Printf("remove batch-deleted file content: %v", err)
+			log.Printf("remove batch-deleted file content result=failure err=%v", err)
 		}
 	}
 	foldersDeleted := 0
@@ -3408,7 +3408,7 @@ func (s *Server) listShares(w http.ResponseWriter, r *http.Request) {
 	user := currentUser(r.Context())
 	shares, err := s.store.ListSharesByOwner(r.Context(), user.ID)
 	if err != nil {
-		log.Printf("list shares: %v", err)
+		log.Printf("list shares result=failure err=%v", err)
 		writeError(w, http.StatusInternalServerError, "获取分享列表失败")
 		return
 	}
@@ -3446,7 +3446,7 @@ func (s *Server) listFileShares(w http.ResponseWriter, r *http.Request) {
 	}
 	shares, err := s.store.ListSharesByFile(r.Context(), id)
 	if err != nil {
-		log.Printf("list file shares: %v", err)
+		log.Printf("list file shares result=failure err=%v", err)
 		writeError(w, http.StatusInternalServerError, "获取分享列表失败")
 		return
 	}
@@ -3495,7 +3495,7 @@ func (s *Server) shareLogs(w http.ResponseWriter, r *http.Request) {
 	page, pageSize := pagination(r)
 	logs, total, err := s.store.ListShareAuditLogs(r.Context(), share.Token, share.CreatedBy, page, pageSize)
 	if err != nil {
-		log.Printf("list share logs: %v", err)
+		log.Printf("list share logs result=failure err=%v", err)
 		writeError(w, http.StatusInternalServerError, "获取分享日志失败")
 		return
 	}
@@ -3525,7 +3525,7 @@ func (s *Server) extendShare(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, store.ErrNotFound) {
 			writeError(w, http.StatusNotFound, "分享不存在")
 		} else {
-			log.Printf("extend share: %v", err)
+			log.Printf("extend share result=failure err=%v", err)
 			writeError(w, http.StatusInternalServerError, "延期分享失败")
 		}
 		return
@@ -3563,7 +3563,7 @@ func (s *Server) increaseShare(w http.ResponseWriter, r *http.Request) {
 		} else if errors.Is(err, store.ErrConflict) {
 			writeError(w, http.StatusBadRequest, "分享次数限制无效")
 		} else {
-			log.Printf("increase share: %v", err)
+			log.Printf("increase share result=failure err=%v", err)
 			writeError(w, http.StatusInternalServerError, "增加分享次数失败")
 		}
 		return
@@ -3591,7 +3591,7 @@ func (s *Server) deleteShare(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, store.ErrNotFound) {
 			writeError(w, http.StatusNotFound, "分享不存在")
 		} else {
-			log.Printf("revoke share: %v", err)
+			log.Printf("revoke share result=failure err=%v", err)
 			writeError(w, http.StatusInternalServerError, "撤销分享失败")
 		}
 		return
@@ -4042,7 +4042,7 @@ func (s *Server) createFolder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		log.Printf("create folder: %v", err)
+		log.Printf("create folder result=failure err=%v", err)
 		writeError(w, http.StatusInternalServerError, "创建目录失败")
 		return
 	}
@@ -4104,7 +4104,7 @@ func (s *Server) listFolders(w http.ResponseWriter, r *http.Request) {
 	}
 	folders, err := s.store.ListFolders(r.Context(), user.ID)
 	if err != nil {
-		log.Printf("list folders: %v", err)
+		log.Printf("list folders result=failure err=%v", err)
 		writeError(w, http.StatusInternalServerError, "获取目录列表失败")
 		return
 	}
@@ -4204,7 +4204,7 @@ func (s *Server) renameFolder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		log.Printf("rename folder: %v", err)
+		log.Printf("rename folder result=failure err=%v", err)
 		writeError(w, http.StatusInternalServerError, "重命名目录失败")
 		return
 	}
@@ -4244,7 +4244,7 @@ func (s *Server) deleteFolder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		log.Printf("delete folder: %v", err)
+		log.Printf("delete folder result=failure err=%v", err)
 		writeError(w, http.StatusInternalServerError, "删除目录失败")
 		return
 	}
@@ -4279,12 +4279,12 @@ func (s *Server) deleteFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		log.Printf("delete file: %v", err)
+		log.Printf("delete file result=failure err=%v", err)
 		writeError(w, http.StatusInternalServerError, "删除文件失败")
 		return
 	}
 	if err := os.Remove(filepath.Join(s.config.DataDir, path)); err != nil && !errors.Is(err, os.ErrNotExist) {
-		log.Printf("remove file content: %v", err)
+		log.Printf("remove file content result=failure err=%v", err)
 	}
 	serviceResult, serviceReason = "success", ""
 	s.notifyFileBoxChange(user.ID, userDirsFromStoragePaths([]string{path})...)
@@ -4466,7 +4466,7 @@ func (s *Server) updateUserReadOnly(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		log.Printf("update user read-only window: %v", err)
+		log.Printf("update user read-only window result=failure err=%v", err)
 		writeError(w, http.StatusInternalServerError, "保存只读时段失败")
 		return
 	}
@@ -4656,27 +4656,27 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		log.Printf("delete user: %v", err)
+		log.Printf("delete user result=failure err=%v", err)
 		writeError(w, http.StatusInternalServerError, "删除用户失败")
 		return
 	}
 	for _, path := range paths {
 		if removeErr := os.Remove(filepath.Join(s.config.DataDir, path)); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
-			log.Printf("remove deleted user file: %v", removeErr)
+			log.Printf("remove deleted user file result=failure err=%v", removeErr)
 		}
 	}
 	if !keepFiles {
 		if removeErr := os.RemoveAll(filepath.Join(s.config.DataDir, "files", strconv.FormatInt(id, 10))); removeErr != nil {
-			log.Printf("remove deleted user directory: %v", removeErr)
+			log.Printf("remove deleted user directory result=failure err=%v", removeErr)
 		}
 	} else {
 		// 文件已迁入回收站，原用户目录只剩空壳：回收空目录（含残留的 tmp 分片）。
 		// Files moved to the recycle bin; prune the empty user tree plus leftover temp chunks.
 		if pruneErr := pruneEmptyDirs(filepath.Join(s.config.DataDir, "files", strconv.FormatInt(id, 10))); pruneErr != nil {
-			log.Printf("prune deleted user directory: %v", pruneErr)
+			log.Printf("prune deleted user directory result=failure err=%v", pruneErr)
 		}
 		if removeErr := os.RemoveAll(filepath.Join(s.config.DataDir, "files", strconv.FormatInt(id, 10))); removeErr != nil {
-			log.Printf("remove deleted user directory: %v", removeErr)
+			log.Printf("remove deleted user directory result=failure err=%v", removeErr)
 		}
 		_ = moves
 	}
@@ -4715,7 +4715,7 @@ func (s *Server) clearUserFiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if getErr != nil {
-		log.Printf("load clear target: %v", getErr)
+		log.Printf("load clear target result=failure err=%v", getErr)
 		writeError(w, http.StatusInternalServerError, "清空文件失败")
 		return
 	}
@@ -4728,14 +4728,14 @@ func (s *Server) clearUserFiles(w http.ResponseWriter, r *http.Request) {
 	// Re-authentication reuses the clear-all buckets and the "IP failure, never lock the account" policy.
 	decision, err := s.clearFilesReauth(r.Context(), r, admin, input.Password, input.Code)
 	if err != nil {
-		log.Printf("clear user files reauth: %v", err)
+		log.Printf("clear user files reauth result=failure err=%v", err)
 		auditReason = "reauth_failed"
 		writeError(w, http.StatusInternalServerError, "清空文件失败")
 		return
 	}
 	if decision != clearReauthAllow {
 		if settings, settingsErr := s.store.GetLogSettings(r.Context()); settingsErr != nil {
-			log.Printf("clear user files reauth settings: %v", settingsErr)
+			log.Printf("clear user files reauth settings result=failure err=%v", settingsErr)
 		} else {
 			s.recordIPFailure(r, settings)
 		}
@@ -4750,7 +4750,7 @@ func (s *Server) clearUserFiles(w http.ResponseWriter, r *http.Request) {
 	}
 	result, err := s.store.ClearFiles(r.Context(), id, false)
 	if err != nil {
-		log.Printf("clear user files: %v", err)
+		log.Printf("clear user files result=failure err=%v", err)
 		auditReason = "clear_failed"
 		writeError(w, http.StatusInternalServerError, "清空文件失败")
 		return
@@ -4766,7 +4766,7 @@ func (s *Server) clearUserFiles(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if err := s.cleanClearedStorage([]int64{id}, diskMode); err != nil {
-		log.Printf("clean cleared user storage: %v", err)
+		log.Printf("clean cleared user storage result=failure err=%v", err)
 	}
 	for ownerID, dirs := range userDirsByOwner(result.Paths) {
 		s.notifyFileBoxChange(ownerID, dirs...)
@@ -4784,7 +4784,7 @@ func (s *Server) clearUserFiles(w http.ResponseWriter, r *http.Request) {
 func (s *Server) listRecycleFiles(w http.ResponseWriter, r *http.Request) {
 	items, err := s.store.ListRecycleFiles(r.Context())
 	if err != nil {
-		log.Printf("list recycle files: %v", err)
+		log.Printf("list recycle files result=failure err=%v", err)
 		writeError(w, http.StatusInternalServerError, "读取回收站失败")
 		return
 	}
@@ -4804,7 +4804,7 @@ func (s *Server) purgeRecycleBin(w http.ResponseWriter, r *http.Request) {
 	admin := currentUser(r.Context())
 	paths, err := s.store.PurgeRecycle(r.Context())
 	if err != nil {
-		log.Printf("purge recycle bin: %v", err)
+		log.Printf("purge recycle bin result=failure err=%v", err)
 		writeError(w, http.StatusInternalServerError, "清空回收站失败")
 		return
 	}
@@ -4814,7 +4814,7 @@ func (s *Server) purgeRecycleBin(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if pruneErr := pruneEmptyDirs(filepath.Join(s.config.DataDir, "files", strconv.Itoa(store.RecycleOwnerID))); pruneErr != nil {
-		log.Printf("prune recycle directory: %v", pruneErr)
+		log.Printf("prune recycle directory result=failure err=%v", pruneErr)
 	}
 	s.serviceEvent(r, "recycle_purge", admin.Username, "count=%d result=success", len(paths))
 	writeData(w, http.StatusOK, "回收站已清空", map[string]any{"count": len(paths)})
@@ -4840,7 +4840,7 @@ func (s *Server) deleteRecycleFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		log.Printf("delete recycle file: %v", err)
+		log.Printf("delete recycle file result=failure err=%v", err)
 		writeError(w, http.StatusInternalServerError, "删除文件失败")
 		return
 	}
@@ -4848,7 +4848,7 @@ func (s *Server) deleteRecycleFile(w http.ResponseWriter, r *http.Request) {
 		log.Printf("remove recycled file %q: %v", path, removeErr)
 	}
 	if pruneErr := pruneEmptyDirs(filepath.Join(s.config.DataDir, "files", strconv.Itoa(store.RecycleOwnerID))); pruneErr != nil {
-		log.Printf("prune recycle directory: %v", pruneErr)
+		log.Printf("prune recycle directory result=failure err=%v", pruneErr)
 	}
 	s.serviceEvent(r, "recycle_delete", admin.Username, "target=%d result=success", id)
 	writeData(w, http.StatusOK, "文件已删除", nil)
@@ -4864,7 +4864,7 @@ func (s *Server) stats(w http.ResponseWriter, r *http.Request) {
 	}
 	total, free, used, err := diskusage.DiskUsage(s.config.DataDir)
 	if err != nil {
-		log.Printf("read disk usage: %v", err)
+		log.Printf("read disk usage result=failure err=%v", err)
 		writeError(w, http.StatusInternalServerError, "获取磁盘统计失败")
 		return
 	}
@@ -4921,7 +4921,7 @@ func (s *Server) listLogs(w http.ResponseWriter, r *http.Request) {
 	}
 	logs, total, err := s.store.ListAuditLogs(r.Context(), userID, strings.TrimSpace(r.URL.Query().Get("action")), strings.TrimSpace(r.URL.Query().Get("result")), strings.TrimSpace(r.URL.Query().Get("keyword")), from, to, page, pageSize)
 	if err != nil {
-		log.Printf("list audit logs: %v", err)
+		log.Printf("list audit logs result=failure err=%v", err)
 		writeError(w, http.StatusInternalServerError, "获取日志失败")
 		return
 	}
@@ -4951,7 +4951,7 @@ func (s *Server) logActions(w http.ResponseWriter, r *http.Request) {
 	user := currentUser(r.Context())
 	used, err := s.store.ListUsedActions(r.Context(), user.ID, user.Role == "admin")
 	if err != nil {
-		log.Printf("list used actions: %v", err)
+		log.Printf("list used actions result=failure err=%v", err)
 		writeData(w, http.StatusOK, "获取成功", all)
 		return
 	}
@@ -5090,7 +5090,7 @@ func (s *Server) recordAudit(r *http.Request, userID *int64, username, action, t
 	// recordAudit 统一写入来源 IP 和业务结果；审计清理由后台定时任务执行。
 	// recordAudit centralizes source-IP and outcome recording; audit retention is handled by scheduled cleanup.
 	if err := s.store.AddAuditLog(r.Context(), userID, username, action, target, s.requestIP(r), result, reason); err != nil {
-		log.Printf("write audit log: %v", err)
+		log.Printf("write audit log result=failure err=%v", err)
 	}
 }
 
@@ -5098,7 +5098,7 @@ func (s *Server) recordAudit(r *http.Request, userID *int64, username, action, t
 // recordShareAudit 为匿名分享事件记录创建者归属，但不伪造请求用户身份。
 func (s *Server) recordShareAudit(r *http.Request, userID, shareOwnerID *int64, username, action, target, result, reason string) {
 	if err := s.store.AddAuditLogWithShareOwner(r.Context(), userID, shareOwnerID, username, action, target, s.requestIP(r), result, reason); err != nil {
-		log.Printf("write share audit log: %v", err)
+		log.Printf("write share audit log result=failure err=%v", err)
 	}
 }
 

@@ -885,7 +885,7 @@ func (s *Server) collectionUploadChunk(w http.ResponseWriter, r *http.Request) {
 	}
 	settings, err := s.store.GetLogSettings(r.Context())
 	if err != nil {
-		log.Printf("get public upload settings: %v", err)
+		log.Printf("get public upload settings result=failure err=%v", err)
 		s.collectionFailure(w, r, task.Name, "settings_failed", http.StatusInternalServerError, "读取上传设置失败", nil)
 		return
 	}
@@ -903,7 +903,7 @@ func (s *Server) collectionUploadChunk(w http.ResponseWriter, r *http.Request) {
 		// Recheck free space before every chunk write because the disk state may change after init.
 		_, free, _, diskErr := diskUsageFunc(s.config.DataDir)
 		if diskErr != nil {
-			log.Printf("check collection disk usage before chunk: %v", diskErr)
+			log.Printf("check collection disk usage before chunk result=failure err=%v", diskErr)
 			s.collectionFailure(w, r, task.Name, "disk_check_failed", http.StatusInternalServerError, "无法检查系统存储空间", nil)
 			return
 		}
@@ -990,7 +990,7 @@ func (s *Server) collectionUploadTaskState(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if err != nil {
-		log.Printf("load collection task state: %v", err)
+		log.Printf("load collection task state result=failure err=%v", err)
 		writeError(w, http.StatusInternalServerError, "读取上传任务状态失败")
 		return
 	}
@@ -1012,7 +1012,7 @@ func (s *Server) collectionUploadTaskState(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if err != nil {
-		log.Printf("get collection task state: %v", err)
+		log.Printf("get collection task state result=failure err=%v", err)
 		writeError(w, http.StatusInternalServerError, "读取上传任务状态失败")
 		return
 	}
@@ -1031,7 +1031,7 @@ func (s *Server) collectionUploadStatus(w http.ResponseWriter, r *http.Request) 
   }
   chunks, err := s.store.ListChunks(r.Context(), task.ID)
   if err != nil {
-    log.Printf("list public upload chunks: %v", err)
+    log.Printf("list public upload chunks result=failure err=%v", err)
     s.collectionFailure(w, r, task.ID, "status_failed", http.StatusInternalServerError, "读取上传进度失败", nil)
     return
   }
@@ -1054,7 +1054,7 @@ func (s *Server) collectionUploadComplete(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if err != nil {
-		log.Printf("load collection for complete: %v", err)
+		log.Printf("load collection for complete result=failure err=%v", err)
 		s.collectionFailure(w, r, maskedCollectionToken(r.PathValue("token")), "load_failed", http.StatusInternalServerError, "读取收集链接失败", nil)
 		return
 	}
@@ -1133,7 +1133,7 @@ func (s *Server) collectionUploadComplete(w http.ResponseWriter, r *http.Request
 	}
 	chunks, err := s.store.ListChunks(r.Context(), task.ID)
 	if err != nil {
-		log.Printf("list public upload chunks: %v", err)
+		log.Printf("list public upload chunks result=failure err=%v", err)
 		auditReason = "chunks_read_failed"
 		writeError(w, http.StatusInternalServerError, "读取上传分片失败")
 		return
@@ -1233,7 +1233,7 @@ func (s *Server) collectionUploadComplete(w http.ResponseWriter, r *http.Request
 		return os.Rename(mergedPath, finalPath)
 	}, task.Name, task.Remark)
 	if err != nil {
-		log.Printf("complete collection upload: %v", err)
+		log.Printf("complete collection upload result=failure err=%v", err)
 		if errors.Is(err, store.ErrCollectionExpired) {
 			auditReason = "collection_expired"
 			writeErrorData(w, http.StatusForbidden, "收集链接已过期", map[string]string{"code": "COLLECTION_EXPIRED"})
@@ -1249,7 +1249,7 @@ func (s *Server) collectionUploadComplete(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if err := s.store.DeleteChunks(r.Context(), task.ID); err != nil {
-		log.Printf("delete public upload chunks: %v", err)
+		log.Printf("delete public upload chunks result=failure err=%v", err)
 	}
 	cleanupFinal = false
 	auditReason = ""
@@ -1277,7 +1277,7 @@ func (s *Server) collectionUploadCancel(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if err != nil {
-		log.Printf("load collection for cancel: %v", err)
+		log.Printf("load collection for cancel result=failure err=%v", err)
 		s.collectionFailure(w, r, maskedCollectionToken(token), "load_failed", http.StatusInternalServerError, "读取收集链接失败", nil)
 		return
 	}
