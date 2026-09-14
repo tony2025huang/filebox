@@ -5,6 +5,12 @@ const supportedLocales = new Set(['zh-CN', 'zh-TW', 'en'])
 // The three dictionaries intentionally share one key set so every visible UI state has a translation.
 // 三套字典刻意使用同一组键，确保所有可见界面状态都有翻译。
 export const zhCN = {
+  'recycle.title': '回收站', 'recycle.empty': '回收站为空', 'recycle.owner': '原用户', 'recycle.selectAll': '全选',
+  'recycle.move': '移动到…', 'recycle.moveTitle': '移动回收站文件', 'recycle.targetUser': '目标用户',
+  'recycle.targetDir': '目标目录（不存在会自动创建）', 'recycle.moveConfirm': '确认移动', 'recycle.delete': '永久删除',
+  'recycle.purge': '清空回收站', 'recycle.purgeConfirm': '确认清空', 'recycle.download': '下载',
+  'recycle.moved': '已移动 {count} 个文件', 'recycle.deleted': '已永久删除', 'recycle.purged': '回收站已清空',
+  'recycle.emptySelection': '请先选择文件', 'recycle.confirmPurge': '清空回收站会永久删除其中所有文件，且无法恢复。',
   'lang.zhCN': '简体中文', 'lang.zhTW': '繁體中文', 'lang.en': 'English', 'lang.followSystem': '跟随系统',
   'nav.files': '我的文件', 'nav.system': '系统设置', 'nav.syncTasks': '同步任务', 'nav.logs': '日志', 'nav.logout': '退出登录',
   'page.files': '文件库', 'page.admin': '工作区管理', 'page.logs': '操作日志', 'page.login': '登录', 'page.changePassword': '修改密码',
@@ -25,6 +31,12 @@ Object.assign(zhCN, {
 })
 
 export const zhTW = {
+  'recycle.title': '回收站', 'recycle.empty': '回收站是空的', 'recycle.owner': '原使用者', 'recycle.selectAll': '全選',
+  'recycle.move': '移動到…', 'recycle.moveTitle': '移動回收站檔案', 'recycle.targetUser': '目標使用者',
+  'recycle.targetDir': '目標目錄（不存在會自動建立）', 'recycle.moveConfirm': '確認移動', 'recycle.delete': '永久刪除',
+  'recycle.purge': '清空回收站', 'recycle.purgeConfirm': '確認清空', 'recycle.download': '下載',
+  'recycle.moved': '已移動 {count} 個檔案', 'recycle.deleted': '已永久刪除', 'recycle.purged': '回收站已清空',
+  'recycle.emptySelection': '請先選擇檔案', 'recycle.confirmPurge': '清空回收站會永久刪除其中所有檔案，且無法復原。',
   'lang.zhCN': '簡體中文', 'lang.zhTW': '繁體中文', 'lang.en': 'English', 'lang.followSystem': '跟隨系統',
   'nav.files': '我的檔案', 'nav.system': '系統設定', 'nav.syncTasks': '同步任務', 'nav.logs': '日誌', 'nav.logout': '登出',
   'page.files': '檔案庫', 'page.admin': '工作區管理', 'page.logs': '操作日誌', 'page.login': '登入', 'page.changePassword': '修改密碼',
@@ -44,6 +56,12 @@ Object.assign(zhTW, {
 })
 
 export const en = {
+  'recycle.title': 'Recycle bin', 'recycle.empty': 'The recycle bin is empty', 'recycle.owner': 'Former user', 'recycle.selectAll': 'Select all',
+  'recycle.move': 'Move to…', 'recycle.moveTitle': 'Move recycled files', 'recycle.targetUser': 'Target user',
+  'recycle.targetDir': 'Target folder (created when missing)', 'recycle.moveConfirm': 'Move', 'recycle.delete': 'Delete permanently',
+  'recycle.purge': 'Empty recycle bin', 'recycle.purgeConfirm': 'Empty', 'recycle.download': 'Download',
+  'recycle.moved': 'Moved {count} file(s)', 'recycle.deleted': 'Permanently deleted', 'recycle.purged': 'Recycle bin emptied',
+  'recycle.emptySelection': 'Select files first', 'recycle.confirmPurge': 'Emptying the recycle bin permanently deletes every file in it; this cannot be undone.',
   'lang.zhCN': 'Simplified Chinese', 'lang.zhTW': 'Traditional Chinese', 'lang.en': 'English', 'lang.followSystem': 'Follow system',
   'nav.files': 'My files', 'nav.system': 'System settings', 'nav.syncTasks': 'Sync tasks', 'nav.logs': 'Logs', 'nav.logout': 'Log out',
   'page.files': 'File library', 'page.admin': 'Workspace admin', 'page.logs': 'Audit logs', 'page.login': 'Log in',

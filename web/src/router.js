@@ -2,6 +2,7 @@ import { createRouter, createWebHistory } from 'vue-router'
 import LoginView from './views/LoginView.vue'
 import FilesView from './views/FilesView.vue'
 import AdminView from './views/AdminView.vue'
+import RecycleView from './views/RecycleView.vue'
 import LogsView from './views/LogsView.vue'
 import ChangePasswordView from './views/ChangePasswordView.vue'
 import ShareView from './views/ShareView.vue'
@@ -25,6 +26,9 @@ const router = createRouter({
     // share route never swallows it.
     { path: '/collections', component: CollectionsView, meta: { titleKey: 'page.collections' } },
     { path: '/admin', component: AdminView, meta: { admin: true, titleKey: 'page.admin' } },
+    // v041：回收站独立页面（仅管理员）。
+    // v041: standalone recycle-bin page (admin only).
+    { path: '/recycle', component: RecycleView, meta: { admin: true, titleKey: 'recycle.title' } },
     { path: '/u/:token', component: UploadView, meta: { public: true, uploadCollection: true, titleKey: 'collection.upload' } },
     { path: '/g/:token', component: BatchShareView, meta: { public: true, share: true, titleKey: 'batchShare.heading' } },
     { path: '/:token', component: ShareView, meta: { public: true, share: true, titleKey: 'share.heading' } },

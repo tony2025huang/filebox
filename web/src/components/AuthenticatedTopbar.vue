@@ -1,4 +1,4 @@
-<template>
+﻿<template>
   <header class="topbar">
     <div class="topbar-brand"><BrandLogo variant="main" compact link /><span class="slash">/</span><span class="section-name">{{ t(sectionKey) }}</span></div>
     <div class="topbar-actions">
@@ -9,7 +9,8 @@
       <RouterLink to="/shares" class="icon-text-button"><Share2 :size="16" /> {{ t('nav.shares') }}</RouterLink>
       <RouterLink to="/sync" class="icon-text-button"><RefreshCw :size="16" /> {{ t('nav.syncTasks') }}</RouterLink>
       <RouterLink to="/logs" class="icon-text-button"><ScrollText :size="16" /> {{ t('nav.logs') }}</RouterLink>
-      <RouterLink v-if="user.role === 'admin'" to="/admin" class="icon-text-button"><Shield :size="16" /> {{ t('nav.system') }}</RouterLink>
+      <RouterLink v-if="user.role === 'admin'" to="/recycle" class="icon-text-button">{{ t('recycle.title') }}</RouterLink>
+    <RouterLink v-if="user.role === 'admin'" to="/admin" class="icon-text-button"><Shield :size="16" /> {{ t('nav.system') }}</RouterLink>
       <button type="button" class="icon-button" :title="t('nav.changePassword')" @click="openChangePassword"><KeyRound :size="17" /></button>
       <button class="icon-button" :title="t('nav.logout')" @click="logout"><LogOut :size="18" /></button>
     </div>
@@ -45,8 +46,8 @@ import { t } from '../i18n'
 import { mobileNavItems, navKeyForPath } from '../topbarNav'
 import { FolderOpen, KeyRound, LoaderCircle, LogOut, Menu, RefreshCw, ScrollText, Share2, Shield, UploadCloud, X } from 'lucide-vue-next'
 
-// AuthenticatedTopbar 是登录后所有视图共享的顶栏（#12/13/14）：统一包含 文件/分享/同步/日志/收集/管理后台(admin)/语言/改密/退出，
-// 各页差异通过 actions 插槽保留（如 FilesView 的传输按钮与角标）。
+// AuthenticatedTopbar æ˜¯ç™»å½•åŽæ‰€æœ‰è§†å›¾å…±äº«çš„é¡¶æ ï¼ˆ#12/13/14ï¼‰ï¼šç»Ÿä¸€åŒ…å« æ–‡ä»¶/åˆ†äº«/åŒæ­¥/æ—¥å¿—/æ”¶é›†/ç®¡ç†åŽå°(admin)/è¯­è¨€/æ”¹å¯†/é€€å‡ºï¼Œ
+// å„é¡µå·®å¼‚é€šè¿‡ actions æ’æ§½ä¿ç•™ï¼ˆå¦‚ FilesView çš„ä¼ è¾“æŒ‰é’®ä¸Žè§’æ ‡ï¼‰ã€‚
 // AuthenticatedTopbar is the shared topbar for all authenticated views (#12/13/14): it unifies files/shares/sync/logs/
 // collections/admin(admin-only)/language/change-password/logout links; per-page extras ride the actions slot.
 const props = defineProps({
@@ -157,3 +158,4 @@ async function submitChangePassword() {
 
 async function logout() { try { await api('/api/auth/logout', { method: 'POST' }) } finally { clearSession(); router.push('/login') } }
 </script>
+
