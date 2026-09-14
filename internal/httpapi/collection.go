@@ -92,7 +92,7 @@ func (s *Server) createCollection(w http.ResponseWriter, r *http.Request) {
 	}
 	token, err := randomShareToken()
 	if err != nil {
-		log.Printf("create collection token: %v", err)
+		log.Printf("collection_create_token result=failure err=%v", err)
 		writeError(w, http.StatusInternalServerError, "创建收集链接失败")
 		return
 	}
@@ -125,7 +125,7 @@ func (s *Server) listCollections(w http.ResponseWriter, r *http.Request) {
 	user := currentUser(r.Context())
 	items, err := s.store.ListUploadCollections(r.Context(), user.ID, false)
 	if err != nil {
-		log.Printf("list collections: %v", err)
+		log.Printf("collection_list result=failure err=%v", err)
 		writeError(w, http.StatusInternalServerError, "读取收集链接失败")
 		return
 	}
@@ -164,13 +164,13 @@ func (s *Server) getCollection(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		log.Printf("get collection: %v", err)
+		log.Printf("collection_get result=failure err=%v", err)
 		writeError(w, http.StatusInternalServerError, "读取收集链接失败")
 		return
 	}
 	files, err := s.store.ListUploadCollectionFiles(r.Context(), collection.ID)
 	if err != nil {
-		log.Printf("list collection files: %v", err)
+		log.Printf("collection_files_list result=failure err=%v", err)
 		writeError(w, http.StatusInternalServerError, "读取已收文件失败")
 		return
 	}
@@ -193,13 +193,13 @@ func (s *Server) getCollectionFiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		log.Printf("get collection files: %v", err)
+		log.Printf("collection_files_get result=failure err=%v", err)
 		writeError(w, http.StatusInternalServerError, "读取已收文件失败")
 		return
 	}
 	files, err := s.store.ListUploadCollectionFiles(r.Context(), collection.ID)
 	if err != nil {
-		log.Printf("list collection files: %v", err)
+		log.Printf("collection_files_list result=failure err=%v", err)
 		writeError(w, http.StatusInternalServerError, "读取已收文件失败")
 		return
 	}
@@ -247,7 +247,7 @@ func (s *Server) updateCollection(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "收集链接参数无效")
 		return
 	case err != nil:
-		log.Printf("update collection: %v", err)
+		log.Printf("collection_update result=failure err=%v", err)
 		writeError(w, http.StatusInternalServerError, "保存收集链接失败")
 		return
 	}
@@ -299,7 +299,7 @@ func (s *Server) collectionMeta(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		log.Printf("collection meta: %v", err)
+		log.Printf("collection_meta result=failure err=%v", err)
 		writeError(w, http.StatusInternalServerError, "读取收集链接失败")
 		return
 	}
@@ -666,7 +666,7 @@ func (s *Server) collectionUploadInit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		log.Printf("load collection for init: %v", err)
+		log.Printf("collection_upload load result=failure err=%v", err)
 		s.collectionFailure(w, r, maskedCollectionToken(token), "load_failed", http.StatusInternalServerError, "读取收集链接失败", nil)
 		return
 	}
@@ -772,12 +772,12 @@ func (s *Server) collectionUploadInit(w http.ResponseWriter, r *http.Request) {
 		folderPath = filepath.ToSlash(filepath.Join(folderPath, filepath.FromSlash(dir)))
 	}
 	if err := s.store.EnsureFolderPath(r.Context(), owner.ID, folderPath); err != nil {
-		log.Printf("ensure collection folder: %v", err)
+		log.Printf("collection_upload ensure_folder result=failure err=%v", err)
 	}
 	// 收集根目录的显示名用收集名（不含 token 后缀），落盘路径仍保留唯一后缀（v030 #7）。
 	// The collection root folder displays the collection name while its path keeps the unique suffix (v030 #7).
 	if err := s.store.SetFolderDisplayName(r.Context(), owner.ID, collectionFolderPath, strings.TrimSpace(collection.Name)); err != nil {
-		log.Printf("set collection folder display name: %v", err)
+		log.Printf("collection_upload set_display_name result=failure err=%v", err)
 	}
 	input.MD5 = strings.ToLower(strings.TrimSpace(input.MD5))
 	input.SHA256 = strings.ToLower(strings.TrimSpace(input.SHA256))
@@ -795,12 +795,12 @@ func (s *Server) collectionUploadInit(w http.ResponseWriter, r *http.Request) {
 				rejectState(linkErr)
 				return
 			}
-			log.Printf("record instant collection file: %v", linkErr)
+			log.Printf("collection_upload instant_link result=failure err=%v", linkErr)
 			s.collectionFailure(w, r, name, "instant_save_failed", http.StatusInternalServerError, "保存上传记录失败", nil)
 			return
 		}
 		if !errors.Is(matchErr, store.ErrNotFound) {
-			log.Printf("find collection instant match: %v", matchErr)
+			log.Printf("collection_upload instant_match result=failure err=%v", matchErr)
 			s.collectionFailure(w, r, name, "instant_check_failed", http.StatusInternalServerError, "检查文件失败", nil)
 			return
 		}
