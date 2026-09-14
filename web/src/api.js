@@ -1,8 +1,8 @@
-import { t } from './i18n'
+﻿import { t } from './i18n'
 
 // batchDownloadFilename uses the browser's local clock to match the backend's
 // YYYYMMDD-HHMMSS archive naming format.
-// batchDownloadFilename 使用浏览器本地时间生成与后端一致的 ZIP 文件名。
+// batchDownloadFilename ä½¿ç”¨æµè§ˆå™¨æœ¬åœ°æ—¶é—´ç”Ÿæˆä¸ŽåŽç«¯ä¸€è‡´çš„ ZIP æ–‡ä»¶åã€‚
 export function batchDownloadFilename(date = new Date()) {
   const pad = value => String(value).padStart(2, '0')
   const timestamp = `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}-${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}`
@@ -10,85 +10,49 @@ export function batchDownloadFilename(date = new Date()) {
 }
 
 const messageKeys = {
-  '用户名或密码错误': 'error.loginFailed', '用户名和密码不能为空': 'error.invalidRequest', '请先登录': 'error.authRequired',
-  '需要管理员权限': 'error.adminRequired', '请求格式无效': 'error.invalidRequest', '语言设置无效': 'error.invalidLanguage',
-  '同名文件已存在': 'error.conflict', '用户名已存在': 'error.userExists', '超出用户配额': 'error.quotaExceeded',
-  '系统存储空间不足，暂时禁止上传': 'error.diskFull', '文件不存在': 'error.fileNotFound', '文件内容不存在': 'error.fileContentNotFound',
-  '上传失败': 'error.uploadFailed', '下载失败': 'error.downloadFailed', '删除文件失败': 'error.deleteFailed',
-  '密码过长': 'error.passwordTooLong', '设置无效': 'error.invalidSettings', '用户信息无效': 'error.invalidUser',
-  '不能删除当前管理员': 'error.cannotDeleteSelf', '文件校验值不匹配': 'error.checksumMismatch', '文件名包含非法字符，禁止上传': 'error.invalidFilename',
-  '注册功能未开放': 'error.registerDisabled', '分享链接已过期': 'error.shareExpired', '分享次数已用完': 'error.shareLimit', '分享不存在': 'error.shareNotFound',
-  '分片大小必须在 2MB-8MB 之间': 'error.invalidChunkSize', '目录无效': 'error.invalidDir', '上传限速无效': 'error.invalidRateLimit',
-  '分享有效期无效': 'error.invalidShareHours', '分享次数限制无效': 'error.invalidShareMax', '同步任务参数无效': 'sync.invalid', '目标系统参数无效': 'sync.invalid'
+  'ç”¨æˆ·åæˆ–å¯†ç é”™è¯¯': 'error.loginFailed', 'ç”¨æˆ·åå’Œå¯†ç ä¸èƒ½ä¸ºç©º': 'error.invalidRequest', 'è¯·å…ˆç™»å½•': 'error.authRequired',
+  'éœ€è¦ç®¡ç†å‘˜æƒé™': 'error.adminRequired', 'è¯·æ±‚æ ¼å¼æ— æ•ˆ': 'error.invalidRequest', 'è¯­è¨€è®¾ç½®æ— æ•ˆ': 'error.invalidLanguage',
+  'åŒåæ–‡ä»¶å·²å­˜åœ¨': 'error.conflict', 'ç”¨æˆ·åå·²å­˜åœ¨': 'error.userExists', 'è¶…å‡ºç”¨æˆ·é…é¢': 'error.quotaExceeded',
+  'ç³»ç»Ÿå­˜å‚¨ç©ºé—´ä¸è¶³ï¼Œæš‚æ—¶ç¦æ­¢ä¸Šä¼ ': 'error.diskFull', 'æ–‡ä»¶ä¸å­˜åœ¨': 'error.fileNotFound', 'æ–‡ä»¶å†…å®¹ä¸å­˜åœ¨': 'error.fileContentNotFound',
+  'ä¸Šä¼ å¤±è´¥': 'error.uploadFailed', 'ä¸‹è½½å¤±è´¥': 'error.downloadFailed', 'åˆ é™¤æ–‡ä»¶å¤±è´¥': 'error.deleteFailed',
+  'å¯†ç è¿‡é•¿': 'error.passwordTooLong', 'è®¾ç½®æ— æ•ˆ': 'error.invalidSettings', 'ç”¨æˆ·ä¿¡æ¯æ— æ•ˆ': 'error.invalidUser',
+  'ä¸èƒ½åˆ é™¤å½“å‰ç®¡ç†å‘˜': 'error.cannotDeleteSelf', 'æ–‡ä»¶æ ¡éªŒå€¼ä¸åŒ¹é…': 'error.checksumMismatch', 'æ–‡ä»¶ååŒ…å«éžæ³•å­—ç¬¦ï¼Œç¦æ­¢ä¸Šä¼ ': 'error.invalidFilename',
+  'æ³¨å†ŒåŠŸèƒ½æœªå¼€æ”¾': 'error.registerDisabled', 'åˆ†äº«é“¾æŽ¥å·²è¿‡æœŸ': 'error.shareExpired', 'åˆ†äº«æ¬¡æ•°å·²ç”¨å®Œ': 'error.shareLimit', 'åˆ†äº«ä¸å­˜åœ¨': 'error.shareNotFound',
+  'åˆ†ç‰‡å¤§å°å¿…é¡»åœ¨ 2MB-8MB ä¹‹é—´': 'error.invalidChunkSize', 'ç›®å½•æ— æ•ˆ': 'error.invalidDir', 'ä¸Šä¼ é™é€Ÿæ— æ•ˆ': 'error.invalidRateLimit',
+  'åˆ†äº«æœ‰æ•ˆæœŸæ— æ•ˆ': 'error.invalidShareHours', 'åˆ†äº«æ¬¡æ•°é™åˆ¶æ— æ•ˆ': 'error.invalidShareMax', 'åŒæ­¥ä»»åŠ¡å‚æ•°æ— æ•ˆ': 'sync.invalid', 'ç›®æ ‡ç³»ç»Ÿå‚æ•°æ— æ•ˆ': 'sync.invalid'
 }
 
 const settingsMessageKeys = {
-  '日志留存天数无效': 'error.invalidLogRetentionDays', '登录失败锁定阈值无效': 'error.invalidLockThreshold', '自动解锁时长无效': 'error.invalidAutoUnlockMinutes',
-  '系统默认语言无效': 'error.invalidDefaultLang', '界面主题色无效': 'error.invalidThemeColor', '密码最小长度无效': 'error.invalidPasswordMinLength',
-  '密码复杂度无效': 'error.invalidPasswordComplexity', 'IP 锁定窗口无效': 'error.invalidIPLockWindow', 'IP 锁定阈值无效': 'error.invalidIPLockThreshold', 'IP 解锁时长无效': 'error.invalidIPUnlockMinutes'
+  'æ—¥å¿—ç•™å­˜å¤©æ•°æ— æ•ˆ': 'error.invalidLogRetentionDays', 'ç™»å½•å¤±è´¥é”å®šé˜ˆå€¼æ— æ•ˆ': 'error.invalidLockThreshold', 'è‡ªåŠ¨è§£é”æ—¶é•¿æ— æ•ˆ': 'error.invalidAutoUnlockMinutes',
+  'ç³»ç»Ÿé»˜è®¤è¯­è¨€æ— æ•ˆ': 'error.invalidDefaultLang', 'ç•Œé¢ä¸»é¢˜è‰²æ— æ•ˆ': 'error.invalidThemeColor', 'å¯†ç æœ€å°é•¿åº¦æ— æ•ˆ': 'error.invalidPasswordMinLength',
+  'å¯†ç å¤æ‚åº¦æ— æ•ˆ': 'error.invalidPasswordComplexity', 'IP é”å®šçª—å£æ— æ•ˆ': 'error.invalidIPLockWindow', 'IP é”å®šé˜ˆå€¼æ— æ•ˆ': 'error.invalidIPLockThreshold', 'IP è§£é”æ—¶é•¿æ— æ•ˆ': 'error.invalidIPUnlockMinutes'
 }
 
 const codeKeys = { DISK_FULL: 'error.diskFull', PASSWORD_CHANGE_REQUIRED: 'error.passwordChangeRequired', REGISTER_DISABLED: 'error.registerDisabled', FILE_TOO_LARGE: 'error.fileTooLarge', SHARE_DOWNLOAD_LIMIT: 'error.shareLimit', SHARE_NOT_FOUND: 'error.shareNotFound', SHARE_REVOKED: 'error.shareRevoked', SHARE_EXPIRED: 'error.shareExpired', SHARE_CONTENT_MISSING: 'error.shareContentMissing', BATCH_DELETE_EMPTY: 'error.batchDeleteEmpty', INVALID_FILE_ID: 'error.invalidFileId', INVALID_READ_ONLY_WINDOW: 'readOnly.invalidWindow', READ_ONLY: 'readOnly.error', COLLECTION_LIMIT: 'collection.limitReached', COLLECTION_EXPIRED: 'collection.expired', COLLECTION_REVOKED: 'collection.revoked', COLLECTION_FILE_TOO_LARGE: 'collection.fileTooLarge', COLLECTION_QUOTA_EXCEEDED: 'collection.quotaExceeded', QUOTA_EXCEEDED: 'error.quotaExceeded', SYNC_TASK_RUNNING: 'sync.confirmRunning' }
-const shareMessageKeys = { '分享已撤销': 'error.shareRevoked', '分享下载被拒绝': 'error.shareDenied', '获取分享列表失败': 'error.shareListFailed', '获取分享日志失败': 'error.shareLogsFailed', '延期分享失败': 'error.shareExtendFailed', '增加分享次数失败': 'error.shareIncreaseFailed' }
+const shareMessageKeys = { 'åˆ†äº«å·²æ’¤é”€': 'error.shareRevoked', 'åˆ†äº«ä¸‹è½½è¢«æ‹’ç»': 'error.shareDenied', 'èŽ·å–åˆ†äº«åˆ—è¡¨å¤±è´¥': 'error.shareListFailed', 'èŽ·å–åˆ†äº«æ—¥å¿—å¤±è´¥': 'error.shareLogsFailed', 'å»¶æœŸåˆ†äº«å¤±è´¥': 'error.shareExtendFailed', 'å¢žåŠ åˆ†äº«æ¬¡æ•°å¤±è´¥': 'error.shareIncreaseFailed' }
 
 codeKeys.HOST_KEY_CHANGED = 'sync.hostKeyChanged'
 
 import { clientHashLimit, shouldSkipClientHash } from './hashPolicy.js'
 import { createSha256 } from './sha256Fallback.js'
 
-// lastHashInfo 记录最近一次校验实际使用的实现与实测吞吐（v034 诊断）。没有它就无法回答
-// 「5GB 文件到底是 WASM 还是纯 JS 兜底」「瓶颈是读盘还是计算」这类问题。
+// lastHashInfo è®°å½•æœ€è¿‘ä¸€æ¬¡æ ¡éªŒå®žé™…ä½¿ç”¨çš„å®žçŽ°ä¸Žå®žæµ‹åžåï¼ˆv034 è¯Šæ–­ï¼‰ã€‚æ²¡æœ‰å®ƒå°±æ— æ³•å›žç­”
+// ã€Œ5GB æ–‡ä»¶åˆ°åº•æ˜¯ WASM è¿˜æ˜¯çº¯ JS å…œåº•ã€ã€Œç“¶é¢ˆæ˜¯è¯»ç›˜è¿˜æ˜¯è®¡ç®—ã€è¿™ç±»é—®é¢˜ã€‚
 // lastHashInfo records which implementation hashed the last file plus read/hash timings (v034).
 let lastHashInfo = null
 
-// getLastHashInfo 返回最近一次 computeFileSHA256 的诊断信息。
+// getLastHashInfo è¿”å›žæœ€è¿‘ä¸€æ¬¡ computeFileSHA256 çš„è¯Šæ–­ä¿¡æ¯ã€‚
 // getLastHashInfo returns the diagnostics of the most recent computeFileSHA256 call.
 export function getLastHashInfo() { return lastHashInfo }
 
 const HASH_INFO_LOG_BYTES = 64 * 1024 * 1024
 
-// 客户端哈希上限与跳过判定见 ./hashPolicy.js（阈值与边界由 web/tests/hashPolicy.test.mjs 覆盖）。
+// å®¢æˆ·ç«¯å“ˆå¸Œä¸Šé™ä¸Žè·³è¿‡åˆ¤å®šè§ ./hashPolicy.jsï¼ˆé˜ˆå€¼ä¸Žè¾¹ç•Œç”± web/tests/hashPolicy.test.mjs è¦†ç›–ï¼‰ã€‚
 
-// showHashOverlay 把诊断直接显示在页面上：部分 DevTools 级别设置会隐藏 info 日志，页面上则不会被忽略。
-// showHashOverlay renders the diagnostics on the page because some DevTools level settings hide info logs.
-function hashOverlayNode() {
-  if (typeof document === 'undefined' || !document.body) return null
-  let node = document.getElementById('filebox-hash-diag')
-  if (!node) {
-    node = document.createElement('div')
-    node.id = 'filebox-hash-diag'
-    node.style.cssText = 'position:fixed;right:12px;bottom:12px;z-index:2147483647;max-width:60vw;padding:8px 10px;border-radius:6px;background:rgba(16,42,67,.92);color:#fff;font:12px/1.5 ui-monospace,Consolas,monospace;white-space:pre-wrap'
-    document.body.appendChild(node)
-  }
-  return node
-}
-
-// showHashProgress 在计算过程中实时显示百分比与瞬时速率，便于直接观察"校验速率是多少"。
-// showHashProgress shows the live percentage and instantaneous rate while hashing.
-function showHashProgress(percent, bytes, startedAt) {
-  try {
-    const node = hashOverlayNode()
-    if (!node) return
-    const elapsed = Math.max(1, Date.now() - startedAt)
-    const mbps = (bytes * (percent / 100) / 1024 / 1024 / (elapsed / 1000)).toFixed(1)
-    node.textContent = `校验中 ${percent}% · ${mbps} MB/s（平均）\n已用 ${(elapsed / 1000).toFixed(1)}s · 共 ${(bytes / 1024 / 1024 / 1024).toFixed(2)} GiB`
-  } catch {}
-}
-
-function showHashOverlay(info) {
-  try {
-    if (typeof document === 'undefined' || !document.body) return
-    const node = hashOverlayNode()
-    if (!node) return
-    if (info.engine === 'skipped') {
-      node.textContent = `校验已跳过 · ${(info.bytes / 1024 / 1024 / 1024).toFixed(2)} GiB\n超过客户端上限（${(clientHashLimit() / 1024 / 1024 / 1024).toFixed(1)} GiB），由服务端计算 sha256`
-      return
-    }
-    const timing = info.readMs || info.hashMs ? `\nread ${info.readMs}ms / hash ${info.hashMs}ms` : ''
-    const why = info.wasmError ? `\nwasmError: ${info.wasmError}` : ''
-    node.textContent = `校验完成 · 引擎 ${info.engine}\n${(info.bytes / 1024 / 1024 / 1024).toFixed(2)} GiB · ${info.mbps} MB/s · ${(info.elapsedMs / 1000).toFixed(1)}s${timing}${why}`
-  } catch {}
-}
+// è¯Šæ–­æµ®å±‚å·²ç§»é™¤ï¼ˆv041ï¼‰ï¼šå®ƒçš„ç”¨é€”æ˜¯åœ¨æŽ§åˆ¶å°ä¸å¯ç”¨æ—¶ç¡®è®¤"è·‘çš„æ˜¯å“ªæ¡å®žçŽ°"ï¼Œç»“è®ºå·²ç»æ‹¿åˆ°
+// ï¼ˆWASM æ­£å¸¸åˆå§‹åŒ–ï¼Œé—®é¢˜åœ¨æµè§ˆå™¨ä¾§çš„ WASM æ‰§è¡Œé€Ÿåº¦ï¼‰ã€‚ä¿ç•™ä¸‹é¢ reportHashInfo çš„ warn çº§æ—¥å¿—ï¼š
+// æˆæœ¬ä¸ºé›¶ã€ä¸å¹²æ‰°ç•Œé¢ï¼Œä¸”åœ¨ä¸‹æ¬¡å‡ºçŽ°æ ¡éªŒå¼‚å¸¸æ—¶æ˜¯æœ€ç›´æŽ¥çš„è¯æ®ã€‚
+// The on-page diagnostic overlay was removed (v041); the console warning below is kept on purpose.
 
 function reportHashInfo(engine, bytes, elapsedMs, detail = {}, onInfo = () => {}) {
   const mbps = Number((bytes / 1024 / 1024 / Math.max(elapsedMs, 1) * 1000).toFixed(1))
@@ -99,7 +63,7 @@ function reportHashInfo(engine, bytes, elapsedMs, detail = {}, onInfo = () => {}
   }
   lastHashInfo = info
   try { onInfo(info) } catch {}
-  // 只对大文件报告，避免小文件刷屏。用 warn 级而非 info：即使控制台级别被收窄到 Warnings+Errors 也能看到。
+  // åªå¯¹å¤§æ–‡ä»¶æŠ¥å‘Šï¼Œé¿å…å°æ–‡ä»¶åˆ·å±ã€‚ç”¨ warn çº§è€Œéž infoï¼šå³ä½¿æŽ§åˆ¶å°çº§åˆ«è¢«æ”¶çª„åˆ° Warnings+Errors ä¹Ÿèƒ½çœ‹åˆ°ã€‚
   // Only report for large files. warn (not info) so it stays visible even when the console level is narrowed.
   if (bytes >= HASH_INFO_LOG_BYTES) {
     if (info.engine === 'skipped') {
@@ -109,32 +73,30 @@ function reportHashInfo(engine, bytes, elapsedMs, detail = {}, onInfo = () => {}
       const why = info.wasmError ? ` wasmError=${JSON.stringify(info.wasmError)}` : ''
       console.warn(`[filebox] checksum engine=${info.engine} bytes=${info.bytes} elapsed=${info.elapsedMs}ms rate=${info.mbps}MB/s${timing}${why}`)
     }
-    showHashOverlay(info)
   }
   return info
 }
 
 // computeFileSHA256 computes the client checksum and reports progress for the upload row.
-// computeFileSHA256 计算客户端 SHA-256，并向上传项报告校验进度；第三个参数回传本次实际使用的
-// 实现与读写耗时拆分（engine/readMs/hashMs/wasmError）。
+// computeFileSHA256 è®¡ç®—å®¢æˆ·ç«¯ SHA-256ï¼Œå¹¶å‘ä¸Šä¼ é¡¹æŠ¥å‘Šæ ¡éªŒè¿›åº¦ï¼›ç¬¬ä¸‰ä¸ªå‚æ•°å›žä¼ æœ¬æ¬¡å®žé™…ä½¿ç”¨çš„
+// å®žçŽ°ä¸Žè¯»å†™è€—æ—¶æ‹†åˆ†ï¼ˆengine/readMs/hashMs/wasmErrorï¼‰ã€‚
 export async function computeFileSHA256(file, onProgress = () => {}, onInfo = () => {}) {
-  // 校验一律优先在 Worker 内进行：≤ 阈值走原生 WebCrypto，超过阈值走 Worker 内的流式哈希
-  // （WASM 优先、纯 JS 兜底），因此主线程任何时候都不会被哈希阻塞（v031-A/B）。
+  // æ ¡éªŒä¸€å¾‹ä¼˜å…ˆåœ¨ Worker å†…è¿›è¡Œï¼šâ‰¤ é˜ˆå€¼èµ°åŽŸç”Ÿ WebCryptoï¼Œè¶…è¿‡é˜ˆå€¼èµ° Worker å†…çš„æµå¼å“ˆå¸Œ
+  // ï¼ˆWASM ä¼˜å…ˆã€çº¯ JS å…œåº•ï¼‰ï¼Œå› æ­¤ä¸»çº¿ç¨‹ä»»ä½•æ—¶å€™éƒ½ä¸ä¼šè¢«å“ˆå¸Œé˜»å¡žï¼ˆv031-A/Bï¼‰ã€‚
   // Hashing always runs in the worker first: native WebCrypto up to the threshold, streaming
   // (WASM first, pure JS fallback) beyond it, so the main thread never blocks (v031-A/B).
   const directLimit = Number(globalThis.FILEBOX_HASH_DIRECT_LIMIT) || 256 * 1024 * 1024
   const started = Date.now()
-  // 超过客户端上限的文件直接跳过：服务端会算出权威哈希并在完成响应里回传（v036）。
+  // è¶…è¿‡å®¢æˆ·ç«¯ä¸Šé™çš„æ–‡ä»¶ç›´æŽ¥è·³è¿‡ï¼šæœåŠ¡ç«¯ä¼šç®—å‡ºæƒå¨å“ˆå¸Œå¹¶åœ¨å®Œæˆå“åº”é‡Œå›žä¼ ï¼ˆv036ï¼‰ã€‚
   // Files over the client limit are skipped outright; the server computes the hash and returns it (v036).
   if (shouldSkipClientHash(file.size)) {
     reportHashInfo('skipped', file.size, 0, {}, onInfo)
     return ''
   }
-  // 大文件把进度同时画到页面诊断框里，这样"校验速率是多少"不必依赖控制台。
-  // Large files mirror their progress into the on-page diagnostic box so the rate is visible without DevTools.
-  const isLarge = file.size >= HASH_INFO_LOG_BYTES
-  const reportProgress = isLarge ? value => { onProgress(value); showHashProgress(value, file.size, started) } : onProgress
-  const viaWorker = await computeSHA256InWorker(file, reportProgress, directLimit)
+  // å¤§æ–‡ä»¶æŠŠè¿›åº¦åŒæ—¶ç”»åˆ°é¡µé¢è¯Šæ–­æ¡†é‡Œï¼Œè¿™æ ·"æ ¡éªŒé€ŸçŽ‡æ˜¯å¤šå°‘"ä¸å¿…ä¾èµ–æŽ§åˆ¶å°ã€‚
+  // 进度只回传给调用方（上传行自己渲染），不再画到已移除的页面诊断浮层（v041）。
+  // Progress is reported to the caller only; the removed on-page diagnostic overlay is gone (v041).
+  const viaWorker = await computeSHA256InWorker(file, onProgress, directLimit)
   if (viaWorker) {
     reportHashInfo(viaWorker.engine, file.size, Date.now() - started, viaWorker, onInfo)
     return viaWorker.hex
@@ -148,7 +110,7 @@ export async function computeFileSHA256(file, onProgress = () => {}, onInfo = ()
     return [...new Uint8Array(digest)].map(value => value.toString(16).padStart(2, '0')).join('')
   }
 
-  // Worker 不可用时的最后兜底：主线程流式哈希，仅保留一个 8MB 分块在内存中。
+  // Worker ä¸å¯ç”¨æ—¶çš„æœ€åŽå…œåº•ï¼šä¸»çº¿ç¨‹æµå¼å“ˆå¸Œï¼Œä»…ä¿ç•™ä¸€ä¸ª 8MB åˆ†å—åœ¨å†…å­˜ä¸­ã€‚
   // Last-resort fallback when no worker is available: main-thread streaming with one 8MB block.
   const blockSize = 8 * 1024 * 1024
   const hasher = createSha256()
@@ -162,8 +124,8 @@ export async function computeFileSHA256(file, onProgress = () => {}, onInfo = ()
   return hex
 }
 
-// computeSHA256InWorker 在 Web Worker 内计算文件摘要；Worker 不可用、报错或超时（大文件按 120 秒/256MiB
-// 估算上限）时返回 null，由调用方回退到主线程实现。文件对象按结构化克隆传入 Worker。
+// computeSHA256InWorker åœ¨ Web Worker å†…è®¡ç®—æ–‡ä»¶æ‘˜è¦ï¼›Worker ä¸å¯ç”¨ã€æŠ¥é”™æˆ–è¶…æ—¶ï¼ˆå¤§æ–‡ä»¶æŒ‰ 120 ç§’/256MiB
+// ä¼°ç®—ä¸Šé™ï¼‰æ—¶è¿”å›ž nullï¼Œç”±è°ƒç”¨æ–¹å›žé€€åˆ°ä¸»çº¿ç¨‹å®žçŽ°ã€‚æ–‡ä»¶å¯¹è±¡æŒ‰ç»“æž„åŒ–å…‹éš†ä¼ å…¥ Workerã€‚
 // computeSHA256InWorker hashes the file inside a Web Worker and returns null when the worker is
 // unavailable, errors, or exceeds its deadline (120s plus 30s per 256MiB) so the caller can fall back.
 function computeSHA256InWorker(file, onProgress, directLimit) {
@@ -184,8 +146,8 @@ function computeSHA256InWorker(file, onProgress, directLimit) {
       try { worker.terminate() } catch {}
       resolve(value)
     }
-    // 看门狗：Worker 分片被替换后模块加载失败可能不触发 onerror，只依赖总超时会白等十几分钟；
-    // 90 秒内没有任何消息（进度或结果）即判定不可用并立即降级。只影响失败场景，不改变正常吞吐。
+    // çœ‹é—¨ç‹—ï¼šWorker åˆ†ç‰‡è¢«æ›¿æ¢åŽæ¨¡å—åŠ è½½å¤±è´¥å¯èƒ½ä¸è§¦å‘ onerrorï¼Œåªä¾èµ–æ€»è¶…æ—¶ä¼šç™½ç­‰åå‡ åˆ†é’Ÿï¼›
+    // 90 ç§’å†…æ²¡æœ‰ä»»ä½•æ¶ˆæ¯ï¼ˆè¿›åº¦æˆ–ç»“æžœï¼‰å³åˆ¤å®šä¸å¯ç”¨å¹¶ç«‹å³é™çº§ã€‚åªå½±å“å¤±è´¥åœºæ™¯ï¼Œä¸æ”¹å˜æ­£å¸¸åžåã€‚
     // Watchdog: a replaced worker chunk can fail to load without firing onerror. No message within 90s
     // means the worker is unusable. Failure path only: normal throughput is unchanged.
     let lastMessageAt = Date.now()
@@ -232,7 +194,7 @@ function computeSHA256InWorker(file, onProgress, directLimit) {
 }
 
 // localizeError maps stable API status/codes/messages while retaining unknown backend messages as a fallback.
-// localizeError 按稳定的状态码/错误码/消息映射翻译，并保留未知后端消息作为回退。
+// localizeError æŒ‰ç¨³å®šçš„çŠ¶æ€ç /é”™è¯¯ç /æ¶ˆæ¯æ˜ å°„ç¿»è¯‘ï¼Œå¹¶ä¿ç•™æœªçŸ¥åŽç«¯æ¶ˆæ¯ä½œä¸ºå›žé€€ã€‚
 export function localizeError(error = {}) {
   const code = error.data?.code || error.code
   if (code === 'QUOTA_EXCEEDED') {
@@ -265,11 +227,11 @@ function formatErrorBytes(bytes = 0) {
   return `${value.toFixed(value >= 10 ? 0 : 1)} ${units[unit]}`
 }
 
-// sessionExpiredRedirected 防止令牌失效后多个并发请求各自触发跳转。
+// sessionExpiredRedirected é˜²æ­¢ä»¤ç‰Œå¤±æ•ˆåŽå¤šä¸ªå¹¶å‘è¯·æ±‚å„è‡ªè§¦å‘è·³è½¬ã€‚
 // sessionExpiredRedirected prevents every concurrent 401 from triggering its own redirect.
 let sessionExpiredRedirected = false
 
-// api 统一附加 Bearer token、JSON 请求头，并将非 2xx 响应转换为本地化错误。
+// api ç»Ÿä¸€é™„åŠ  Bearer tokenã€JSON è¯·æ±‚å¤´ï¼Œå¹¶å°†éž 2xx å“åº”è½¬æ¢ä¸ºæœ¬åœ°åŒ–é”™è¯¯ã€‚
 // api centralizes Bearer-token and JSON headers, and turns non-2xx responses into localized errors.
 export async function api(path, options = {}) {
   const headers = new Headers(options.headers || {})
@@ -290,8 +252,8 @@ export async function api(path, options = {}) {
     if (error.data?.code === 'PASSWORD_CHANGE_REQUIRED' && window.location.pathname !== '/change-password') {
       window.location.assign('/change-password')
     }
-    // 令牌失效（401）：清除本地会话并跳转登录，避免 /sync、/shares、/admin 等页面
-    // 继续携带旧 token 反复请求；登录接口的 401（密码错误）与公开收集页除外。
+    // ä»¤ç‰Œå¤±æ•ˆï¼ˆ401ï¼‰ï¼šæ¸…é™¤æœ¬åœ°ä¼šè¯å¹¶è·³è½¬ç™»å½•ï¼Œé¿å… /syncã€/sharesã€/admin ç­‰é¡µé¢
+    // ç»§ç»­æºå¸¦æ—§ token åå¤è¯·æ±‚ï¼›ç™»å½•æŽ¥å£çš„ 401ï¼ˆå¯†ç é”™è¯¯ï¼‰ä¸Žå…¬å¼€æ”¶é›†é¡µé™¤å¤–ã€‚
     // Token expiry (401): clear the local session and redirect to login so /sync, /shares,
     // /admin and friends stop hammering with a stale token; login 401s (wrong password) and
     // the public collection page are excluded.
@@ -303,7 +265,7 @@ export async function api(path, options = {}) {
   return body
 }
 
-// redirectOnSessionExpired 清除会话并跳转登录页（保留当前地址供登录后回跳；与 router 守卫协作避免重复跳转）。
+// redirectOnSessionExpired æ¸…é™¤ä¼šè¯å¹¶è·³è½¬ç™»å½•é¡µï¼ˆä¿ç•™å½“å‰åœ°å€ä¾›ç™»å½•åŽå›žè·³ï¼›ä¸Ž router å®ˆå«åä½œé¿å…é‡å¤è·³è½¬ï¼‰ã€‚
 // redirectOnSessionExpired clears the session and redirects to login, preserving the current
 // location for post-login return; it cooperates with the router guard to avoid double redirects.
 function redirectOnSessionExpired() {
@@ -316,7 +278,7 @@ function redirectOnSessionExpired() {
   }
 }
 
-// clearSession 清除本地保存的认证令牌、用户快照与同会话传输记录（避免换用户看到旧记录）。
+// clearSession æ¸…é™¤æœ¬åœ°ä¿å­˜çš„è®¤è¯ä»¤ç‰Œã€ç”¨æˆ·å¿«ç…§ä¸ŽåŒä¼šè¯ä¼ è¾“è®°å½•ï¼ˆé¿å…æ¢ç”¨æˆ·çœ‹åˆ°æ—§è®°å½•ï¼‰ã€‚
 // clearSession removes the locally stored authentication token, user snapshot, and same-session transfer records.
 export function clearSession() {
   localStorage.removeItem('filebox_token')
@@ -324,10 +286,11 @@ export function clearSession() {
   sessionStorage.removeItem('filebox_transfers_v1')
 }
 
-// saveSession 持久化登录响应中的 JWT 和公开用户信息。
+// saveSession æŒä¹…åŒ–ç™»å½•å“åº”ä¸­çš„ JWT å’Œå…¬å¼€ç”¨æˆ·ä¿¡æ¯ã€‚
 // saveSession persists the JWT and public user information from the login response.
 export function saveSession(body) {
   sessionExpiredRedirected = false
   localStorage.setItem('filebox_token', body.data.token)
   localStorage.setItem('filebox_user', JSON.stringify(body.data.user))
 }
+
