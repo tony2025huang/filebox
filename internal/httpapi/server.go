@@ -1474,9 +1474,9 @@ func (s *Server) decryptTOTPSecretForUser(ctx context.Context, user store.User) 
 	if legacy && len(s.config.EncryptionKey) == 32 {
 		migrated, encryptErr := s.encryptTOTPSecret(secret)
 		if encryptErr != nil {
-			log.Printf("migrate TOTP secret for user id=%d: %v", user.ID, encryptErr)
+			log.Printf("migrate TOTP secret for user id=%d result=failure err=%v", user.ID, encryptErr)
 		} else if updateErr := s.store.ReencryptTOTPSecret(ctx, user.ID, migrated); updateErr != nil {
-			log.Printf("persist migrated TOTP secret for user id=%d: %v", user.ID, updateErr)
+			log.Printf("persist migrated TOTP secret for user id=%d result=failure err=%v", user.ID, updateErr)
 		}
 	}
 	return secret, nil
@@ -1639,12 +1639,12 @@ func (s *Server) clearAllFiles(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, path := range result.Paths {
 		if err := os.RemoveAll(filepath.Join(s.config.DataDir, path)); err != nil {
-			log.Printf("remove cleared file content %q: %v", path, err)
+			log.Printf("remove cleared file content %q result=failure err=%v", path, err)
 		}
 	}
 	for _, taskID := range result.TaskIDs {
 		if err := os.RemoveAll(filepath.Join(s.config.DataDir, "tmp", taskID)); err != nil {
-			log.Printf("remove cleared upload task temp dir %q: %v", taskID, err)
+			log.Printf("remove cleared upload task temp dir %q result=failure err=%v", taskID, err)
 		}
 	}
 	if err := s.cleanClearedStorage(result.UserIDs, diskMode); err != nil {
@@ -2012,12 +2012,12 @@ func (s *Server) deleteUploadTask(w http.ResponseWriter, r *http.Request) {
 			writeErrorData(w, http.StatusNotFound, "上传任务不存在", map[string]string{"code": "task_not_found"})
 			return
 		}
-		log.Printf("delete upload task %s: %v", taskID, err)
+		log.Printf("delete upload task %s result=failure err=%v", taskID, err)
 		writeError(w, http.StatusInternalServerError, "删除上传任务失败")
 		return
 	}
 	if err := os.RemoveAll(filepath.Join(s.config.DataDir, "tmp", taskID)); err != nil {
-		log.Printf("remove upload task temporary directory %s: %v", taskID, err)
+		log.Printf("remove upload task temporary directory %s result=failure err=%v", taskID, err)
 	}
 	s.serviceEvent(r, "upload_cancel", user.Username, "task=%s result=success", taskID)
 	writeData(w, http.StatusOK, "上传任务已删除", map[string]any{"state": "cancelled", "cancelledAt": time.Now().UTC().Format(time.RFC3339)})
@@ -2880,7 +2880,7 @@ const batchZipErrorCode = "ZIP_CREATE_FAILED"
 // batchZipError 向用户返回可操作的归档错误，同时仅在日志中保留原始错误，避免泄露服务器路径。
 func batchZipError(w http.ResponseWriter, action string, err error) {
 	reason, message := classifyBatchZipError(err)
-	log.Printf("batch zip %s (%s): %v", action, reason, err)
+	log.Printf("batch zip %s (%s) result=failure err=%v", action, reason, err)
 	writeErrorData(w, http.StatusInternalServerError, action+"："+message, map[string]string{
 		"code":   batchZipErrorCode,
 		"reason": reason,
@@ -2935,7 +2935,7 @@ func (s *Server) batchShare(w http.ResponseWriter, r *http.Request) {
 		}
 		for _, token := range createdTokens {
 			if err := s.store.DeleteShareByToken(r.Context(), token, user.ID); err != nil {
-				log.Printf("rollback batch share %s: %v", token, err)
+				log.Printf("rollback batch share %s result=failure err=%v", token, err)
 			}
 		}
 	}()
@@ -3140,7 +3140,7 @@ func (s *Server) batchDelete(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if err != nil {
-				log.Printf("load batch-delete root folder %d: %v", id, err)
+				log.Printf("load batch-delete root folder %d result=failure err=%v", id, err)
 				writeError(w, http.StatusInternalServerError, "删除目录失败")
 				return
 			}
@@ -3154,7 +3154,7 @@ func (s *Server) batchDelete(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if err != nil {
-				log.Printf("list batch-delete folder tree %d: %v", id, err)
+				log.Printf("list batch-delete folder tree %d result=failure err=%v", id, err)
 				writeError(w, http.StatusInternalServerError, "检查目录失败")
 				return
 			}
@@ -3255,12 +3255,12 @@ func (s *Server) batchDelete(w http.ResponseWriter, r *http.Request) {
 	for _, id := range input.FolderIDs {
 		folder, err := s.store.GetFolderByID(r.Context(), id, user.ID)
 		if err != nil {
-			log.Printf("load batch-deleted folder %d: %v", id, err)
+			log.Printf("load batch-deleted folder %d result=failure err=%v", id, err)
 			continue
 		}
 		deleted, err := s.store.DeleteFolder(r.Context(), id, user.ID)
 		if err != nil {
-			log.Printf("delete batch folder %d: %v", id, err)
+			log.Printf("delete batch folder %d result=failure err=%v", id, err)
 			continue
 		}
 		if !deleted {
@@ -4757,12 +4757,12 @@ func (s *Server) clearUserFiles(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, path := range result.Paths {
 		if removeErr := os.RemoveAll(filepath.Join(s.config.DataDir, path)); removeErr != nil {
-			log.Printf("remove cleared file content %q: %v", path, removeErr)
+			log.Printf("remove cleared file content %q result=failure err=%v", path, removeErr)
 		}
 	}
 	for _, taskID := range result.TaskIDs {
 		if removeErr := os.RemoveAll(filepath.Join(s.config.DataDir, "tmp", taskID)); removeErr != nil {
-			log.Printf("remove cleared upload task temp dir %q: %v", taskID, removeErr)
+			log.Printf("remove cleared upload task temp dir %q result=failure err=%v", taskID, removeErr)
 		}
 	}
 	if err := s.cleanClearedStorage([]int64{id}, diskMode); err != nil {
@@ -4810,7 +4810,7 @@ func (s *Server) purgeRecycleBin(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, path := range paths {
 		if removeErr := os.Remove(filepath.Join(s.config.DataDir, path)); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
-			log.Printf("remove recycled file %q: %v", path, removeErr)
+			log.Printf("remove recycled file %q result=failure err=%v", path, removeErr)
 		}
 	}
 	if pruneErr := pruneEmptyDirs(filepath.Join(s.config.DataDir, "files", strconv.Itoa(store.RecycleOwnerID))); pruneErr != nil {
@@ -4845,7 +4845,7 @@ func (s *Server) deleteRecycleFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if removeErr := os.Remove(filepath.Join(s.config.DataDir, path)); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
-		log.Printf("remove recycled file %q: %v", path, removeErr)
+		log.Printf("remove recycled file %q result=failure err=%v", path, removeErr)
 	}
 	if pruneErr := pruneEmptyDirs(filepath.Join(s.config.DataDir, "files", strconv.Itoa(store.RecycleOwnerID))); pruneErr != nil {
 		log.Printf("prune recycle directory result=failure err=%v", pruneErr)

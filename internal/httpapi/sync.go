@@ -463,7 +463,7 @@ func (s *Server) getSyncSystemSecret(w http.ResponseWriter, r *http.Request) {
 
 	secret, passphrase, err := s.decryptSyncCredentials(r.Context(), item)
 	if err != nil {
-		log.Printf("decrypt sync remote system credentials id=%d: %v", item.ID, err)
+		log.Printf("decrypt sync remote system credentials id=%d result=failure err=%v", item.ID, err)
 		s.serviceEvent(r, "sync_system_secret_view", currentUser(r.Context()).Username, "target=%d result=failure reason=decrypt", item.ID)
 		writeError(w, http.StatusInternalServerError, "读取凭据失败")
 		return
@@ -1119,7 +1119,7 @@ func (s *Server) scheduleSyncTasks(ctx context.Context) {
 		}
 		owner, err := s.store.GetUser(item.UserID)
 		if err != nil {
-			log.Printf("load scheduled sync task owner %d: %v", item.ID, err)
+			log.Printf("load scheduled sync task owner %d result=failure err=%v", item.ID, err)
 			continue
 		}
 		if owner.Disabled {
@@ -1206,7 +1206,7 @@ func (s *Server) decryptSyncCredentials(ctx context.Context, item store.RemoteSy
 			}
 		}
 		if updateErr := s.store.UpdateRemoteSystem(ctx, item, item.UserID, false); updateErr != nil {
-			log.Printf("persist migrated sync credentials for system id=%d: %v", item.ID, updateErr)
+			log.Printf("persist migrated sync credentials for system id=%d result=failure err=%v", item.ID, updateErr)
 		}
 	}
 	return secret, passphrase, nil
@@ -1392,7 +1392,7 @@ func (s *Server) executeSyncTask(ctx context.Context, task store.SyncTask) store
 	if ownerErr != nil {
 		// 所有者加载失败按失败记录并跳过执行（fail-closed），与调度/手动路径一致。
 		// A failed owner lookup records a failure and skips execution (fail-closed), matching the scheduler and manual paths.
-		log.Printf("load sync task owner %d: %v", task.ID, ownerErr)
+		log.Printf("load sync task owner %d result=failure err=%v", task.ID, ownerErr)
 		runAt := time.Now().UTC().Format(time.RFC3339)
 		entry := store.SyncLog{TaskID: task.ID, UserID: task.UserID, RunAt: runAt, FinishedAt: runAt, Direction: task.Direction, Result: "failure", Message: "读取任务所有者失败，任务已跳过", Detail: "同步跳过: 任务所有者不可用"}
 		if _, logErr := s.store.CreateSyncLog(context.Background(), entry); logErr != nil {
@@ -1893,7 +1893,7 @@ func (s *Server) executeSyncPull(ctx context.Context, task store.SyncTask, syste
 			return os.Rename(tempPath, finalPath)
 		}); completeErr != nil {
 			if deleteErr := s.store.DeleteUploadTask(ctx, uploadTask.ID); deleteErr != nil {
-				log.Printf("rollback sync upload task %s after complete failure: %v", uploadTask.ID, deleteErr)
+				log.Printf("rollback sync upload task %s after complete failure result=failure err=%v", uploadTask.ID, deleteErr)
 			}
 			return completeErr
 		}

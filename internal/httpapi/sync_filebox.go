@@ -618,7 +618,7 @@ func (s *Server) executeSyncPullFileBox(ctx context.Context, task store.SyncTask
 			return os.Rename(tempPath, finalPath)
 		}); completeErr != nil {
 			if deleteErr := s.store.DeleteUploadTask(ctx, uploadTask.ID); deleteErr != nil {
-				log.Printf("rollback filebox sync upload task %s after complete failure: %v", uploadTask.ID, deleteErr)
+				log.Printf("rollback filebox sync upload task %s after complete failure result=failure err=%v", uploadTask.ID, deleteErr)
 			}
 			return completeErr
 		}

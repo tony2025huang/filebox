@@ -30,7 +30,7 @@ func (s *Server) purgeRecycleBinWithReauth(w http.ResponseWriter, r *http.Reques
 		// 失败（含被限速）都计入来源 IP 失败窗口（R-IPBAN）；刻意不接入账号级锁定，避免持被盗 JWT 者锁死管理员。
 		// Failures (including throttled ones) feed the source-IP failure window; no account lockout.
 		if settings, settingsErr := s.store.GetLogSettings(r.Context()); settingsErr != nil {
-			log.Printf("recycle_purge reauth settings: %v", settingsErr)
+			log.Printf("recycle_purge reauth settings result=failure err=%v", settingsErr)
 		} else {
 			s.recordIPFailure(r, settings)
 		}

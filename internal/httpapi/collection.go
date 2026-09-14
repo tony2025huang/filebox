@@ -1311,12 +1311,12 @@ func (s *Server) collectionUploadCancel(w http.ResponseWriter, r *http.Request) 
 			s.collectionFailure(w, r, taskID, "task_not_found", http.StatusNotFound, "上传任务不存在", nil)
 			return
 		}
-		log.Printf("cancel collection upload %s: %v", taskID, err)
+		log.Printf("cancel collection upload %s result=failure err=%v", taskID, err)
 		s.collectionFailure(w, r, taskID, "cancel_failed", http.StatusInternalServerError, "取消上传失败", nil)
 		return
 	}
 	if removeErr := os.RemoveAll(filepath.Join(s.config.DataDir, "tmp", taskID)); removeErr != nil {
-		log.Printf("remove collection task temporary directory %s: %v", taskID, removeErr)
+		log.Printf("remove collection task temporary directory %s result=failure err=%v", taskID, removeErr)
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
 	s.serviceEvent(r, "upload_collect_cancel", "anonymous", "task=%s collection=%s result=success", taskID, maskedCollectionToken(token))
