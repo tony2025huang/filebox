@@ -12,6 +12,7 @@ export const TOPBAR_SECTIONS = [
   { key: 'sync', to: '/sync', labelKey: 'nav.syncTasks', adminOnly: false },
   { key: 'logs', to: '/logs', labelKey: 'nav.logs', adminOnly: false },
   { key: 'admin', to: '/admin', labelKey: 'nav.system', adminOnly: true },
+  { key: 'recycle', to: '/recycle', labelKey: 'recycle.title', adminOnly: true },
 ]
 
 const KNOWN_KEYS = new Set(TOPBAR_SECTIONS.map((section) => section.key))
