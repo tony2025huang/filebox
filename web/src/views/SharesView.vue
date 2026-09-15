@@ -21,6 +21,7 @@ import { api } from '../api'
 import AuthenticatedTopbar from '../components/AuthenticatedTopbar.vue'
 import BrandFooter from '../components/BrandFooter.vue'
 import { currentLocale, t } from '../i18n'
+import { reasonLabel as logReasonLabel } from '../logLabels'
 import { Clock3, Copy, ExternalLink, Eye, LoaderCircle, Pencil, Plus, RefreshCw, Share2, Trash2, X } from 'lucide-vue-next'
 
 const user = ref(JSON.parse(localStorage.getItem('filebox_user') || '{}'))
@@ -92,7 +93,8 @@ async function copyShare(item) { try { await navigator.clipboard.writeText(absol
 function openSharePage() { window.open(absoluteUrl(selected.value), '_blank', 'noopener') }
 function statusLabel(status) { return t(`shares.status.${status}`) }
 function remainingLabel(item) { if (item.status === 'revoked') return t('shares.revokedAt'); if (!item.remainingSeconds) return t('shares.expiredNow'); const hours = Math.floor(item.remainingSeconds / 3600); const minutes = Math.max(1, Math.floor(item.remainingSeconds / 60)); return t('shares.timeLeft', { value: hours ? `${hours}h` : `${minutes}m` }) }
-function reasonLabel(value) { const keys = { share_not_found: 'logReason.shareNotFound', share_expired: 'logReason.shareExpired', share_revoked: 'logReason.shareRevoked', share_limit: 'logReason.shareLimit', share_denied: 'logReason.shareDenied' }; return keys[value] ? t(keys[value]) : value || '-' }
+// 下载日志的原因标签与日志页共用同一份映射（../logLabels），未知码不再裸露英文。
+function reasonLabel(value) { return logReasonLabel(value, t) }
 function formatDate(value) { return value ? new Date(value).toLocaleString(currentLocale.value === 'en' ? 'en-US' : currentLocale.value, { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '-' }
 onMounted(() => { loadShares(); loadGroups() })
 </script>

@@ -37,6 +37,10 @@
 
 | v043 | 功能 | **客户端校验阈值配置化（T3）**：`FILEBOX_HASH_DIRECT_LIMIT`（原生校验上限，默认 256MiB）与 `FILEBOX_CLIENT_HASH_MAX`（跳过客户端哈希上限，默认 1GiB）由只读前端常量改为管理员设置项，含取值夹取、内存代价提示与三语文案；生效值经公开 `/api/brand` 下发，未登录的收集页上传者也生效 | `internal/store/store.go`、`internal/httpapi/server.go`、`web/src/hashPolicy.js`、`web/src/brand.js`、`web/src/api.js`、`web/src/views/AdminView.vue`、`web/src/i18n.js` | `go test ./...` + 8 个 node 测试全绿；`internal/store/hash_limits_test.go`、`internal/httpapi/hash_limits_settings_test.go`；隔离实例实测非法值 400、改值后 `/api/brand` 同步 | 已部署 |
 
+| v044 | 修复 | **审计日志不再露出英文码**：日志页「操作类型 / 失败原因」对未录入的码原样显示（用户报 `clear_all`、`recycle_move`、`recycle_purge`、`reauth_failed`）→ 补 37 个三语键，映射抽成 `web/src/logLabels.js` 单一来源（日志页与分享下载日志共用），未知码回退为「其他操作（码）/其他原因（码）」 | `web/src/logLabels.js`（新增）、`web/src/views/LogsView.vue`、`web/src/views/SharesView.vue`、`web/src/i18n.js` | `node --test web/tests/logLabels.test.mjs`（6 例）；只读核对演示库 `audit_logs` 的 23 种 action + 43 种 reason 全部有译；产物含三语新标签 | 已部署 |
+
+| v044.1 | 修复 | **日志页列名改「原因 / 说明」**：`logs.failureReason` → `logs.reasonColumn`（三语「原因 / 说明」「原因 / 說明」「Reason / note」）；`reason` 在成功记录里也描述"怎么做的"，旧列名与内容不符，成功行继续显示该值 | `web/src/i18n.js`、`web/src/views/LogsView.vue`、`web/tests/logLabels.test.mjs` | 测试新增 `logs.reasonColumn` 三语存在断言；产物核对：三语表头均在、旧文案已消失 | 已部署 |
+
 ## v043：客户端校验阈值配置化（T3）
 
 - **改造前**：两个阈值只存在于前端 `globalThis`——`web/src/api.js` 读 `FILEBOX_HASH_DIRECT_LIMIT`（默认 256MiB，≤ 该值走原生 WebCrypto），`web/src/hashPolicy.js` 读 `FILEBOX_CLIENT_HASH_MAX`（默认 1GiB，> 该值整个跳过客户端哈希）；服务端没有对应设置，管理员改不了。
@@ -44,6 +48,16 @@
 - **默认值与旧硬编码完全一致**，所以升级本身不改变任何前台校验行为，除非管理员主动调整。
 - **验证**：隔离实例（独立数据目录 + 端口 18099，管理员口令由 `--admin-pass` 指定，全程不触碰演示数据）实测——默认 `268435456 / 1073741824`；`direct > client` → 400「校验直算上限不能大于客户端哈希上限」；`client` 超上限 → 400「客户端哈希上限无效」；改成 512MiB / 4GiB → 200，且未登录 `/api/brand` 立即返回 `536870912 / 4294967296`。
 - **已知边界**：阈值不参与 `index.html` 的缓存策略（沿用 v033 的 `no-cache`）；阈值变更对**已在传输中的上传**不回溯生效，下一次校验才读取新值。
+
+## v044：审计日志标签本地化（操作类型 / 失败原因）
+
+- **问题**：日志页的「操作类型」是 `labels[value] || value`、「失败原因」是 `keys[value] ? t(...) : value`——任何后端写了、前端未录入的码都直接显示英文原文（用户报 `clear_all`、`recycle_move`、`recycle_purge`、`reauth_failed`，筛选下拉同样受影响，它也用 `actionLabel`）。
+- **盘点方法**：源码里 72 处 `s.recordAudit` / `s.recordShareAudit` 的字符串字面量 ∪ 演示库 `audit_logs` 的实测值，取并集再与前端键求差集。**注意 `recordShareAudit` 比 `recordAudit` 多一个 `shareOwnerID` 参数**，解析时 action/reason 的参数位不同（否则会把 username 当成 action）。
+- **差集结果**：缺 8 个操作类型键（`delete` 已有 `logs.delete` 可复用，另加 `clear_all`/`recycle_move`/`recycle_purge`/`share_preview`/`sync_run`/`sync_host_key`/`sync_host_key_update`）与 29 个原因/回退键（含 `reauth_failed`、`scope_forbidden`、`success`、`create`/`revoke`/`update`/`extend`/`batch_group`/`instant`/`collection_*` 等"成功记录里的操作说明"）。
+- **实现**：新增 `web/src/logLabels.js`，集中 `ACTION_LABEL_KEYS`/`REASON_LABEL_KEYS` 与 `actionLabel`/`reasonLabel`，`LogsView` 与 `SharesView`（分享下载日志）共用，两处不再各写一份；未知码回退为「其他操作（{code}）」/「其他原因（{code}）」——仍带码便于排查，但明确标注为待翻译，不再是裸英文。
+- **回归保护**：`web/tests/logLabels.test.mjs` 把「源码 ∪ 演示库」的码清单固化为夹具，断言：每个后端码都有映射、每个映射键在三语字典中都存在、三语键数一致、已知码不退化成原文码、未知码回退包含码、空值显示 `-`。
+- **列名调整（v044.1，用户确认）**：`logs.failureReason`（失败原因）改名为 `logs.reasonColumn`，文案「原因 / 说明」/「原因 / 說明」/「Reason / note」——因为 `reason` 在成功记录里也描述"这次是怎么做的"，旧列名与内容不符；**成功行照旧显示该值**，没有改成 `-`。分享页的下载日志是行式列表（无表头），不受影响。
+- **验证**：`go test ./...` 与 9 个 node 测试文件（45 例）全绿；用 `mode=ro` 的临时只读程序（用完即删）比对演示库：**23 种 action + 43 种 reason 全部有译，无未覆盖项**；部署产物 `index-DPM-rJxm.js`（v044）与 `index-CdcoZrlT.js`（v044.1）中确认含中/繁/英标签，且旧文案「失败原因」已从产物中消失。
 
 ## 工具纪律（v042.1 事故后的硬性约定）
 
