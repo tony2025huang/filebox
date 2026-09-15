@@ -35,6 +35,16 @@
 | v042.7 | 审计 | **收尾（规则 2）**：多占位符 + 末尾 error 形态 25 处（清除文件/临时目录删除、回收站文件删除、批量分享回滚、批量删除目录树、同步凭据解密与上传回滚、TOTP 密钥迁移等） | 同上 + `sync_filebox.go`、`recycle_purge.go` | 编码自检 6/6；构建与测试全绿 | 已部署 |
 | — | 审计结果 | **累计 171 处**失败日志结构化，`result=failure` 行达 **199 行**；剩余 6 处为设计上的信息类（同步跳过、`released N stale reservation(s)`、host-key 首信任等），保留原样 | — | `grep 'result=failure'` 可直接定位失败上下文与底层错误 | — |
 
+| v043 | 功能 | **客户端校验阈值配置化（T3）**：`FILEBOX_HASH_DIRECT_LIMIT`（原生校验上限，默认 256MiB）与 `FILEBOX_CLIENT_HASH_MAX`（跳过客户端哈希上限，默认 1GiB）由只读前端常量改为管理员设置项，含取值夹取、内存代价提示与三语文案；生效值经公开 `/api/brand` 下发，未登录的收集页上传者也生效 | `internal/store/store.go`、`internal/httpapi/server.go`、`web/src/hashPolicy.js`、`web/src/brand.js`、`web/src/api.js`、`web/src/views/AdminView.vue`、`web/src/i18n.js` | `go test ./...` + 8 个 node 测试全绿；`internal/store/hash_limits_test.go`、`internal/httpapi/hash_limits_settings_test.go`；隔离实例实测非法值 400、改值后 `/api/brand` 同步 | 已部署 |
+
+## v043：客户端校验阈值配置化（T3）
+
+- **改造前**：两个阈值只存在于前端 `globalThis`——`web/src/api.js` 读 `FILEBOX_HASH_DIRECT_LIMIT`（默认 256MiB，≤ 该值走原生 WebCrypto），`web/src/hashPolicy.js` 读 `FILEBOX_CLIENT_HASH_MAX`（默认 1GiB，> 该值整个跳过客户端哈希）；服务端没有对应设置，管理员改不了。
+- **实现**：① `store.LogSettings` 增 `hashDirectLimitBytes`/`hashClientLimitBytes`，随 `GET/PUT /api/admin/settings` 读写，`migrateSettings` 写入默认值；② `store.ClampHashLimits` 统一夹取——非正数回默认值、下限 1MiB、直算上限 2GiB（原生路径会把整个文件读进一个 `ArrayBuffer`）、总上限 64GiB、且直算上限不高于总上限；读路径夹取兜住旧库或手改值，`validateLogSettings` 对越界与「直算 > 总上限」返回 400；③ 公开 `GET /api/brand` 增加两个字段（与 `maxFileSize` 同通道，收集页未登录上传者也能拿到）；④ `web/src/hashPolicy.js` 成为唯一来源（默认值、`hashDirectLimit()`、`clientHashLimit()`、`applyServerHashLimits()`），`brand.js` 的 `applyBrand` 在每次加载公开配置时应用，`api.js` 改用 `hashDirectLimit()`；⑤ 管理员「系统设置」新增阈值面板（MiB 输入、内存代价提示、保存前夹取）。
+- **默认值与旧硬编码完全一致**，所以升级本身不改变任何前台校验行为，除非管理员主动调整。
+- **验证**：隔离实例（独立数据目录 + 端口 18099，管理员口令由 `--admin-pass` 指定，全程不触碰演示数据）实测——默认 `268435456 / 1073741824`；`direct > client` → 400「校验直算上限不能大于客户端哈希上限」；`client` 超上限 → 400「客户端哈希上限无效」；改成 512MiB / 4GiB → 200，且未登录 `/api/brand` 立即返回 `536870912 / 4294967296`。
+- **已知边界**：阈值不参与 `index.html` 的缓存策略（沿用 v033 的 `no-cache`）；阈值变更对**已在传输中的上传**不回溯生效，下一次校验才读取新值。
+
 ## 工具纪律（v042.1 事故后的硬性约定）
 
 1. **中文/多语言文件只用 Edit / Write 工具修改**，禁止 PowerShell 文本替换后写回（会整份损坏）。
@@ -45,10 +55,9 @@
 
 | 编号 | 事项 | 要点 | 依赖 |
 | --- | --- | --- | --- |
-| T1 | 日志审计第 1 批 | 把写入/落盘类约 40–50 处 `log.Printf` 迁为 `logger.Event`（保留 `err=…`），纯调试类保留 | 无 |
-| T2 | 失败文案跟随语言 | 盘点 `writeError/writeErrorData` 的 `code` 与前端 `localizeError.codeKeys` 差集，补三语键并加未知码回退 | 先做只读盘点 |
-| T3 | 哈希阈值配置化 | 把 `FILEBOX_HASH_DIRECT_LIMIT`（及"跳过客户端哈希上限"）做成管理员设置项，含内存代价提示与取值夹取 | 无 |
 | T4 | 窄屏导航折叠 | 宽度不足时收起为「更多」菜单，复用移动菜单样式，配纯函数单测与三语 `nav.more` | 无 |
+
+> T1（日志审计）已在 v042.4–v042.7 完成（171 处结构化），T2（失败文案跟随语言）已在 v042–v042.2 完成，T3（哈希阈值配置化）已在 v043 完成并部署；此表仅剩 T4。
 
 ## 仍待用户侧确认
 

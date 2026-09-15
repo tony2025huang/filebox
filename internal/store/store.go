@@ -324,24 +324,65 @@ type AuditLog struct {
 	CreatedAt    string `json:"createdAt"`
 }
 
-// LogSettings 定义日志留存和登录失败锁定策略。
-// LogSettings defines log retention and failed-login lockout policy.
+// LogSettings 定义日志留存、登录失败锁定策略以及客户端哈希阈值。
+// LogSettings defines log retention, failed-login lockout policy, and the client hashing thresholds.
 type LogSettings struct {
-	LogRetentionDays    int    `json:"logRetentionDays"`
-	LockThreshold       int    `json:"lockThreshold"`
-	AutoUnlockEnabled   bool   `json:"autoUnlockEnabled"`
-	AutoUnlockMinutes   int    `json:"autoUnlockMinutes"`
-	DefaultLang         string `json:"defaultLang"`
-	ThemeColor          string `json:"themeColor"`
-	PasswordMinLength   int    `json:"passwordMinLength"`
-	PasswordComplexity  int    `json:"passwordComplexity"`
-	IPLockWindowMinutes int    `json:"ipLockWindowMinutes"`
-	IPLockThreshold     int    `json:"ipLockThreshold"`
-	IPAutoUnlockEnabled bool   `json:"ipAutoUnlockEnabled"`
-	IPUnlockMinutes     int    `json:"ipUnlockMinutes"`
-	RegisterEnabled     bool   `json:"registerEnabled"`
-	UploadRateLimit     int64  `json:"uploadRateLimit"`
-	TrustProxy          bool   `json:"trustProxy"`
+	LogRetentionDays     int    `json:"logRetentionDays"`
+	LockThreshold        int    `json:"lockThreshold"`
+	AutoUnlockEnabled    bool   `json:"autoUnlockEnabled"`
+	AutoUnlockMinutes    int    `json:"autoUnlockMinutes"`
+	DefaultLang          string `json:"defaultLang"`
+	ThemeColor           string `json:"themeColor"`
+	PasswordMinLength    int    `json:"passwordMinLength"`
+	PasswordComplexity   int    `json:"passwordComplexity"`
+	IPLockWindowMinutes  int    `json:"ipLockWindowMinutes"`
+	IPLockThreshold      int    `json:"ipLockThreshold"`
+	IPAutoUnlockEnabled  bool   `json:"ipAutoUnlockEnabled"`
+	IPUnlockMinutes      int    `json:"ipUnlockMinutes"`
+	RegisterEnabled      bool   `json:"registerEnabled"`
+	UploadRateLimit      int64  `json:"uploadRateLimit"`
+	TrustProxy           bool   `json:"trustProxy"`
+	HashDirectLimitBytes int64  `json:"hashDirectLimitBytes"`
+	HashClientLimitBytes int64  `json:"hashClientLimitBytes"`
+}
+
+// 客户端哈希阈值的默认值与合法区间（字节）。上限的依据：直算上限走原生 WebCrypto，
+// 会把整个文件读进一个 ArrayBuffer，超过 2 GiB 既超浏览器单块上限也无法控内存峰值；
+// 总上限只是"超过就不在浏览器里算"，放宽到 64 GiB 足够覆盖任何真实文件。
+// Defaults and bounds (bytes) for the client hashing thresholds. The direct limit feeds native
+// WebCrypto, which holds the whole file in one ArrayBuffer, so it is capped at 2 GiB.
+const (
+	DefaultHashDirectLimitBytes int64 = 256 << 20
+	DefaultHashClientLimitBytes int64 = 1 << 30
+	MinHashLimitBytes           int64 = 1 << 20
+	MaxHashDirectLimitBytes     int64 = 2 << 30
+	MaxHashClientLimitBytes     int64 = 64 << 30
+)
+
+// ClampHashLimits 把阈值夹取到合法区间，并保证"直算上限"不超过"客户端哈希总上限"。
+// 非正数按对应默认值处理，便于容忍历史/手改的库内值。
+// ClampHashLimits clamps both thresholds into their legal ranges and keeps the native direct
+// limit at or below the overall client limit. Non-positive values fall back to the defaults.
+func ClampHashLimits(direct, client int64) (int64, int64) {
+	direct = clampHashLimit(direct, DefaultHashDirectLimitBytes, MaxHashDirectLimitBytes)
+	client = clampHashLimit(client, DefaultHashClientLimitBytes, MaxHashClientLimitBytes)
+	if direct > client {
+		direct = client
+	}
+	return direct, client
+}
+
+func clampHashLimit(value, fallback, maximum int64) int64 {
+	if value <= 0 {
+		return fallback
+	}
+	if value < MinHashLimitBytes {
+		return MinHashLimitBytes
+	}
+	if value > maximum {
+		return maximum
+	}
+	return value
 }
 
 // IPLock represents a source-IP failure window and its optional lock deadline.
@@ -801,6 +842,8 @@ func (s *Store) migrateSettings() error {
 		"theme_color": "",
 		BrandTitleKey: "", BrandDescriptionKey: "", BrandICPKey: "", BrandPoliceKey: "", BrandCopyrightKey: "", BrandFaviconKey: "", BrandLoginLogoKey: "", BrandMainLogoKey: "",
 		"registerEnabled": "false", "uploadRateLimit": "0", "trustProxy": "false",
+		"hashDirectLimitBytes": strconv.FormatInt(DefaultHashDirectLimitBytes, 10),
+		"hashClientLimitBytes": strconv.FormatInt(DefaultHashClientLimitBytes, 10),
 	}
 	for key, value := range defaults {
 		if _, err := s.DB.Exec("INSERT OR IGNORE INTO settings(key, value) VALUES(?, ?)", key, value); err != nil {
@@ -1580,10 +1623,10 @@ func (s *Store) DeleteUser(ctx context.Context, id int64, keepFiles bool) ([]str
 		return nil, nil, 0, err
 	}
 	type fileRow struct {
-		id         int64
+		id          int64
 		storagePath string
-		storedName string
-		name       string
+		storedName  string
+		name        string
 	}
 	var files []fileRow
 	for rows.Next() {
@@ -3912,8 +3955,8 @@ func (s *Store) Stats(ctx context.Context) (map[string]int64, error) {
 func (s *Store) GetLogSettings(ctx context.Context) (LogSettings, error) {
 	// GetLogSettings 读取日志留存和登录锁定设置，并为缺失或非法值使用默认值。
 	// GetLogSettings reads retention and lockout settings, applying defaults for missing or invalid values.
-	settings := LogSettings{LogRetentionDays: 30, LockThreshold: 5, AutoUnlockEnabled: true, AutoUnlockMinutes: 5, DefaultLang: "zh-CN", ThemeColor: DefaultThemeColor, PasswordMinLength: 8, PasswordComplexity: 3, IPLockWindowMinutes: 10, IPLockThreshold: 50, IPAutoUnlockEnabled: true, IPUnlockMinutes: 30, RegisterEnabled: false, UploadRateLimit: 0, TrustProxy: false}
-	rows, err := s.DB.QueryContext(ctx, "SELECT key, value FROM settings WHERE key IN ('logRetentionDays', 'lockThreshold', 'autoUnlockEnabled', 'autoUnlockMinutes', 'defaultLang', 'theme_color', 'passwordMinLength', 'passwordComplexity', 'ipLockWindowMinutes', 'ipLockThreshold', 'ipAutoUnlockEnabled', 'ipUnlockMinutes', 'registerEnabled', 'uploadRateLimit', 'trustProxy')")
+	settings := LogSettings{LogRetentionDays: 30, LockThreshold: 5, AutoUnlockEnabled: true, AutoUnlockMinutes: 5, DefaultLang: "zh-CN", ThemeColor: DefaultThemeColor, PasswordMinLength: 8, PasswordComplexity: 3, IPLockWindowMinutes: 10, IPLockThreshold: 50, IPAutoUnlockEnabled: true, IPUnlockMinutes: 30, RegisterEnabled: false, UploadRateLimit: 0, TrustProxy: false, HashDirectLimitBytes: DefaultHashDirectLimitBytes, HashClientLimitBytes: DefaultHashClientLimitBytes}
+	rows, err := s.DB.QueryContext(ctx, "SELECT key, value FROM settings WHERE key IN ('logRetentionDays', 'lockThreshold', 'autoUnlockEnabled', 'autoUnlockMinutes', 'defaultLang', 'theme_color', 'passwordMinLength', 'passwordComplexity', 'ipLockWindowMinutes', 'ipLockThreshold', 'ipAutoUnlockEnabled', 'ipUnlockMinutes', 'registerEnabled', 'uploadRateLimit', 'trustProxy', 'hashDirectLimitBytes', 'hashClientLimitBytes')")
 	if err != nil {
 		return settings, err
 	}
@@ -3980,8 +4023,18 @@ func (s *Store) GetLogSettings(ctx context.Context) (LogSettings, error) {
 			if parsed, err := strconv.ParseBool(value); err == nil {
 				settings.TrustProxy = parsed
 			}
+		case "hashDirectLimitBytes":
+			if parsed, err := strconv.ParseInt(value, 10, 64); err == nil {
+				settings.HashDirectLimitBytes = parsed
+			}
+		case "hashClientLimitBytes":
+			if parsed, err := strconv.ParseInt(value, 10, 64); err == nil {
+				settings.HashClientLimitBytes = parsed
+			}
 		}
 	}
+	// 库内值可能来自旧版本或手工修改，夹取后再返回，保证读到的阈值永远可用。
+	settings.HashDirectLimitBytes, settings.HashClientLimitBytes = ClampHashLimits(settings.HashDirectLimitBytes, settings.HashClientLimitBytes)
 	return settings, rows.Err()
 }
 
@@ -3989,25 +4042,29 @@ func (s *Store) UpdateLogSettings(ctx context.Context, settings LogSettings) err
 	// UpdateLogSettings 校验非负留存/阈值和正数解锁时长后事务更新设置。
 	// UpdateLogSettings validates non-negative retention/thresholds and positive unlock duration before a transactional update.
 	settings.ThemeColor = normalizeThemeColor(settings.ThemeColor)
+	// 夹取哈希阈值：API 层会先拒绝越界输入，这里兜住直接调用存储层的路径。
+	settings.HashDirectLimitBytes, settings.HashClientLimitBytes = ClampHashLimits(settings.HashDirectLimitBytes, settings.HashClientLimitBytes)
 	if settings.LogRetentionDays < 0 || settings.LogRetentionDays > constMaxRetentionDays || settings.LockThreshold < 0 || settings.AutoUnlockMinutes < 1 || settings.PasswordMinLength < 1 || settings.PasswordMinLength > 200 || settings.PasswordComplexity < 0 || settings.PasswordComplexity > 4 || settings.IPLockWindowMinutes < 1 || settings.IPLockThreshold < 0 || settings.IPUnlockMinutes < 1 || settings.UploadRateLimit < 0 || (settings.DefaultLang != "zh-CN" && settings.DefaultLang != "zh-TW" && settings.DefaultLang != "en") || (settings.ThemeColor != "" && !themeColorPattern.MatchString(settings.ThemeColor)) {
 		return errors.New("invalid settings")
 	}
 	values := map[string]string{
-		"logRetentionDays":    strconv.Itoa(settings.LogRetentionDays),
-		"lockThreshold":       strconv.Itoa(settings.LockThreshold),
-		"autoUnlockEnabled":   strconv.FormatBool(settings.AutoUnlockEnabled),
-		"autoUnlockMinutes":   strconv.Itoa(settings.AutoUnlockMinutes),
-		"defaultLang":         settings.DefaultLang,
-		"theme_color":         settings.ThemeColor,
-		"passwordMinLength":   strconv.Itoa(settings.PasswordMinLength),
-		"passwordComplexity":  strconv.Itoa(settings.PasswordComplexity),
-		"ipLockWindowMinutes": strconv.Itoa(settings.IPLockWindowMinutes),
-		"ipLockThreshold":     strconv.Itoa(settings.IPLockThreshold),
-		"ipAutoUnlockEnabled": strconv.FormatBool(settings.IPAutoUnlockEnabled),
-		"ipUnlockMinutes":     strconv.Itoa(settings.IPUnlockMinutes),
-		"registerEnabled":     strconv.FormatBool(settings.RegisterEnabled),
-		"uploadRateLimit":     strconv.FormatInt(settings.UploadRateLimit, 10),
-		"trustProxy":          strconv.FormatBool(settings.TrustProxy),
+		"logRetentionDays":     strconv.Itoa(settings.LogRetentionDays),
+		"lockThreshold":        strconv.Itoa(settings.LockThreshold),
+		"autoUnlockEnabled":    strconv.FormatBool(settings.AutoUnlockEnabled),
+		"autoUnlockMinutes":    strconv.Itoa(settings.AutoUnlockMinutes),
+		"defaultLang":          settings.DefaultLang,
+		"theme_color":          settings.ThemeColor,
+		"passwordMinLength":    strconv.Itoa(settings.PasswordMinLength),
+		"passwordComplexity":   strconv.Itoa(settings.PasswordComplexity),
+		"ipLockWindowMinutes":  strconv.Itoa(settings.IPLockWindowMinutes),
+		"ipLockThreshold":      strconv.Itoa(settings.IPLockThreshold),
+		"ipAutoUnlockEnabled":  strconv.FormatBool(settings.IPAutoUnlockEnabled),
+		"ipUnlockMinutes":      strconv.Itoa(settings.IPUnlockMinutes),
+		"registerEnabled":      strconv.FormatBool(settings.RegisterEnabled),
+		"uploadRateLimit":      strconv.FormatInt(settings.UploadRateLimit, 10),
+		"trustProxy":           strconv.FormatBool(settings.TrustProxy),
+		"hashDirectLimitBytes": strconv.FormatInt(settings.HashDirectLimitBytes, 10),
+		"hashClientLimitBytes": strconv.FormatInt(settings.HashClientLimitBytes, 10),
 	}
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {

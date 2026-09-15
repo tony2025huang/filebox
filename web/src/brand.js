@@ -1,4 +1,5 @@
 import { reactive } from 'vue'
+import { applyServerHashLimits, DEFAULT_CLIENT_HASH_LIMIT, DEFAULT_DIRECT_HASH_LIMIT } from './hashPolicy.js'
 
 export const DEFAULT_THEME_COLOR = '#1b998b'
 const themeColorPattern = /^#[0-9a-f]{3}([0-9a-f]{3})?$/i
@@ -15,7 +16,9 @@ const defaultBrand = {
   registerEnabled: false,
   defaultLang: 'zh-CN',
   themeColor: DEFAULT_THEME_COLOR,
-  maxFileSize: 100 * 1024 * 1024 * 1024
+  maxFileSize: 100 * 1024 * 1024 * 1024,
+  hashDirectLimitBytes: DEFAULT_DIRECT_HASH_LIMIT,
+  hashClientLimitBytes: DEFAULT_CLIENT_HASH_LIMIT
 }
 
 // brand 保存当前页面使用的公开品牌状态。
@@ -75,6 +78,8 @@ export function applyTheme(themeColor = '') {
 // applyBrand updates the title, SEO description, and favicon, removing the meta tag when the description is empty.
 export function applyBrand(value = {}) {
   Object.assign(brand, defaultBrand, value)
+  // 校验阈值随公开配置下发，上传/收集页在拿到品牌配置时同步生效。
+  applyServerHashLimits(brand)
   applyTheme(brand.themeColor)
   document.title = brand.siteTitle || defaultBrand.siteTitle
 

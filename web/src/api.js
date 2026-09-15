@@ -33,7 +33,7 @@ const shareMessageKeys = { 'åˆ†äº«å·²æ’¤é”€': 'error.shareRev
 
 codeKeys.HOST_KEY_CHANGED = 'sync.hostKeyChanged'
 
-import { clientHashLimit, shouldSkipClientHash } from './hashPolicy.js'
+import { clientHashLimit, hashDirectLimit, shouldSkipClientHash } from './hashPolicy.js'
 import { createSha256 } from './sha256Fallback.js'
 
 // lastHashInfo è®°å½•æœ€è¿‘ä¸€æ¬¡æ ¡éªŒå®žé™…ä½¿ç”¨çš„å®žçŽ°ä¸Žå®žæµ‹åžåï¼ˆv034 è¯Šæ–­ï¼‰ã€‚æ²¡æœ‰å®ƒå°±æ— æ³•å›žç­”
@@ -85,7 +85,7 @@ export async function computeFileSHA256(file, onProgress = () => {}, onInfo = ()
   // ï¼ˆWASM ä¼˜å…ˆã€çº¯ JS å…œåº•ï¼‰ï¼Œå› æ­¤ä¸»çº¿ç¨‹ä»»ä½•æ—¶å€™éƒ½ä¸ä¼šè¢«å“ˆå¸Œé˜»å¡žï¼ˆv031-A/Bï¼‰ã€‚
   // Hashing always runs in the worker first: native WebCrypto up to the threshold, streaming
   // (WASM first, pure JS fallback) beyond it, so the main thread never blocks (v031-A/B).
-  const directLimit = Number(globalThis.FILEBOX_HASH_DIRECT_LIMIT) || 256 * 1024 * 1024
+  const directLimit = hashDirectLimit()
   const started = Date.now()
   // è¶…è¿‡å®¢æˆ·ç«¯ä¸Šé™çš„æ–‡ä»¶ç›´æŽ¥è·³è¿‡ï¼šæœåŠ¡ç«¯ä¼šç®—å‡ºæƒå¨å“ˆå¸Œå¹¶åœ¨å®Œæˆå“åº”é‡Œå›žä¼ ï¼ˆv036ï¼‰ã€‚
   // Files over the client limit are skipped outright; the server computes the hash and returns it (v036).

@@ -428,3 +428,27 @@ Object.assign(en, {
 Object.assign(zhCN, { 'nav.menu': '菜单', 'nav.openMenu': '打开导航菜单', 'nav.closeMenu': '关闭导航菜单' })
 Object.assign(zhTW, { 'nav.menu': '選單', 'nav.openMenu': '開啟導覽選單', 'nav.closeMenu': '關閉導覽選單' })
 Object.assign(en, { 'nav.menu': 'Menu', 'nav.openMenu': 'Open navigation menu', 'nav.closeMenu': 'Close navigation menu' })
+
+// T3: client checksum threshold settings stay aligned across all three locales.
+// T3：客户端校验阈值设置键在三种语言中保持一致。
+Object.assign(zhCN, {
+  'admin.hashLimitsHeading': '客户端校验阈值',
+  'admin.hashDirectLimit': '直算上限（MiB）',
+  'admin.hashClientLimit': '客户端校验总上限（MiB）',
+  'admin.hashLimitsCopy': '直算上限内的文件用浏览器原生 WebCrypto 校验，速度最快，但会把整个文件读入内存（内存峰值约等于文件大小）。超过总上限的文件跳过客户端校验，改由服务端接收时计算 SHA-256 并在完成响应回传，这类大文件不再有上传前秒传。',
+  'admin.hashLimitsRange': '取值范围 1–65536 MiB（直算上限最大 2048 MiB），且直算上限不得大于总上限；保存时自动夹取到合法范围。'
+})
+Object.assign(zhTW, {
+  'admin.hashLimitsHeading': '用戶端校驗閾值',
+  'admin.hashDirectLimit': '直算上限（MiB）',
+  'admin.hashClientLimit': '用戶端校驗總上限（MiB）',
+  'admin.hashLimitsCopy': '直算上限內的檔案使用瀏覽器原生 WebCrypto 校驗，速度最快，但會將整個檔案讀入記憶體（記憶體峰值約等於檔案大小）。超過總上限的檔案會跳過用戶端校驗，改由伺服器接收時計算 SHA-256 並在完成回應回傳，這類大型檔案不再有上傳前秒傳。',
+  'admin.hashLimitsRange': '取值範圍 1–65536 MiB（直算上限最大 2048 MiB），且直算上限不得大於總上限；儲存時會自動夾取到合法範圍。'
+})
+Object.assign(en, {
+  'admin.hashLimitsHeading': 'Client checksum thresholds',
+  'admin.hashDirectLimit': 'Native limit (MiB)',
+  'admin.hashClientLimit': 'Overall client limit (MiB)',
+  'admin.hashLimitsCopy': 'Files at or below the native limit are checksummed with native WebCrypto in the browser, which is fastest but reads the whole file into memory (the peak is roughly the file size). Files above the overall limit skip client-side checksumming: the server computes SHA-256 while receiving the file and returns it in the completion response, so those large files lose pre-upload instant matching.',
+  'admin.hashLimitsRange': 'Allowed range 1–65536 MiB (the native limit caps at 2048 MiB), and the native limit must not exceed the overall limit; values are clamped to this range on save.'
+})

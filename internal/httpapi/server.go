@@ -320,21 +320,23 @@ type readOnlyRequest struct {
 }
 
 type logSettingsRequest struct {
-	LogRetentionDays    *int    `json:"logRetentionDays"`
-	LockThreshold       *int    `json:"lockThreshold"`
-	AutoUnlockEnabled   *bool   `json:"autoUnlockEnabled"`
-	AutoUnlockMinutes   *int    `json:"autoUnlockMinutes"`
-	DefaultLang         *string `json:"defaultLang"`
-	ThemeColor          *string `json:"themeColor"`
-	PasswordMinLength   *int    `json:"passwordMinLength"`
-	PasswordComplexity  *int    `json:"passwordComplexity"`
-	IPLockWindowMinutes *int    `json:"ipLockWindowMinutes"`
-	IPLockThreshold     *int    `json:"ipLockThreshold"`
-	IPAutoUnlockEnabled *bool   `json:"ipAutoUnlockEnabled"`
-	IPUnlockMinutes     *int    `json:"ipUnlockMinutes"`
-	RegisterEnabled     *bool   `json:"registerEnabled"`
-	UploadRateLimit     *int64  `json:"uploadRateLimit"`
-	TrustProxy          *bool   `json:"trustProxy"`
+	LogRetentionDays     *int    `json:"logRetentionDays"`
+	LockThreshold        *int    `json:"lockThreshold"`
+	AutoUnlockEnabled    *bool   `json:"autoUnlockEnabled"`
+	AutoUnlockMinutes    *int    `json:"autoUnlockMinutes"`
+	DefaultLang          *string `json:"defaultLang"`
+	ThemeColor           *string `json:"themeColor"`
+	PasswordMinLength    *int    `json:"passwordMinLength"`
+	PasswordComplexity   *int    `json:"passwordComplexity"`
+	IPLockWindowMinutes  *int    `json:"ipLockWindowMinutes"`
+	IPLockThreshold      *int    `json:"ipLockThreshold"`
+	IPAutoUnlockEnabled  *bool   `json:"ipAutoUnlockEnabled"`
+	IPUnlockMinutes      *int    `json:"ipUnlockMinutes"`
+	RegisterEnabled      *bool   `json:"registerEnabled"`
+	UploadRateLimit      *int64  `json:"uploadRateLimit"`
+	TrustProxy           *bool   `json:"trustProxy"`
+	HashDirectLimitBytes *int64  `json:"hashDirectLimitBytes"`
+	HashClientLimitBytes *int64  `json:"hashClientLimitBytes"`
 }
 
 type languageRequest struct {
@@ -347,18 +349,20 @@ const (
 )
 
 type brandResponse struct {
-	SiteTitle       string `json:"siteTitle"`
-	SiteDescription string `json:"siteDescription"`
-	ICPText         string `json:"icpText"`
-	PoliceText      string `json:"policeText"`
-	CopyrightText   string `json:"copyrightText"`
-	HasFavicon      bool   `json:"hasFavicon"`
-	HasLoginLogo    bool   `json:"hasLoginLogo"`
-	HasMainLogo     bool   `json:"hasMainLogo"`
-	DefaultLang     string `json:"defaultLang"`
-	ThemeColor      string `json:"themeColor"`
-	RegisterEnabled bool   `json:"registerEnabled"`
-	MaxFileSize     int64  `json:"maxFileSize"`
+	SiteTitle            string `json:"siteTitle"`
+	SiteDescription      string `json:"siteDescription"`
+	ICPText              string `json:"icpText"`
+	PoliceText           string `json:"policeText"`
+	CopyrightText        string `json:"copyrightText"`
+	HasFavicon           bool   `json:"hasFavicon"`
+	HasLoginLogo         bool   `json:"hasLoginLogo"`
+	HasMainLogo          bool   `json:"hasMainLogo"`
+	DefaultLang          string `json:"defaultLang"`
+	ThemeColor           string `json:"themeColor"`
+	RegisterEnabled      bool   `json:"registerEnabled"`
+	MaxFileSize          int64  `json:"maxFileSize"`
+	HashDirectLimitBytes int64  `json:"hashDirectLimitBytes"`
+	HashClientLimitBytes int64  `json:"hashClientLimitBytes"`
 }
 
 type brandAsset struct {
@@ -650,26 +654,33 @@ func (s *Server) publicBrand(settings store.BrandSettings) brandResponse {
 	defaultLang := "zh-CN"
 	themeColor := store.DefaultThemeColor
 	registerEnabled := false
+	// 客户端哈希阈值也要下发给未登录的收集页上传者，因此随公开品牌配置一起返回。
+	hashDirectLimit := store.DefaultHashDirectLimitBytes
+	hashClientLimit := store.DefaultHashClientLimitBytes
 	if languageSettings, err := s.store.GetLogSettings(context.Background()); err == nil {
 		if isValidLang(languageSettings.DefaultLang) {
 			defaultLang = languageSettings.DefaultLang
 			themeColor = languageSettings.ThemeColor
 		}
 		registerEnabled = languageSettings.RegisterEnabled
+		hashDirectLimit = languageSettings.HashDirectLimitBytes
+		hashClientLimit = languageSettings.HashClientLimitBytes
 	}
 	return brandResponse{
-		SiteTitle:       title,
-		SiteDescription: settings.Description,
-		ICPText:         settings.ICP,
-		PoliceText:      settings.Police,
-		CopyrightText:   settings.Copyright,
-		HasFavicon:      s.brandAssetExists(brandAssets["favicon"], settings.Favicon),
-		HasLoginLogo:    s.brandAssetExists(brandAssets["login-logo"], settings.LoginLogo),
-		HasMainLogo:     s.brandAssetExists(brandAssets["main-logo"], settings.MainLogo),
-		DefaultLang:     defaultLang,
-		MaxFileSize:     s.config.MaxFileSize,
-		ThemeColor:      themeColor,
-		RegisterEnabled: registerEnabled,
+		SiteTitle:            title,
+		SiteDescription:      settings.Description,
+		ICPText:              settings.ICP,
+		PoliceText:           settings.Police,
+		CopyrightText:        settings.Copyright,
+		HasFavicon:           s.brandAssetExists(brandAssets["favicon"], settings.Favicon),
+		HasLoginLogo:         s.brandAssetExists(brandAssets["login-logo"], settings.LoginLogo),
+		HasMainLogo:          s.brandAssetExists(brandAssets["main-logo"], settings.MainLogo),
+		DefaultLang:          defaultLang,
+		MaxFileSize:          s.config.MaxFileSize,
+		ThemeColor:           themeColor,
+		RegisterEnabled:      registerEnabled,
+		HashDirectLimitBytes: hashDirectLimit,
+		HashClientLimitBytes: hashClientLimit,
 	}
 }
 
@@ -5022,6 +5033,12 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 	if input.TrustProxy != nil {
 		settings.TrustProxy = *input.TrustProxy
 	}
+	if input.HashDirectLimitBytes != nil {
+		settings.HashDirectLimitBytes = *input.HashDirectLimitBytes
+	}
+	if input.HashClientLimitBytes != nil {
+		settings.HashClientLimitBytes = *input.HashClientLimitBytes
+	}
 	if validationError := validateLogSettings(settings); validationError != nil {
 		writeError(w, http.StatusBadRequest, validationError.Error())
 		return
@@ -5068,6 +5085,12 @@ func validateLogSettings(settings store.LogSettings) error {
 		return errors.New("IP 解锁时长无效")
 	case settings.UploadRateLimit < 0:
 		return errors.New("上传限速无效")
+	case settings.HashDirectLimitBytes < store.MinHashLimitBytes || settings.HashDirectLimitBytes > store.MaxHashDirectLimitBytes:
+		return errors.New("校验直算上限无效")
+	case settings.HashClientLimitBytes < store.MinHashLimitBytes || settings.HashClientLimitBytes > store.MaxHashClientLimitBytes:
+		return errors.New("客户端哈希上限无效")
+	case settings.HashDirectLimitBytes > settings.HashClientLimitBytes:
+		return errors.New("校验直算上限不能大于客户端哈希上限")
 	default:
 		return nil
 	}
