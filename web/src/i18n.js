@@ -548,6 +548,25 @@ Object.assign(en, {
   'files.listClearedActive': 'Transfer list cleared; {count} running transfer(s) stopped'
 })
 
+// v044.10：清空文件的磁盘选项文案澄清 + 不可恢复提示。用户实测选了"仅删除空目录"却发现文件内容也被删了 ——
+// 实际行为是：被清空文件的磁盘内容**先被无条件删除**，diskMode 只决定之后是否顺带清理（因此变空的）目录。
+// 所以文案必须说清"文件内容会被删除"，而不是让人以为"仅删空目录＝保留文件"。
+Object.assign(zhCN, {
+  'files.clearDiskEmptyDirs': '仅删除这些文件的磁盘内容，并清理因此变空的目录（保留目录内的其他内容）',
+  'files.clearDiskWholeTree': '删除整个存储目录（连同其中的其他内容）',
+  'files.clearIrreversible': '被清空文件在磁盘上的内容会被删除，无法恢复。'
+})
+Object.assign(zhTW, {
+  'files.clearDiskEmptyDirs': '僅刪除這些檔案的磁碟內容，並清理因此變空的目錄（保留目錄內的其他內容）',
+  'files.clearDiskWholeTree': '刪除整個儲存目錄（連同其中的其他內容）',
+  'files.clearIrreversible': '被清空檔案在磁碟上的內容會被刪除，無法復原。'
+})
+Object.assign(en, {
+  'files.clearDiskEmptyDirs': 'Delete these files from disk and prune the directories that become empty (other content is kept)',
+  'files.clearDiskWholeTree': 'Delete the whole storage directory (including any other content in it)',
+  'files.clearIrreversible': 'The cleared files are deleted from disk and cannot be recovered.'
+})
+
 // v044.4: transfer stage headings (active tab) — the labels for the terminal outcomes reuse
 // files.finishedSuccess/Failed/Cancelled, which already exist.
 // v044.4：传输阶段分组标题；已完成分组直接复用既有的 files.finishedSuccess/Failed/Cancelled。
