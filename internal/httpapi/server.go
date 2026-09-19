@@ -2102,7 +2102,13 @@ func (s *Server) uploadChunk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	path := filepath.Join(tmpDir, strconv.Itoa(index))
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	// 先写 <index>.part，读满并校验通过后再改名到 <index>：这样失败（含客户端暂停把请求 abort）
+	// 只会删掉半成品，绝不会破坏该下标上一次已成功落盘的分片。否则"暂停/重试"会用失败覆盖成功，
+	// 造成 chunks 表有行而磁盘无文件的账实不一致，complete 便报「上传分片不完整」且重试无法自愈。
+	// Write to <index>.part and rename it over <index> only after a complete, verified read, so a
+	// failed or aborted re-upload can never destroy a previously good chunk file.
+	partPath := path + ".part"
+	file, err := os.OpenFile(partPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		s.recordAudit(r, &user.ID, user.Username, "upload_chunk", task.Name, "failure", "write_failed")
 		s.serviceEvent(r, "upload_chunk", user.Username, "name=%s index=%d result=failure reason=write_failed", task.Name, index)
@@ -2113,24 +2119,34 @@ func (s *Server) uploadChunk(w http.ResponseWriter, r *http.Request) {
 	written, copyErr := copyRequestBodyWithIdleTimeout(r.Context(), io.MultiWriter(file, hash), r.Body, expectedSize+1)
 	closeErr := file.Close()
 	if copyErr != nil || closeErr != nil {
-		_ = os.Remove(path)
+		_ = os.Remove(partPath)
 		s.recordAudit(r, &user.ID, user.Username, "upload_chunk", task.Name, "failure", "write_failed")
 		s.serviceEvent(r, "upload_chunk", user.Username, "name=%s index=%d result=failure reason=write_failed", task.Name, index)
 		writeError(w, http.StatusBadRequest, "写入上传内容失败")
 		return
 	}
 	if written > expectedSize {
-		_ = os.Remove(path)
+		_ = os.Remove(partPath)
 		s.recordAudit(r, &user.ID, user.Username, "upload_chunk", task.Name, "failure", "too_large")
 		s.serviceEvent(r, "upload_chunk", user.Username, "name=%s index=%d result=failure reason=too_large", task.Name, index)
 		writeError(w, http.StatusRequestEntityTooLarge, "上传内容超过声明大小")
 		return
 	}
 	if written != expectedSize {
-		_ = os.Remove(path)
+		_ = os.Remove(partPath)
 		s.recordAudit(r, &user.ID, user.Username, "upload_chunk", task.Name, "failure", "size_mismatch")
 		s.serviceEvent(r, "upload_chunk", user.Username, "name=%s index=%d result=failure reason=size_mismatch", task.Name, index)
 		writeError(w, http.StatusBadRequest, "上传内容大小与声明不一致")
+		return
+	}
+	// 先把分片文件改名到位，再登记 chunks 行：宁可"有文件无记录"（客户端会补传一次），
+	// 也不要"有记录无文件"（客户端会跳过该片，complete 永远失败）。
+	if err := os.Rename(partPath, path); err != nil {
+		_ = os.Remove(partPath)
+		log.Printf("place uploaded chunk result=failure err=%v", err)
+		s.recordAudit(r, &user.ID, user.Username, "upload_chunk", task.Name, "failure", "write_failed")
+		s.serviceEvent(r, "upload_chunk", user.Username, "name=%s index=%d result=failure reason=write_failed", task.Name, index)
+		writeError(w, http.StatusInternalServerError, "写入上传分片失败")
 		return
 	}
 	if err := s.store.SetChunk(r.Context(), task.ID, index, written, hex.EncodeToString(hash.Sum(nil))); err != nil {
@@ -2319,8 +2335,17 @@ func (s *Server) uploadStatus(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "读取上传分片失败")
 		return
 	}
+	// 以磁盘为准：chunks 表可能残留"有行无文件"的旧记录（见 uploadChunk 的 .part 改名说明）。
+	// 照报给客户端会让它跳过该分片，complete 必然失败且重试无法自愈；这里把对不上的剔除，
+	// 客户端便会自动补传，从而自愈。只需 1500 余次 stat，毫秒级。
+	// Verify against disk: a stale row whose chunk file is missing or short must not be reported.
+	tmpDir := filepath.Join(s.config.DataDir, "tmp", task.ID)
 	indices := make([]int, 0, len(chunks))
-	for index := range chunks {
+	for index, chunk := range chunks {
+		info, statErr := os.Stat(filepath.Join(tmpDir, strconv.Itoa(index)))
+		if statErr != nil || info.Size() != chunk.Size {
+			continue
+		}
 		indices = append(indices, index)
 	}
 	sort.Ints(indices)
