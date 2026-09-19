@@ -2147,13 +2147,11 @@ type TaskProgress struct {
 // ListPendingTaskProgress 返回指定用户的所有 pending 上传任务及其已上传分片数。
 // ListPendingTaskProgress returns all pending upload tasks for a user with their uploaded-chunk counts.
 func (s *Store) ListPendingTaskProgress(ctx context.Context, userID int64) ([]TaskProgress, error) {
-	rows, err := s.DB.QueryContext(ctx, `SELECT t.id, t.name, t.total_chunks, t.status, COUNT(c.task_id) AS uploaded,
-		COALESCE(SUM(c.size), 0) AS uploaded_bytes, t.size, COALESCE(t.completed_at, ''), t.created_at, t.updated_at
-		FROM upload_tasks t
-		LEFT JOIN chunks c ON c.task_id = t.id
-		WHERE t.user_id = ? AND t.status = 'pending'
-		GROUP BY t.id, t.name, t.total_chunks, t.status, t.size, t.completed_at, t.created_at, t.updated_at
-		ORDER BY t.created_at`, userID)
+	rows, err := s.DB.QueryContext(ctx, `SELECT t.id, t.name, t.total_chunks, t.status, t.size, COALESCE(t.completed_at, ''), t.created_at, t.updated_at
+FROM upload_tasks t
+WHERE t.user_id = ? AND t.status = 'pending'
+GROUP BY t.id, t.name, t.total_chunks, t.status, t.size, t.completed_at, t.created_at, t.updated_at
+ORDER BY t.created_at`, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -2161,12 +2159,49 @@ func (s *Store) ListPendingTaskProgress(ctx context.Context, userID int64) ([]Ta
 	progress := make([]TaskProgress, 0, 8)
 	for rows.Next() {
 		var p TaskProgress
-		if err := rows.Scan(&p.TaskID, &p.Name, &p.TotalChunks, &p.Status, &p.Uploaded, &p.UploadedBytes, &p.TotalBytes, &p.CompletedAt, &p.CreatedAt, &p.UpdatedAt); err != nil {
+		if err := rows.Scan(&p.TaskID, &p.Name, &p.TotalChunks, &p.Status, &p.TotalBytes, &p.CompletedAt, &p.CreatedAt, &p.UpdatedAt); err != nil {
 			return nil, err
 		}
+		// 进度只统计"chunks 行存在且磁盘文件大小相符"的分片（见下方逐条统计）。
 		progress = append(progress, p)
 	}
-	return progress, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// 必须先取完 rows 再逐条统计：连接池只有一条连接，边遍历 rows 边发起新查询会自锁
+	// （v044.8 实测卡满 600s 超时）。
+	rows.Close()
+	for index := range progress {
+		progress[index].Uploaded, progress[index].UploadedBytes = s.countStoredChunks(ctx, progress[index].TaskID)
+	}
+	return progress, nil
+}
+
+// countStoredChunks 统计该任务"元数据与磁盘文件都对得上"的分片数与字节数，供进度流使用。
+// countStoredChunks counts only chunks whose file exists on disk with the recorded size.
+func (s *Store) countStoredChunks(ctx context.Context, taskID string) (int, int64) {
+	rows, err := s.DB.QueryContext(ctx, "SELECT idx, size FROM chunks WHERE task_id = ?", taskID)
+	if err != nil {
+		return 0, 0
+	}
+	defer rows.Close()
+	tmpDir := filepath.Join(s.DataDir, "tmp", taskID)
+	count := 0
+	var total int64
+	for rows.Next() {
+		var index int
+		var size int64
+		if err := rows.Scan(&index, &size); err != nil {
+			return count, total
+		}
+		info, statErr := os.Stat(filepath.Join(tmpDir, strconv.Itoa(index)))
+		if statErr != nil || info.Size() != size {
+			continue
+		}
+		count++
+		total += size
+	}
+	return count, total
 }
 
 // DeleteChunks 清理已完成任务的分片元数据。

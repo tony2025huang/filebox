@@ -24,6 +24,23 @@ export const TRANSFER_STATUS_KEYS = {
 
 const completedStatuses = new Set(['completed', 'instant', 'finished', 'cancelled'])
 
+// v044.8：服务端进度样本只能当"提示"，**永远不能把条目推到 100%**。
+// 样本可能来自"数据库说分片齐全、磁盘其实有洞"的任务（旧实现就是这么报的），一旦被顶到 100，
+// 终止态契约（progress ≥ 100）就会把条目判成完成、结果标签显示"成功"——而实际还在重传。
+// Server progress samples are hints only and must never reach 100%, or the terminal-state contract
+// would mark a still-running transfer as completed/success.
+export const PROGRESS_HINT_MAX = 99
+
+/** 由进度样本推出展示进度（严格小于 100，不回退）。 */
+export function progressHint(current, task) {
+  const byteRatio = Number(task?.totalBytes) > 0 ? Number(task?.uploadedBytes) / Number(task?.totalBytes) : 0
+  const chunkRatio = Number(task?.totalChunks) > 0 ? Number(task?.uploaded) / Number(task?.totalChunks) : 0
+  const ratio = Math.max(Number.isFinite(byteRatio) ? byteRatio : 0, Number.isFinite(chunkRatio) ? chunkRatio : 0)
+  const base = Number(current) || 0
+  if (!(ratio > 0)) return base
+  return Math.min(PROGRESS_HINT_MAX, Math.max(base, Math.round(25 + ratio * 75)))
+}
+
 // v044.4：把"进行中"的稳定状态码归纳为可展示的阶段，供传输列表按阶段分组。
 // 阶段只是状态码的归并，不引入新状态：准备/校验中 → 传输中 → 服务端处理中 → 已暂停/待处理。
 // Active status codes are grouped into display stages; this adds no new state.
@@ -132,8 +149,7 @@ export function isUploadTerminalState(item) {
   return completedStatuses.has(normalizeStatus(item.status))
 }
 
-/** 终止态归类：'success' | 'failed' | 'cancelled' | null。 */
-export function uploadTerminalKind(item) {
+/** 终止态归类：'success' | 'failed' | 'cancelled' | null。 */export function uploadTerminalKind(item) {
   if (!isUploadTerminalState(item)) return null
   if (item.cancelled) return 'cancelled'
   if (item.failed) return 'failed'

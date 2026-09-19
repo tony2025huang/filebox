@@ -103,6 +103,14 @@ func TestUploadTaskProgressAndConditionalDelete(t *testing.T) {
 	if err := db.SetChunk(ctx, task.ID, 0, 4, "chunk-hash"); err != nil {
 		t.Fatal(err)
 	}
+	// v044.8：进度只统计"磁盘文件也在且大小相符"的分片，所以这里要真实落盘，否则 Uploaded 为 0。
+	tmpDir := filepath.Join(db.DataDir, "tmp", task.ID)
+	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "0"), make([]byte, 4), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	old := time.Now().UTC().Add(-25 * time.Hour).Format(time.RFC3339)
 	if _, err := db.DB.Exec("UPDATE upload_tasks SET created_at = ? WHERE id = ?", old, task.ID); err != nil {
 		t.Fatal(err)

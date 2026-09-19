@@ -6,7 +6,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { TRANSFER_KIND_KEYS, TRANSFER_OUTCOME_KEYS, TRANSFER_OUTCOME_ORDER, TRANSFER_STAGE_KEYS, TRANSFER_STAGE_ORDER, TRANSFER_STATUS_KEYS, groupByKindOutcome, groupByOutcome, groupByStage, isDownloadTerminalState, isTransferStatusCode, isUploadTerminalState, statusLabel, transferOutcome, transferStage, uploadTerminalKind } from '../src/transferStatus.js'
+import { TRANSFER_KIND_KEYS, TRANSFER_OUTCOME_KEYS, TRANSFER_OUTCOME_ORDER, TRANSFER_STAGE_KEYS, TRANSFER_STAGE_ORDER, TRANSFER_STATUS_KEYS, groupByKindOutcome, groupByOutcome, groupByStage, isDownloadTerminalState, isTransferStatusCode, isUploadTerminalState, progressHint, statusLabel, transferOutcome, transferStage, uploadTerminalKind } from '../src/transferStatus.js'
 import { dictionaries } from '../src/i18n.js'
 
 function translate(dict) {
@@ -140,7 +140,21 @@ test('阶段与结果分组的标题键在三语字典中都有', () => {
   }
 })
 
-// v044.5：已完成列表按 上传/下载 分列后再按结果分组，与进行中的分区结构一致。
+// v044.8：服务端进度样本只是提示，绝不能把条目推到 100%（否则会被判成完成并显示"成功"）。
+test('进度样本永远不会把条目推到 100%', () => {
+  // 极端情况：样本声称 1546/1546 片、字节也全齐（旧实现正是这样报"有行无文件"的任务）
+  const full = progressHint(0, { uploaded: 1546, totalChunks: 1546, uploadedBytes: 6482409472, totalBytes: 6482409472 })
+  assert.equal(full, 99)
+  const item = { status: 'uploading', progress: full, failed: false, cancelled: false, done: false }
+  assert.equal(isUploadTerminalState(item), false, '进度样本不得让条目进入终止态')
+  // 正常部分进度：按 25–99 区间推导，且不回退已有进度
+  assert.equal(progressHint(0, { uploaded: 1546, totalChunks: 1546 * 2 }), Math.round(25 + 0.5 * 75))
+  assert.equal(progressHint(40, { uploaded: 1, totalChunks: 1546, uploadedBytes: 4194304, totalBytes: 6482409472 }), 40)
+  // 无有效样本时保持原值；异常输入不抛错
+  assert.equal(progressHint(7, {}), 7)
+  assert.equal(progressHint(0, { uploaded: -5, totalChunks: 0, uploadedBytes: NaN, totalBytes: 0 }), 0)
+  assert.equal(progressHint(12, undefined), 12)
+})
 test('已完成条目按 类型×结果 分组（上传在前，各自 成功/失败/已取消）', () => {
   const items = [
     { kind: 'download', id: 'd-ok' },

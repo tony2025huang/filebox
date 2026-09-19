@@ -56,7 +56,7 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { api, batchDownloadFilename, clearSession, computeFileSHA256, localizeError } from '../api'
 import { advanceTransferGeneration, completionTimestamp, emaRate, FairStartGate, isTransferGenerationCurrent, isUploadTerminal, needsBulkConfirm, transferBatches, uploadResultKind } from '../transferFlow'
-import { TRANSFER_STAGE_KEYS, TRANSFER_STAGE_ORDER, groupByKindOutcome, isUploadTerminalState, normalizeStatus, statusLabel, transferStage } from '../transferStatus'
+import { TRANSFER_STAGE_KEYS, TRANSFER_STAGE_ORDER, groupByKindOutcome, isUploadTerminalState, normalizeStatus, progressHint, statusLabel, transferStage } from '../transferStatus'
 import AuthenticatedTopbar from '../components/AuthenticatedTopbar.vue'
 import BrandFooter from '../components/BrandFooter.vue'
 import { brand } from '../brand'
@@ -1161,11 +1161,10 @@ function applyProgress(tasks) {
   for (const task of tasks) {
     const item = uploads.value.find(entry => entry.taskId === task.taskId)
     if (!item || item.terminating || item.cancelled || item.done) continue
-    const byteRatio = task.totalBytes ? task.uploadedBytes / task.totalBytes : 0
-    const chunkRatio = task.totalChunks ? task.uploaded / task.totalChunks : 0
-    const ratio = Math.max(byteRatio, chunkRatio)
-    if (ratio > 0) { item.progress = Math.max(item.progress, Math.round(25 + ratio * 75)); syncLoadedBytes(item) }
-    if (task.completedAt) item.completedAt = completionTimestamp(task, item.completedAt)
+    // 进度样本只作提示：progressHint 严格小于 100，且这里不再用样本写 completedAt——
+    // 否则一条"数据库说齐全、磁盘有洞"的样本会让条目显示"成功"（v044.8 修复）。
+    const hint = progressHint(item.progress, task)
+    if (hint > (item.progress || 0)) { item.progress = hint; syncLoadedBytes(item) }
   }
 }
 function handleProgressEvent(block) {
