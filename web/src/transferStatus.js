@@ -81,6 +81,25 @@ export function groupByOutcome(items) {
     .filter(group => group.items.length > 0)
 }
 
+// v044.5：「已完成」先按 上传/下载 分列，再按结果分组，与「进行中」的分区结构对齐。
+// 条目需带 kind（'upload' | 'download'）；缺省视为上传。
+export const TRANSFER_KIND_KEYS = { upload: 'files.uploads', download: 'files.downloads' }
+
+/** 按 类型 × 结果 分组：上传在前、下载在后，各自 成功/失败/已取消，只返回非空组。 */
+export function groupByKindOutcome(items) {
+  const list = Array.isArray(items) ? items : []
+  const groups = []
+  for (const kind of ['upload', 'download']) {
+    for (const outcome of TRANSFER_OUTCOME_ORDER) {
+      const matched = list.filter(item => (item?.kind || 'upload') === kind && transferOutcome(item) === outcome)
+      if (matched.length > 0) {
+        groups.push({ id: `${kind}-${outcome}`, kind, kindKey: TRANSFER_KIND_KEYS[kind], outcome, labelKey: TRANSFER_OUTCOME_KEYS[outcome], items: matched })
+      }
+    }
+  }
+  return groups
+}
+
 /** 归一化状态文本用于比较（忽略大小写与首尾空白）。 */
 export function normalizeStatus(value) {
   return String(value ?? '').trim().toLowerCase()

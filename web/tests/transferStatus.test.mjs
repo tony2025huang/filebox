@@ -6,7 +6,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { TRANSFER_OUTCOME_KEYS, TRANSFER_OUTCOME_ORDER, TRANSFER_STAGE_KEYS, TRANSFER_STAGE_ORDER, TRANSFER_STATUS_KEYS, groupByOutcome, groupByStage, isDownloadTerminalState, isTransferStatusCode, isUploadTerminalState, statusLabel, transferOutcome, transferStage, uploadTerminalKind } from '../src/transferStatus.js'
+import { TRANSFER_KIND_KEYS, TRANSFER_OUTCOME_KEYS, TRANSFER_OUTCOME_ORDER, TRANSFER_STAGE_KEYS, TRANSFER_STAGE_ORDER, TRANSFER_STATUS_KEYS, groupByKindOutcome, groupByOutcome, groupByStage, isDownloadTerminalState, isTransferStatusCode, isUploadTerminalState, statusLabel, transferOutcome, transferStage, uploadTerminalKind } from '../src/transferStatus.js'
 import { dictionaries } from '../src/i18n.js'
 
 function translate(dict) {
@@ -134,5 +134,31 @@ test('阶段与结果分组的标题键在三语字典中都有', () => {
     for (const key of Object.values(TRANSFER_OUTCOME_KEYS)) {
       assert.ok(key in dict, `${locale} 缺少结果标题 ${key}`)
     }
+    for (const key of Object.values(TRANSFER_KIND_KEYS)) {
+      assert.ok(key in dict, `${locale} 缺少类型标题 ${key}`)
+    }
   }
+})
+
+// v044.5：已完成列表按 上传/下载 分列后再按结果分组，与进行中的分区结构一致。
+test('已完成条目按 类型×结果 分组（上传在前，各自 成功/失败/已取消）', () => {
+  const items = [
+    { kind: 'download', id: 'd-ok' },
+    { kind: 'upload', id: 'u-bad', failed: true },
+    { kind: 'upload', id: 'u-ok1' },
+    { kind: 'download', id: 'd-stop', cancelled: true },
+    { kind: 'upload', id: 'u-ok2' },
+    { kind: 'upload', id: 'u-stop', cancelled: true }
+  ]
+  const groups = groupByKindOutcome(items)
+  assert.deepEqual(groups.map(group => group.id), [
+    'upload-success', 'upload-failed', 'upload-cancelled', 'download-success', 'download-cancelled'
+  ])
+  assert.deepEqual(groups.map(group => group.items.map(item => item.id)), [
+    ['u-ok1', 'u-ok2'], ['u-bad'], ['u-stop'], ['d-ok'], ['d-stop']
+  ])
+  // 缺省 kind 视为上传；空输入返回空数组。
+  assert.deepEqual(groupByKindOutcome([{ id: 'x' }]).map(group => group.id), ['upload-success'])
+  assert.equal(groupByKindOutcome([]).length, 0)
+  assert.equal(groupByKindOutcome(undefined).length, 0)
 })
