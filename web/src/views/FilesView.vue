@@ -56,7 +56,7 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { api, batchDownloadFilename, clearSession, computeFileSHA256, localizeError } from '../api'
 import { advanceTransferGeneration, completionTimestamp, emaRate, FairStartGate, isTransferGenerationCurrent, isUploadTerminal, needsBulkConfirm, transferBatches, uploadResultKind } from '../transferFlow'
-import { TRANSFER_STAGE_KEYS, TRANSFER_STAGE_ORDER, groupByKindOutcome, isUploadTerminalState, normalizeStatus, progressHint, statusLabel, transferStage } from '../transferStatus'
+import { TRANSFER_STAGE_KEYS, TRANSFER_STAGE_ORDER, canAdoptReselectedFile, groupByKindOutcome, isUploadTerminalState, normalizeStatus, progressHint, statusLabel, transferStage } from '../transferStatus'
 import AuthenticatedTopbar from '../components/AuthenticatedTopbar.vue'
 import BrandFooter from '../components/BrandFooter.vue'
 import { brand } from '../brand'
@@ -471,7 +471,7 @@ function restoreTransfers() {
         progress: snap.progress || 0, loadedBytes: snap.loadedBytes || 0, rate: 0,
         status: done ? (snap.cancelled ? 'cancelled' : 'completed') : (snap.failed ? 'failed' : 'need_reselect'),
         taskId: snap.taskId || '', sha256: snap.sha256 || '', uploaded: [], paused: !!snap.paused, chunksTotal: 0, chunkSize: 0,
-        error: snap.error || '', failed: !!snap.failed, done, completedAt: snap.completedAt || '', cancelled: !!snap.cancelled, canContinue: !!snap.canContinue, running: false, terminating: false, pending: new Set(), controllers: new Map(), requestControllers: new Set(), transferGeneration: 0, needsReselect: true, restored: true
+        error: snap.error || '', failed: !!snap.failed, done, completedAt: snap.completedAt || '', cancelled: !!snap.cancelled, canContinue: !!snap.canContinue, running: false, terminating: false, pending: new Set(), controllers: new Map(), requestControllers: new Set(), transferGeneration: 0, needsReselect: !done, restored: true
       })
     }
   }
@@ -504,7 +504,7 @@ async function queueFiles(list, options = {}) {
       const relDir = dirParts.length ? dirParts.join('/') : ''
       const dir = relDir ? `${targetDir ? `${targetDir}/` : ''}${relDir}` : targetDir
       const relPath = path !== file.name ? path : ''
-      const candidates = uploads.value.filter(entry => entry.needsReselect && entry.name === file.name && entry.size === file.size && normalizeTransferDir(entry.dir) === dir && (entry.relPath || '') === relPath)
+      const candidates = uploads.value.filter(entry => canAdoptReselectedFile(entry) && entry.name === file.name && entry.size === file.size && normalizeTransferDir(entry.dir) === dir && (entry.relPath || '') === relPath)
       let restored = null
       let fileHash = ''
       for (const candidate of candidates) {
@@ -530,6 +530,10 @@ async function queueFiles(list, options = {}) {
         restored.cancelled = false
         restored.error = ''
         restored.status = 'preparing'
+        // 必须同时清零进度：终止态契约把 progress ≥ 100 也算终止，若只清 done，一条被误标为
+        // "已完成"（progress 100）的旧记录会让 uploadStartable 直接拦下，重选文件后静默无反应（v044.9）。
+        restored.progress = 0
+        restored.statusProgress = 0
         restored.transferGeneration = Number(restored.transferGeneration) || 0
         restored.requestControllers ||= new Set()
         restored.controllers ||= new Map()

@@ -149,7 +149,19 @@ export function isUploadTerminalState(item) {
   return completedStatuses.has(normalizeStatus(item.status))
 }
 
-/** 终止态归类：'success' | 'failed' | 'cancelled' | null。 */export function uploadTerminalKind(item) {
+/** 终止态归类：'success' | 'failed' | 'cancelled' | null。 */
+// v044.9：既有条目能否承接"用户重新选择的同一个文件"来续传。
+// 必须同时满足：标记为待重选，且**未处于终止态**。旧实现只判断 needsReselect，而恢复快照时所有条目
+// 都被无条件标记成待重选（连"已完成"的也是），于是重新选文件会粘到一条已完成记录上：done/progress
+// 把它判成终止态，续传被静默跳过——用户看不到任何请求、报错或进度。
+// Whether an existing item may adopt a re-selected file for resume: it must be awaiting re-selection AND
+// must not already be terminal, otherwise the new pick is silently swallowed as "already uploaded".
+export function canAdoptReselectedFile(entry) {
+  return Boolean(entry && entry.needsReselect && !isUploadTerminalState(entry))
+}
+
+/** 终止态归类：'success' | 'failed' | 'cancelled' | null。 */
+export function uploadTerminalKind(item) {
   if (!isUploadTerminalState(item)) return null
   if (item.cancelled) return 'cancelled'
   if (item.failed) return 'failed'

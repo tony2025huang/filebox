@@ -6,7 +6,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { TRANSFER_KIND_KEYS, TRANSFER_OUTCOME_KEYS, TRANSFER_OUTCOME_ORDER, TRANSFER_STAGE_KEYS, TRANSFER_STAGE_ORDER, TRANSFER_STATUS_KEYS, groupByKindOutcome, groupByOutcome, groupByStage, isDownloadTerminalState, isTransferStatusCode, isUploadTerminalState, progressHint, statusLabel, transferOutcome, transferStage, uploadTerminalKind } from '../src/transferStatus.js'
+import { TRANSFER_KIND_KEYS, TRANSFER_OUTCOME_KEYS, TRANSFER_OUTCOME_ORDER, TRANSFER_STAGE_KEYS, TRANSFER_STAGE_ORDER, TRANSFER_STATUS_KEYS, canAdoptReselectedFile, groupByKindOutcome, groupByOutcome, groupByStage, isDownloadTerminalState, isTransferStatusCode, isUploadTerminalState, progressHint, statusLabel, transferOutcome, transferStage, uploadTerminalKind } from '../src/transferStatus.js'
 import { dictionaries } from '../src/i18n.js'
 
 function translate(dict) {
@@ -138,6 +138,21 @@ test('阶段与结果分组的标题键在三语字典中都有', () => {
       assert.ok(key in dict, `${locale} 缺少类型标题 ${key}`)
     }
   }
+})
+
+// v044.9：已完成的条目不得被当作"待重选"去承接用户重新选择的文件，否则重选会被静默吞掉。
+test('假"已完成"记录不得吞掉重新选择的文件', () => {
+  const stuck = { needsReselect: true, done: true, progress: 100, status: 'completed', name: 'iso', size: 6482409472 }
+  assert.equal(canAdoptReselectedFile(stuck), false)
+  // 只清了 done、进度仍是 100 的旧记录同样不行：终止态契约把 progress ≥ 100 也算终止。
+  assert.equal(canAdoptReselectedFile({ needsReselect: true, progress: 100 }), false)
+  assert.equal(canAdoptReselectedFile({ needsReselect: true, cancelled: true }), false)
+  assert.equal(canAdoptReselectedFile({ needsReselect: true, failed: true }), false)
+  // 真正的续传条目（待重选、进度未满）可以承接。
+  assert.equal(canAdoptReselectedFile({ needsReselect: true, done: false, progress: 40, status: 'need_reselect' }), true)
+  // 没标记待重选的条目不参与匹配（例如正在进行的传输）。
+  assert.equal(canAdoptReselectedFile({ progress: 30, status: 'uploading' }), false)
+  assert.equal(canAdoptReselectedFile(null), false)
 })
 
 // v044.8：服务端进度样本只是提示，绝不能把条目推到 100%（否则会被判成完成并显示"成功"）。
