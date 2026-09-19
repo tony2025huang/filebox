@@ -1,41 +1,71 @@
-// v030 #1 契约回归：断言成功路径必然进入终止态、失败/取消归类正确、进行中不误判。
-// v030 #1 contract regression: the success path must be terminal, failed/cancelled classify
-// correctly, and in-flight items are never treated as terminal.
-//
-// 说明：状态文本是本地化文案，因此调用方需把"已完成/秒传完成"传入 terminatedLabels；
-// 真实路径（FilesView）按 t('files.completed') / t('files.instantUpload') 传入。
-// Localized status text must be supplied via terminatedLabels by the caller, which FilesView does.
+// 传输状态契约回归（v044.2）：状态判定只看标志与**稳定状态码**，与界面语言无关；
+// 展示层再由 statusLabel 翻译。旧实现把本地化文案存进 item.status，切语言后既不会重译，
+// 判定也会随语言漂移，这里把它固定住。
+// Transfer status contract: terminal detection reads flags and stable status codes only, so it can
+// never drift with the active language; the UI translates codes through statusLabel.
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { isUploadTerminalState, isDownloadTerminalState, uploadTerminalKind } from '../src/transferStatus.js'
+import { TRANSFER_OUTCOME_KEYS, TRANSFER_OUTCOME_ORDER, TRANSFER_STAGE_KEYS, TRANSFER_STAGE_ORDER, TRANSFER_STATUS_KEYS, groupByOutcome, groupByStage, isDownloadTerminalState, isTransferStatusCode, isUploadTerminalState, statusLabel, transferOutcome, transferStage, uploadTerminalKind } from '../src/transferStatus.js'
+import { dictionaries } from '../src/i18n.js'
 
-const labels = ['已完成', '秒传完成']
+function translate(dict) {
+  return (key, params = {}) => String(dict[key] ?? key).replace(/\{(\w+)\}/g, (_, name) => params[name] ?? `{${name}}`)
+}
 
-test('成功上传必然进入终止态（done / progress 100 / 已完成 / 秒传）', () => {
-  assert.equal(isUploadTerminalState({ done: true, progress: 100, status: '已完成' }, labels), true)
-  assert.equal(isUploadTerminalState({ progress: 100, status: '校验中' }, labels), true)
-  assert.equal(isUploadTerminalState({ status: '已完成' }, labels), true)
-  assert.equal(isUploadTerminalState({ status: '秒传完成' }, labels), true)
-  assert.equal(isUploadTerminalState({ status: 'instant' }, labels), true)
-  assert.equal(isUploadTerminalState({ status: 'Completed' }, labels), true)
-  // 未传标签时本地化文案不应被猜测命中（避免与后端英文状态混淆）。
-  assert.equal(isUploadTerminalState({ status: '已完成' }), false)
+test('成功上传必然进入终止态（done / progress 100 / completed / instant）', () => {
+  assert.equal(isUploadTerminalState({ done: true, progress: 100, status: 'completed' }), true)
+  assert.equal(isUploadTerminalState({ progress: 100, status: 'checking' }), true)
+  assert.equal(isUploadTerminalState({ status: 'completed' }), true)
+  assert.equal(isUploadTerminalState({ status: 'instant' }), true)
+  assert.equal(isUploadTerminalState({ status: 'Completed' }), true, '状态码比较忽略大小写')
 })
 
 test('失败与取消归类为终止态且类别正确', () => {
-  assert.equal(uploadTerminalKind({ failed: true, status: '网络异常' }, labels), 'failed')
-  assert.equal(uploadTerminalKind({ cancelled: true }, labels), 'cancelled')
-  assert.equal(uploadTerminalKind({ done: true, status: '已完成' }, labels), 'success')
-  assert.equal(uploadTerminalKind({}, labels), null)
+  assert.equal(uploadTerminalKind({ failed: true, status: '' }), 'failed')
+  assert.equal(uploadTerminalKind({ cancelled: true, status: 'cancelled' }), 'cancelled')
+  assert.equal(uploadTerminalKind({ done: true, status: 'completed' }), 'success')
+  assert.equal(uploadTerminalKind({}), null)
 })
 
 test('进行中的条目不得被判为终止态', () => {
-  assert.equal(isUploadTerminalState({ progress: 42, status: '上传中' }, labels), false)
-  assert.equal(isUploadTerminalState({ progress: 99, status: '校验中' }, labels), false)
-  assert.equal(isUploadTerminalState({ progress: 0, status: '排队中' }, labels), false)
-  assert.equal(isUploadTerminalState(null, labels), false)
-  assert.equal(uploadTerminalKind({ progress: 10 }, labels), null)
+  for (const code of ['preparing', 'uploading', 'checksum', 'checking', 'downloading', 'paused', 'terminating']) {
+    assert.equal(isUploadTerminalState({ progress: 42, status: code }), false, `${code} 不应是终止态`)
+  }
+  assert.equal(isUploadTerminalState(null), false)
+  assert.equal(uploadTerminalKind({ progress: 10, status: 'uploading' }), null)
+})
+
+test('终止判定与界面语言无关（本地化文案不再参与判定）', () => {
+  // 旧实现需要把 t('files.completed') 传进来才能判定；现在传入任何语言的文案都不影响判定，
+  // 因为语言相关的只是 statusLabel 的输出，判定只看标志与状态码。
+  assert.equal(isUploadTerminalState({ status: '已完成' }), false, '本地化文案不再被当作状态码')
+  assert.equal(isUploadTerminalState({ done: true, status: '已完成' }), true, '标志位仍然决定终止态')
+  assert.equal(isTransferStatusCode('已完成'), false)
+  assert.equal(isTransferStatusCode('completed'), true)
+})
+
+test('每个状态码在三语字典中都有对应文案', () => {
+  for (const [locale, dict] of Object.entries(dictionaries)) {
+    for (const [code, key] of Object.entries(TRANSFER_STATUS_KEYS)) {
+      assert.ok(key in dict, `${locale} 缺少 ${key}（状态码 ${code}）`)
+    }
+  }
+})
+
+test('statusLabel 会翻译状态码，并原样保留动态文本', () => {
+  for (const [locale, dict] of Object.entries(dictionaries)) {
+    const t = translate(dict)
+    for (const code of Object.keys(TRANSFER_STATUS_KEYS)) {
+      const label = statusLabel(code, t, { progress: 30 })
+      assert.notEqual(label, code, `${locale} 的状态码 ${code} 未翻译`)
+      assert.ok(label.length > 0, `${locale} 的状态码 ${code} 为空`)
+    }
+    assert.match(statusLabel('checksum', t, { progress: 30 }), /30/, `${locale} 的校验进度未代入`)
+  }
+  const t = translate(dictionaries['zh-CN'])
+  assert.equal(statusLabel('服务器返回的错误消息', t), '服务器返回的错误消息')
+  assert.equal(statusLabel('', t), '')
 })
 
 test('下载终止态与上传契约一致（避免两份定义漂移）', () => {
@@ -43,5 +73,66 @@ test('下载终止态与上传契约一致（避免两份定义漂移）', () =>
   assert.equal(isDownloadTerminalState({ progress: 100 }), true)
   assert.equal(isDownloadTerminalState({ failed: true }), true)
   assert.equal(isDownloadTerminalState({ cancelled: true }), true)
-  assert.equal(isDownloadTerminalState({ progress: 88, status: '下载中' }), false)
+  assert.equal(isDownloadTerminalState({ status: 'cancelled' }), true)
+  assert.equal(isDownloadTerminalState({ progress: 88, status: 'downloading' }), false)
+})
+
+// v044.4：进行中按阶段分组、已完成按结果分组；分组只是状态码的归并，必须覆盖全部状态码。
+test('进行中条目按状态码归入准备/传输/处理/暂停四个阶段', () => {
+  const cases = {
+    preparing: ['preparing', 'checksum'],
+    transferring: ['uploading', 'downloading', 'terminating'],
+    processing: ['checking'],
+    paused: ['paused', 'need_reselect']
+  }
+  for (const [stage, codes] of Object.entries(cases)) {
+    for (const code of codes) assert.equal(transferStage({ status: code }), stage, `${code} 应归入 ${stage}`)
+  }
+  // 未知/空状态必须仍然可见（按传输中处理），不能从列表里消失。
+  assert.equal(transferStage({ status: 'brand_new_code' }), 'transferring')
+  assert.equal(transferStage({}), 'transferring')
+  assert.equal(transferStage(null), 'transferring')
+})
+
+test('每个状态码都能落到某个阶段（无遗漏）', () => {
+  for (const code of Object.keys(TRANSFER_STATUS_KEYS)) {
+    const stage = transferStage({ status: code })
+    assert.ok(TRANSFER_STAGE_ORDER.includes(stage), `状态码 ${code} 未归入任何阶段`)
+  }
+})
+
+test('分组只返回非空组并保持顺序', () => {
+  const items = [
+    { id: 'a', status: 'uploading' },
+    { id: 'b', status: 'checksum' },
+    { id: 'c', status: 'paused' },
+    { id: 'd', status: 'uploading' }
+  ]
+  const groups = groupByStage(items)
+  assert.deepEqual(groups.map(group => group.stage), ['preparing', 'transferring', 'paused'])
+  assert.deepEqual(groups.map(group => group.items.map(item => item.id)), [['b'], ['a', 'd'], ['c']])
+  assert.equal(groupByStage([]).length, 0)
+  assert.equal(groupByStage(undefined).length, 0)
+})
+
+test('已完成条目按成功/失败/取消分组', () => {
+  assert.equal(transferOutcome({ cancelled: true }), 'cancelled')
+  assert.equal(transferOutcome({ failed: true }), 'failed')
+  assert.equal(transferOutcome({ done: true }), 'success')
+  const groups = groupByOutcome([
+    { id: 'ok' }, { id: 'bad', failed: true }, { id: 'stop', cancelled: true }, { id: 'ok2' }
+  ])
+  assert.deepEqual(groups.map(group => group.outcome), TRANSFER_OUTCOME_ORDER)
+  assert.deepEqual(groups.map(group => group.items.map(item => item.id)), [['ok', 'ok2'], ['bad'], ['stop']])
+})
+
+test('阶段与结果分组的标题键在三语字典中都有', () => {
+  for (const [locale, dict] of Object.entries(dictionaries)) {
+    for (const key of Object.values(TRANSFER_STAGE_KEYS)) {
+      assert.ok(key in dict, `${locale} 缺少阶段标题 ${key}`)
+    }
+    for (const key of Object.values(TRANSFER_OUTCOME_KEYS)) {
+      assert.ok(key in dict, `${locale} 缺少结果标题 ${key}`)
+    }
+  }
 })

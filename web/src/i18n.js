@@ -340,6 +340,15 @@ Object.assign(en, {
 export const dictionaries = { 'zh-CN': zhCN, 'zh-TW': zhTW, en }
 export const currentLocale = ref('zh-CN')
 export const systemLocale = ref('zh-CN')
+// storedLocale 是"用户显式选择的语言偏好"的响应式镜像（'' 表示跟随系统）。
+// 界面若要显示当前选择，必须读它而不是直接读 localStorage：localStorage 不是响应式的，
+// 在 computed 里读它会让该 computed 不依赖任何响应式数据、永久缓存旧值
+// （v044.3 修的就是语言下拉被回写成旧语言）。
+// storedLocale mirrors the explicit language preference reactively ('' means follow system).
+// UI must read this instead of localStorage directly: reading localStorage inside a computed makes
+// that computed depend on nothing reactive, so it caches its first value forever.
+export const storedLocale = ref('')
+if (typeof localStorage !== 'undefined') storedLocale.value = localStorage.getItem('filebox_locale') || ''
 
 function validLocale(value) { return supportedLocales.has(value) }
 
@@ -348,9 +357,13 @@ function validLocale(value) { return supportedLocales.has(value) }
 export function setLocale(lang) {
   const next = lang === '' ? systemLocale.value : lang
   currentLocale.value = validLocale(next) ? next : 'zh-CN'
-  document.documentElement.lang = currentLocale.value
-  if (lang === '') localStorage.removeItem('filebox_locale')
-  else if (validLocale(lang)) localStorage.setItem('filebox_locale', lang)
+  if (typeof document !== 'undefined') document.documentElement.lang = currentLocale.value
+  // 只有显式选择才留下偏好；'' 表示跟随系统，清空偏好。
+  const preference = lang !== '' && validLocale(lang) ? lang : ''
+  storedLocale.value = preference
+  if (typeof localStorage === 'undefined') return
+  if (preference) localStorage.setItem('filebox_locale', preference)
+  else localStorage.removeItem('filebox_locale')
 }
 
 export function t(key, params = {}) {
@@ -362,14 +375,14 @@ export function t(key, params = {}) {
 // loadLocale resolves explicit local preference, authenticated user preference, public system default, then zh-CN.
 // loadLocale 按本地明确选择、登录用户偏好、公开系统默认、简体中文的顺序解析语言。
 export async function loadLocale(defaultLang = '') {
-  const saved = localStorage.getItem('filebox_locale')
+  const saved = storedLocale.value || (typeof localStorage !== 'undefined' ? localStorage.getItem('filebox_locale') || '' : '')
   if (validLocale(saved)) {
     systemLocale.value = validLocale(defaultLang) ? defaultLang : 'zh-CN'
     setLocale(saved)
     return currentLocale.value
   }
   let userLanguage = ''
-  const token = localStorage.getItem('filebox_token')
+  const token = typeof localStorage !== 'undefined' ? localStorage.getItem('filebox_token') : ''
   if (token) {
     try {
       const response = await fetch('/api/auth/me', { headers: { Authorization: `Bearer ${token}` } })
@@ -385,7 +398,7 @@ export async function loadLocale(defaultLang = '') {
   }
   systemLocale.value = validLocale(resolvedDefault) ? resolvedDefault : 'zh-CN'
   setLocale(validLocale(userLanguage) && userLanguage ? userLanguage : systemLocale.value)
-  if (!userLanguage) localStorage.removeItem('filebox_locale')
+  if (!userLanguage) { storedLocale.value = ''; if (typeof localStorage !== 'undefined') localStorage.removeItem('filebox_locale') }
   return currentLocale.value
 }
 
@@ -509,4 +522,44 @@ Object.assign(en, {
   'logReason.collectionFileTooLarge': 'Exceeds the collection file limit', 'logReason.shareContentMissing': 'Share content deleted',
   'logReason.instant': 'Instant upload', 'logReason.success': 'Succeeded', 'logReason.folderDelete': 'Delete folder',
   'logReason.unknown': 'Other reason ({code})'
+})
+
+// v044.2: transfer drawer keys (language-independent status codes live in web/src/transferStatus.js).
+// v044.2：传输抽屉文案；状态码与语言的对应关系见 web/src/transferStatus.js。
+Object.assign(zhCN, {
+  'files.clearList': '清空列表',
+  'files.clearListConfirm': '确定清空传输列表吗？共 {total} 条记录将被移除。',
+  'files.clearListConfirmActive': '确定清空传输列表吗？其中 {active} 项进行中的传输将被终止，共 {total} 条记录将被移除。',
+  'files.listCleared': '传输列表已清空',
+  'files.listClearedActive': '传输列表已清空，{count} 项进行中的传输已终止'
+})
+Object.assign(zhTW, {
+  'files.clearList': '清空列表',
+  'files.clearListConfirm': '確定清空傳輸列表嗎？共 {total} 筆記錄將被移除。',
+  'files.clearListConfirmActive': '確定清空傳輸列表嗎？其中 {active} 項進行中的傳輸將被終止，共 {total} 筆記錄將被移除。',
+  'files.listCleared': '傳輸列表已清空',
+  'files.listClearedActive': '傳輸列表已清空，{count} 項進行中的傳輸已終止'
+})
+Object.assign(en, {
+  'files.clearList': 'Clear list',
+  'files.clearListConfirm': 'Clear the transfer list? {total} record(s) will be removed.',
+  'files.clearListConfirmActive': 'Clear the transfer list? {active} running transfer(s) will be stopped and {total} record(s) removed.',
+  'files.listCleared': 'Transfer list cleared',
+  'files.listClearedActive': 'Transfer list cleared; {count} running transfer(s) stopped'
+})
+
+// v044.4: transfer stage headings (active tab) — the labels for the terminal outcomes reuse
+// files.finishedSuccess/Failed/Cancelled, which already exist.
+// v044.4：传输阶段分组标题；已完成分组直接复用既有的 files.finishedSuccess/Failed/Cancelled。
+Object.assign(zhCN, {
+  'files.stagePreparing': '准备 / 校验中', 'files.stageTransferring': '传输中',
+  'files.stageProcessing': '服务端处理中', 'files.stagePaused': '已暂停 / 待处理'
+})
+Object.assign(zhTW, {
+  'files.stagePreparing': '準備 / 校驗中', 'files.stageTransferring': '傳輸中',
+  'files.stageProcessing': '伺服器處理中', 'files.stagePaused': '已暫停 / 待處理'
+})
+Object.assign(en, {
+  'files.stagePreparing': 'Preparing / checking', 'files.stageTransferring': 'Transferring',
+  'files.stageProcessing': 'Server processing', 'files.stagePaused': 'Paused / waiting'
 })

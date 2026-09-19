@@ -53,7 +53,7 @@ import { brand, loadBrand } from '../brand'
 import BrandFooter from '../components/BrandFooter.vue'
 import BrandLogo from '../components/BrandLogo.vue'
 import LanguageSelect from '../components/LanguageSelect.vue'
-import { setLocale, t } from '../i18n'
+import { setLocale, storedLocale, t } from '../i18n'
 
 const router = useRouter()
 const route = useRoute()
@@ -90,7 +90,7 @@ async function submit() {
       return
     }
     saveSession(body)
-    if (body.data.user.language && !localStorage.getItem('filebox_locale')) setLocale(body.data.user.language)
+    if (body.data.user.language && !storedLocale.value) setLocale(body.data.user.language)
     if (!remember.value) sessionStorage.setItem('filebox_session', '1')
     router.push(registerMode.value ? '/' : route.query.redirect || '/')
   } catch (err) {
