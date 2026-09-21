@@ -1658,7 +1658,7 @@ func (s *Server) clearAllFiles(w http.ResponseWriter, r *http.Request) {
 			log.Printf("remove cleared upload task temp dir %q result=failure err=%v", taskID, err)
 		}
 	}
-	if err := s.cleanClearedStorage(result.UserIDs, diskMode); err != nil {
+	if err := s.cleanClearedStorage(result.UserIDs); err != nil {
 		log.Printf("clean cleared storage result=failure err=%v", err)
 	}
 	for ownerID, dirs := range userDirsByOwner(result.Paths) {
@@ -1739,21 +1739,16 @@ func isDirectoryNotEmpty(err error) bool {
 	return strings.Contains(message, "directory not empty") || strings.Contains(message, "Directory not empty")
 }
 
-// cleanClearedStorage 按磁盘模式清理受影响用户的存储目录：empty-dirs 仅删空目录，
-// whole-tree 删除用户整个 files/<uid> 目录树（上传完成路径会按需重建目录）。
-// cleanClearedStorage cleans affected users' storage by disk mode: empty-dirs removes only empty
-// directories, while whole-tree removes each user's files/<uid> tree (upload completion recreates
-// directories on demand).
-func (s *Server) cleanClearedStorage(userIDs []int64, diskMode string) error {
+// cleanClearedStorage 清空后统一移除受影响用户的整个存储目录树（上传完成路径会按需重建目录）。
+// 说明：清空前已逐个删除被清空文件的内容，剩下的目录树已无保留价值；而"按用户清空 + 回收站独立账户"
+// 之后，原先 empty-dirs / whole-tree 两种模式的结果本就相同（都是整棵树消失），故不再二选一（v044.11）。
+// cleanClearedStorage always removes each affected user's files/<uid> tree. The cleared files' content is
+// removed beforehand, and the two legacy disk modes had become indistinguishable once clearing was
+// restricted to a single user and the recycle bin got its own owner account.
+func (s *Server) cleanClearedStorage(userIDs []int64) error {
 	for _, ownerID := range userIDs {
 		userRoot := filepath.Join(s.config.DataDir, "files", strconv.FormatInt(ownerID, 10))
-		if diskMode == "whole-tree" {
-			if err := os.RemoveAll(userRoot); err != nil {
-				return err
-			}
-			continue
-		}
-		if err := pruneEmptyDirs(userRoot); err != nil {
+		if err := os.RemoveAll(userRoot); err != nil {
 			return err
 		}
 	}
@@ -4801,7 +4796,7 @@ func (s *Server) clearUserFiles(w http.ResponseWriter, r *http.Request) {
 			log.Printf("remove cleared upload task temp dir %q result=failure err=%v", taskID, removeErr)
 		}
 	}
-	if err := s.cleanClearedStorage([]int64{id}, diskMode); err != nil {
+	if err := s.cleanClearedStorage([]int64{id}); err != nil {
 		log.Printf("clean cleared user storage result=failure err=%v", err)
 	}
 	for ownerID, dirs := range userDirsByOwner(result.Paths) {

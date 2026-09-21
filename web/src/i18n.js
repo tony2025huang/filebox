@@ -554,17 +554,17 @@ Object.assign(en, {
 Object.assign(zhCN, {
   'files.clearDiskEmptyDirs': '仅删除这些文件的磁盘内容，并清理因此变空的目录（保留目录内的其他内容）',
   'files.clearDiskWholeTree': '删除整个存储目录（连同其中的其他内容）',
-  'files.clearIrreversible': '被清空文件在磁盘上的内容会被删除，无法恢复。'
+  'files.clearIrreversible': '清空会删除这些文件在磁盘上的内容，并移除整个存储目录，无法恢复。'
 })
 Object.assign(zhTW, {
   'files.clearDiskEmptyDirs': '僅刪除這些檔案的磁碟內容，並清理因此變空的目錄（保留目錄內的其他內容）',
   'files.clearDiskWholeTree': '刪除整個儲存目錄（連同其中的其他內容）',
-  'files.clearIrreversible': '被清空檔案在磁碟上的內容會被刪除，無法復原。'
+  'files.clearIrreversible': '清空會刪除這些檔案在磁碟上的內容，並移除整個儲存目錄，無法復原。'
 })
 Object.assign(en, {
   'files.clearDiskEmptyDirs': 'Delete these files from disk and prune the directories that become empty (other content is kept)',
   'files.clearDiskWholeTree': 'Delete the whole storage directory (including any other content in it)',
-  'files.clearIrreversible': 'The cleared files are deleted from disk and cannot be recovered.'
+  'files.clearIrreversible': 'Clearing deletes these files from disk and removes the whole storage directory; this cannot be undone.'
 })
 
 // v044.4: transfer stage headings (active tab) — the labels for the terminal outcomes reuse
