@@ -189,7 +189,7 @@ async function batchDownload() {
   if (!ids.length) return
   batchDownloading.value = true
   error.value = ''
-  const item = { id: `dl-batch-${Date.now()}`, name: '', batch: true, downloadName: batchDownloadFilename(), batchIds: ids, size: 0, loadedBytes: 0, progress: 0, rate: 0, status: 'downloading', failed: false, paused: false, cancelled: false, completed: false, running: false, error: '', controller: null, parts: [], resumable: false, transferGeneration: 0 }
+  let item = { id: `dl-batch-${Date.now()}`, name: '', batch: true, downloadName: batchDownloadFilename(), batchIds: ids, size: 0, loadedBytes: 0, progress: 0, rate: 0, status: 'downloading', failed: false, paused: false, cancelled: false, completed: false, running: false, error: '', controller: null, parts: [], resumable: false, transferGeneration: 0 }
   batchDownloadItem = item
   downloads.value.push(item = reactive(item))
   transfersOpen.value = true
@@ -544,7 +544,7 @@ async function queueFiles(list, options = {}) {
         restored.controllers ||= new Map()
         runGated(restored)
       } else {
-        const item = {
+        let item = {
           id: `${Date.now()}-${Math.random()}-${file.name}`, file, relPath, dir,
           progress: 0, loadedBytes: 0, rate: 0, status: t('files.uploadPreparing'),
           taskId: '', uploaded: [], paused: false, chunksTotal: 0, chunkSize: 0, error: '',
@@ -1099,7 +1099,7 @@ async function streamDownload(item, request, downloadName, generation) {
 // download streams the file and reports detailed progress in the transfers drawer.
 // download 流式下载并在传输面板显示详细进度。
 async function download(file) {
-  const item = { id: 'dl-' + Date.now() + '-' + file.id, fileId: file.id, name: file.name, size: file.size || 0, loadedBytes: 0, progress: 0, rate: 0, status: t('files.downloading'), failed: false, paused: false, cancelled: false, completed: false, running: false, error: '', controller: null, parts: [], resumable: true, transferGeneration: 0 }
+  let item = { id: 'dl-' + Date.now() + '-' + file.id, fileId: file.id, name: file.name, size: file.size || 0, loadedBytes: 0, progress: 0, rate: 0, status: t('files.downloading'), failed: false, paused: false, cancelled: false, completed: false, running: false, error: '', controller: null, parts: [], resumable: true, transferGeneration: 0 }
   downloads.value.push(item = reactive(item))
   transfersOpen.value = true
   persistTransfers()
