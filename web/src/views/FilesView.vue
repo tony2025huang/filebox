@@ -61,6 +61,7 @@ import AuthenticatedTopbar from '../components/AuthenticatedTopbar.vue'
 import BrandFooter from '../components/BrandFooter.vue'
 import { brand } from '../brand'
 import { currentLocale, t } from '../i18n'
+import { lazyText } from '../notice'
 import { Archive, ArrowUpDown, CheckCircle2, ChevronLeft, ChevronRight, Copy, Download, ExternalLink, Eye, File, FileArchive, FileCode, FileEdit, FileJson, FileSpreadsheet, FileText, FileType, FileUp, Folder, FolderOpen, FolderPlus, FolderUp, Gauge, Image, LoaderCircle, Music, Pause, Pencil, Play, RefreshCw, Replace, Save, Search, Share2, Trash2, Upload, UploadCloud, Video, X } from 'lucide-vue-next'
 
 const router = useRouter(); const user = ref(JSON.parse(localStorage.getItem('filebox_user') || '{}')); const files = ref([]); const total = ref(0); const page = ref(1); const pageSize = ref(Number(localStorage.getItem('filebox_pagesize_files')) || 20); const pageInput = ref(''); const keyword = ref(''); const searchInput = ref(''); const sortBy = ref('name'); const sortOrder = ref('asc'); const loading = ref(false); const error = ref(''); const notice = ref(''); const uploads = ref([]); const downloads = ref([]); const transfersOpen = ref(false); const transfersTab = ref('transferring'); const showMd5 = ref(localStorage.getItem('filebox_show_md5') !== '0'); const fileInput = ref(null); const folderInput = ref(null); const conflictQueue = ref([]); const confirmQueue = ref([]); const currentDir = ref(''); const folders = ref([]); const folderPrompt = ref(null); const folderUploadPrompt = ref(null); const folderSaving = ref(false); const folderError = ref(''); const clearAllOpen = ref(false); const clearAllBusy = ref(false); const clearAllError = ref(''); const clearAllAuth = ref({ password: '', code: '' }); const clearAllDiskMode = ref('empty-dirs')
@@ -194,7 +195,7 @@ async function batchDownload() {
   transfersOpen.value = true
   persistTransfers()
   await startDownload(item)
-  if (item.completed) { selectedIds.clear(); notice.value = t('files.batchDownloadDone', { count: ids.length }) }
+  if (item.completed) { selectedIds.clear(); notice.value = lazyText('files.batchDownloadDone', { count: ids.length }) }
   if (batchDownloadItem === item) batchDownloadItem = null
   batchDownloading.value = false
 }
@@ -202,7 +203,7 @@ function cancelBatchDownload() { if (batchDownloadItem) terminateDownload(batchD
 function cancelDownload(item) { terminateDownload(item) }
 // batchDelete confirms and removes the selected files and folders, then refreshes quota and the current directory.
 async function batchDelete() {
-  if (readOnly.value) { error.value = t('readOnly.error'); return }
+  if (readOnly.value) { error.value = lazyText('readOnly.error'); return }
   const fileIds = [...selectedIds]
   const folderIds = [...selectedFolderIds]
   if (!fileIds.length && !folderIds.length) return
@@ -265,7 +266,7 @@ async function submitClearAll() {
     await loadMe()
     await loadFolders()
     await loadFiles()
-    notice.value = t('files.clearedNotice', { files: data.files || 0, tasks: data.tasks || 0, shares: data.shares || 0 })
+    notice.value = lazyText('files.clearedNotice', { files: data.files || 0, tasks: data.tasks || 0, shares: data.shares || 0 })
   } catch (err) {
     clearAllError.value = err.message
   } finally {
@@ -382,8 +383,8 @@ function openNewFolder() { if (readOnly.value) return; folderPrompt.value = { re
 function openRenameFolder(folder) { if (readOnly.value) return; folderPrompt.value = { rename: true, id: folder.id, name: folder.name }; folderError.value = '' }
 // submitFolder 创建或重命名目录，成功后刷新目录与文件列表；批量重命名模式下逐个推进到下一目录。
 // submitFolder creates or renames a folder and refreshes; in batch mode it advances to the next selected folder.
-async function submitFolder() { if (readOnly.value) { folderError.value = t('readOnly.error'); return } const prompt = folderPrompt.value; if (!prompt?.name) return; folderSaving.value = true; folderError.value = ''; try { if (prompt.rename) { await api(`/api/folders/${prompt.id}`, { method: 'PATCH', body: JSON.stringify({ name: prompt.name }) }); notice.value = t('notice.folderRenamed') } else { await api('/api/folders', { method: 'POST', body: JSON.stringify({ name: prompt.name, parent: currentDir.value }) }); notice.value = t('notice.folderCreated') } folderPrompt.value = null; if (prompt.batch && prompt.rename) { selectedFolderIds.delete(prompt.id); batchRenameQueue.value.shift(); renameNextSelectedFolder(); return } loadFolders(); loadFiles() } catch (err) { folderError.value = err.message } finally { folderSaving.value = false } }
-async function removeFolder(folder) { if (readOnly.value) { error.value = t('readOnly.error'); return } if (!(await askConfirm(t('confirm.deleteFolder', { name: folder.name })))) return; try { await api(`/api/folders/${folder.id}`, { method: 'DELETE' }); notice.value = t('notice.folderDeleted'); loadFolders(); loadFiles() } catch (err) { error.value = err.message } }
+async function submitFolder() { if (readOnly.value) { folderError.value = t('readOnly.error'); return } const prompt = folderPrompt.value; if (!prompt?.name) return; folderSaving.value = true; folderError.value = ''; try { if (prompt.rename) { await api(`/api/folders/${prompt.id}`, { method: 'PATCH', body: JSON.stringify({ name: prompt.name }) }); notice.value = lazyText('notice.folderRenamed') } else { await api('/api/folders', { method: 'POST', body: JSON.stringify({ name: prompt.name, parent: currentDir.value }) }); notice.value = lazyText('notice.folderCreated') } folderPrompt.value = null; if (prompt.batch && prompt.rename) { selectedFolderIds.delete(prompt.id); batchRenameQueue.value.shift(); renameNextSelectedFolder(); return } loadFolders(); loadFiles() } catch (err) { folderError.value = err.message } finally { folderSaving.value = false } }
+async function removeFolder(folder) { if (readOnly.value) { error.value = lazyText('readOnly.error'); return } if (!(await askConfirm(t('confirm.deleteFolder', { name: folder.name })))) return; try { await api(`/api/folders/${folder.id}`, { method: 'DELETE' }); notice.value = lazyText('notice.folderDeleted'); loadFolders(); loadFiles() } catch (err) { error.value = err.message } }
 function handleInput(event) { queueFiles([...event.target.files]); event.target.value = '' }
 function handleFolderInput(event) { openFolderUploadPrompt([...event.target.files]); event.target.value = '' }
 async function pickFolder() {
@@ -410,7 +411,7 @@ async function pickFolder() {
 }
 
 function openFolderUploadPrompt(list) {
-  if (!list?.length) { notice.value = t('files.folderEmpty'); return }
+  if (!list?.length) { notice.value = lazyText('files.folderEmpty'); return }
   const normalized = list.map(value => { const file = value.file || value; return { file, relPath: value.relPath || file.webkitRelativePath || file.name } })
   const hasDirs = normalized.some(value => value.relPath.includes('/'))
   if (!hasDirs) { queueFiles(normalized); return }
@@ -484,13 +485,13 @@ function restoreTransfers() {
 // queueFiles 为每个文件创建可续传任务，并固定本次队列的目标目录。
 async function queueFiles(list, options = {}) {
   if (!list?.length) return
-  if (readOnly.value) { error.value = t('readOnly.error'); return }
+  if (readOnly.value) { error.value = lazyText('readOnly.error'); return }
   const targetDir = normalizeTransferDir(options.targetDir !== undefined ? options.targetDir : currentDir.value)
   const configuredMax = Number(brand.maxFileSize)
   const maxSize = Number.isFinite(configuredMax) && configuredMax > 0 ? configuredMax : 100 * 1024 * 1024 * 1024
   const oversized = list.filter(value => (value.file || value).size > maxSize)
   const keep = list.filter(value => (value.file || value).size <= maxSize)
-  if (oversized.length) { error.value = t('files.tooManyTooLarge', { count: oversized.length, max: formatBytes(maxSize) }) }
+  if (oversized.length) { error.value = lazyText('files.tooManyTooLarge', { count: oversized.length, max: formatBytes(maxSize) }) }
   if (needsBulkConfirm(keep.length, Boolean(options.skipBulkConfirm)) && !(await askConfirm(t('files.bulkConfirm', { count: keep.length })))) return
   if (!keep.length) return
   transfersOpen.value = true
@@ -757,7 +758,7 @@ function startUpload(item) {
           item.completedAt = completionTimestamp(check.data, new Date().toISOString())
           item.rate = 0
           selectedUploadIds.delete(item.id)
-          notice.value = t('files.instantUpload')
+          notice.value = lazyText('files.instantUpload')
           await loadFiles()
           if (!transferIsCurrent(item, generation)) return
           await loadMe()
@@ -841,7 +842,7 @@ async function finishExistingUpload(item, generation) {
   item.completedAt = completionTimestamp(body?.data, new Date().toISOString())
   item.rate = 0
   selectedUploadIds.delete(item.id)
-  notice.value = t('files.uploadComplete', { name: item.relPath || item.file.name })
+  notice.value = lazyText('files.uploadComplete', { name: item.relPath || item.file.name })
   await loadMe()
   if (!transferIsCurrent(item, generation)) return
   await loadFiles()
@@ -945,7 +946,7 @@ async function terminateUploads(items) {
       selectedUploadIds.delete(item.id)
       success++
     }
-    notice.value = t('files.transferTerminated', { success, failed })
+    notice.value = lazyText('files.transferTerminated', { success, failed })
   } finally {
     uploadBatchBusy.value = false
     persistTransfers()
@@ -1153,7 +1154,7 @@ function terminateDownloads(items) { uniqueTransferItems(items).forEach(item => 
 function terminateSelectedDownloads() { terminateDownloads(selectedDownloadItems.value.slice()) }
 function terminateAllDownloads() { terminateDownloads(tabDownloads.value.slice()) }
 function clearFinishedDownload(item) { if (!isDownloadComplete(item)) return; downloads.value = downloads.value.filter(entry => entry !== item); selectedDownloadIds.delete(item.id); persistTransfers() }
-async function remove(file) { if (readOnly.value) { error.value = t('readOnly.error'); return } if (!(await askConfirm(t('confirm.deleteFile', { name: file.name })))) return; try { await api(`/api/files/${file.id}`, { method: 'DELETE' }); selectedIds.delete(file.id); notice.value = t('notice.fileDeleted'); await loadMe(); await loadFiles() } catch (err) { error.value = err.message } }
+async function remove(file) { if (readOnly.value) { error.value = lazyText('readOnly.error'); return } if (!(await askConfirm(t('confirm.deleteFile', { name: file.name })))) return; try { await api(`/api/files/${file.id}`, { method: 'DELETE' }); selectedIds.delete(file.id); notice.value = lazyText('notice.fileDeleted'); await loadMe(); await loadFiles() } catch (err) { error.value = err.message } }
 function formatBytes(bytes = 0) { if (bytes < 1024) return `${bytes} B`; const units = ['KB', 'MB', 'GB', 'TB']; let value = bytes; let unit = -1; do { value /= 1024; unit++ } while (value >= 1024 && unit < units.length - 1); return `${value.toFixed(value >= 10 ? 0 : 1)} ${units[unit]}` }
 function formatDate(value) { return value ? new Date(value).toLocaleString(currentLocale.value === 'en' ? 'en-US' : currentLocale.value, { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '-' }
 function shortMime(value = '') { return value.split('/').pop()?.toUpperCase() || 'FILE' }
