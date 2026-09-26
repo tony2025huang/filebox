@@ -79,3 +79,8 @@
 
 /* 8) 动效曲线：指数 ease-out，替代默认 ease（仍保留一次成型的抽屉过渡） */
 .transfers-drawer { transition: transform 0.24s cubic-bezier(0.16, 1, 0.3, 1); }
+
+/* 9) 去 hero 指标：文件库「空间使用」不再用大字号数字充当页面焦点（craft-floor 禁止 hero-metric 模板）。
+      进度条保留——它是真实度量而非装饰。同时修正 <em> 被当作"弱化单位"使用的语义问题。 */
+.quota-block strong { font-size: 1rem; font-weight: 600; }
+.quota-block .quota-total { color: var(--text-muted); font-weight: 400; }
