@@ -2,6 +2,7 @@ import { createApp } from 'vue'
 import App from './App.vue'
 import router from './router'
 import './styles.css'
+import './impeccable.css'
 import { brand, loadBrand } from './brand'
 import { loadLocale } from './i18n'
 
