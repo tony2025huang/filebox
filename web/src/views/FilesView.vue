@@ -449,6 +449,10 @@ function snapshotDownload(item) {
 // persistTransfers 把当前面板记录的可序列化快照写入 sessionStorage（按用户隔离，退出登录时清理）。
 // persistTransfers writes serializable snapshots of the current drawer into sessionStorage (per-user; cleared on logout).
 function persistTransfers() {
+  // 轻推数组引用：条目是普通对象，其上的状态写入不会自动通知派生它的 computed（列表归属、页签计数），
+  // 曾表现为"行内已是已完成、仍留在传输中"或"徽标有 1 而列表为空"，刷新后才恢复（v044.22）。
+  uploads.value = uploads.value.slice()
+  downloads.value = downloads.value.slice()
   try {
     const data = [...uploads.value.map(snapshotUpload), ...downloads.value.map(snapshotDownload)]
     sessionStorage.setItem(TRANSFERS_KEY, JSON.stringify(data))
