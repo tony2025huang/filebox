@@ -3868,6 +3868,9 @@ func (s *Store) ListFilesSorted(ctx context.Context, userID int64, admin bool, k
 	pageSize, offset := listPageOffset(page, pageSize)
 	pattern := "%" + escapeLike(keyword) + "%"
 	where := "status = 'ready' AND name LIKE ? ESCAPE '\\'"
+	// storage_path 的分隔符比较统一按正斜杠归一化，见下方各分支的用法（v044.26）。
+	// Storage-path comparisons are normalised to forward slashes (see the branches below).
+	normalizedStoragePath := "REPLACE(storage_path, '\\', '/')"
 	args := []any{pattern}
 	if !admin {
 		where += " AND user_id = ?"
@@ -3893,17 +3896,20 @@ func (s *Store) ListFilesSorted(ctx context.Context, userID int64, admin bool, k
 			relativePattern := escapeLike("files/") + "%" + escapeLike("/"+normalizedDir+"/") + "%"
 			args = append(args, escapeLike(fullPrefix)+"%", relativePattern)
 		} else {
-			prefix := filepath.Join("files", strconv.FormatInt(userID, 10), dir) + string(filepath.Separator)
-			where += " AND substr(storage_path, 1, length(?)) = ?"
+			// 普通用户的目录过滤在"正斜杠归一化"下比较：历史上回收站移出写入过 filepath.ToSlash 的路径，
+			// 归一化后正斜杠与本机分隔符两种写法都能命中（v044.26）。
+			// Normalised (forward-slash) comparison so legacy and OS-native paths both match.
+			prefix := filepath.ToSlash(filepath.Join("files", strconv.FormatInt(userID, 10), dir)) + "/"
+			where += " AND substr(" + normalizedStoragePath + ", 1, length(?)) = ?"
 			args = append(args, prefix, prefix)
 		}
 	} else if admin {
 		// 管理员无 dir 参数 = 全部文件（既有语义）
 	} else {
 		// 普通用户无 dir 参数 = 仅根目录层文件（v011 目录模型：子目录文件只在目录视图出现）
-		prefix := filepath.Join("files", strconv.FormatInt(userID, 10)) + string(filepath.Separator)
-		where += " AND substr(storage_path, 1, length(?)) = ? AND instr(substr(storage_path, length(?) + 1), ?) = 0"
-		args = append(args, prefix, prefix, prefix, string(filepath.Separator))
+		prefix := filepath.ToSlash(filepath.Join("files", strconv.FormatInt(userID, 10))) + "/"
+		where += " AND substr(" + normalizedStoragePath + ", 1, length(?)) = ? AND instr(substr(" + normalizedStoragePath + ", length(?) + 1), '/') = 0"
+		args = append(args, prefix, prefix, prefix)
 	}
 	var total int
 	countArgs := append([]any{}, args...)

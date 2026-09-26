@@ -120,9 +120,14 @@ func (s *Store) MoveRecycleFiles(ctx context.Context, ids []int64, targetUserID 
 
 	now := time.Now().UTC().Format(time.RFC3339)
 	for _, item := range plans {
+		// storage_path 存"本机分隔符"写法（filepath.Join 的产物），与上传/回收站落盘一致：
+		// 列表的目录过滤、文件夹展开、覆盖同名上传的相等比较都按这个约定比较路径。
+		// 曾用 filepath.ToSlash 写入正斜杠，导致目标用户在自己的目录视图里看不到这些文件（v044.26 修复）。
+		// storage_path keeps the OS-native separator (filepath.Join output) like every other writer:
+		// directory filters, folder expansion, and overwrite lookups all compare paths under that convention.
 		if _, err := tx.ExecContext(ctx,
 			"UPDATE files SET user_id = ?, storage_path = ?, stored_name = ?, name = ? WHERE id = ?",
-			targetUserID, filepath.ToSlash(item.to), item.name, item.name, item.id); err != nil {
+			targetUserID, item.to, item.name, item.name, item.id); err != nil {
 			s.rollbackRecycleMoves(plans[:moved])
 			return result, err
 		}
