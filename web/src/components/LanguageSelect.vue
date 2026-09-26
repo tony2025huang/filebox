@@ -3,9 +3,11 @@
     <span class="sr-only">{{ t('common.language') }}</span>
     <select :value="selectedLanguage" @change="changeLanguage">
       <option value="">{{ t('lang.followSystem') }}</option>
-      <option value="zh-CN">{{ t('lang.zhCN') }}</option>
-      <option value="zh-TW">{{ t('lang.zhTW') }}</option>
-      <option value="en">{{ t('lang.en') }}</option>
+      <!-- 语言名固定用该语言自身书写（endonym），不随界面语言翻译：否则在英文界面下变成
+           "Simplified Chinese"，用户反而找不到自己熟悉的那个名字（v044.20）。 -->
+      <option value="zh-CN">简体中文</option>
+      <option value="zh-TW">繁體中文</option>
+      <option value="en">English</option>
     </select>
   </label>
 </template>

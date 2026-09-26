@@ -81,3 +81,11 @@
       进度条保留——它是真实度量而非装饰。同时修正 <em> 被当作"弱化单位"使用的语义问题。 */
 .quota-block strong { font-size: 1rem; font-weight: 600; }
 .quota-block .quota-total { color: var(--text-muted); font-weight: 400; }
+
+/* 10) 批量操作按钮组：始终单行（选择态切换内容而不新增行），必要时横向滚动。
+       .toolbar 的 nowrap 覆盖见 styles.css；此处再兜一层，避免窄屏换行成"第二行按钮"。 */
+.toolbar > .secondary-button, .toolbar > .batch-actions { flex: none; }
+
+/* 11) 共享 .toolbar 也改为单行：勾选文件后新增的批量按钮不再挤到第二行（必要时横向滚动）。
+       放在本文件末尾以覆盖 styles.css 里的 flex-wrap: wrap（同特异性、更晚生效）。 */
+.toolbar { flex-wrap: nowrap; overflow-x: auto; }
