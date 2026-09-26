@@ -191,7 +191,7 @@ async function batchDownload() {
   error.value = ''
   const item = { id: `dl-batch-${Date.now()}`, name: '', batch: true, downloadName: batchDownloadFilename(), batchIds: ids, size: 0, loadedBytes: 0, progress: 0, rate: 0, status: 'downloading', failed: false, paused: false, cancelled: false, completed: false, running: false, error: '', controller: null, parts: [], resumable: false, transferGeneration: 0 }
   batchDownloadItem = item
-  downloads.value.push(item)
+  downloads.value.push(item = reactive(item))
   transfersOpen.value = true
   persistTransfers()
   await startDownload(item)
@@ -551,7 +551,7 @@ async function queueFiles(list, options = {}) {
           failed: false, done: false, cancelled: false, canContinue: false, running: false, terminating: false,
           sha256: fileHash, pending: new Set(), controllers: new Map(), requestControllers: new Set(), resolve: '', transferGeneration: 0
         }
-        uploads.value.push(item)
+        uploads.value.push(item = reactive(item))
         runGated(item)
       }
     }
@@ -1100,7 +1100,7 @@ async function streamDownload(item, request, downloadName, generation) {
 // download 流式下载并在传输面板显示详细进度。
 async function download(file) {
   const item = { id: 'dl-' + Date.now() + '-' + file.id, fileId: file.id, name: file.name, size: file.size || 0, loadedBytes: 0, progress: 0, rate: 0, status: t('files.downloading'), failed: false, paused: false, cancelled: false, completed: false, running: false, error: '', controller: null, parts: [], resumable: true, transferGeneration: 0 }
-  downloads.value.push(item)
+  downloads.value.push(item = reactive(item))
   transfersOpen.value = true
   persistTransfers()
   void startDownload(item)
