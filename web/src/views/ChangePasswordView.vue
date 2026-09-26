@@ -15,6 +15,7 @@ import BrandFooter from '../components/BrandFooter.vue'
 import BrandLogo from '../components/BrandLogo.vue'
 import LanguageSelect from '../components/LanguageSelect.vue'
 import { t } from '../i18n'
+import { lazyText } from '../notice'
 
 const router = useRouter()
 const route = useRoute()
@@ -30,7 +31,7 @@ const error = ref('')
 
 async function submit() {
   error.value = ''
-  if (form.newPassword !== confirmation.value) { error.value = t('password.mismatch'); return }
+  if (form.newPassword !== confirmation.value) { error.value = lazyText('password.mismatch'); return }
   loading.value = true
   try {
     const body = await api('/api/auth/change-password', { method: 'POST', body: JSON.stringify(form) })

@@ -66,6 +66,7 @@ import BrandFooter from '../components/BrandFooter.vue'
 import BrandLogo from '../components/BrandLogo.vue'
 import LanguageSelect from '../components/LanguageSelect.vue'
 import { currentLocale, loadLocale, t } from '../i18n'
+import { lazyText } from '../notice'
 
 const QUEUE_MIN_DELAY = 2000
 const QUEUE_MAX_DELAY = 4000
@@ -181,12 +182,12 @@ function addFiles(files) {
     registerGroup(item)
     added += 1
   }
-  if (!added && files.length > 0) notice.value = t('collection.folderEmpty')
+  if (!added && files.length > 0) notice.value = lazyText('collection.folderEmpty')
 }
 function handleInput(event) { const picked = [...(event.target.files || [])].map(file => ({ file, relPath: file.webkitRelativePath || '' })); addFiles(picked); event.target.value = '' }
 function handleFolderInput(event) {
   const files = [...(event.target.files || [])]
-  if (!files.length) { notice.value = t('collection.folderEmpty'); event.target.value = ''; return }
+  if (!files.length) { notice.value = lazyText('collection.folderEmpty'); event.target.value = ''; return }
   const picked = files.map(file => ({ file, relPath: file.webkitRelativePath || file.name }))
   addFiles(picked)
   event.target.value = ''
@@ -450,7 +451,7 @@ async function startQueue() {
   if (!isCurrent(queue.value[0], generation)) return
   running.value = false
   const hasActiveWork = queue.value.some(item => item.state === 'pending' || item.state === 'queued' || item.running)
-  if (!error.value && !hasActiveWork) notice.value = t('collection.allCompleted')
+  if (!error.value && !hasActiveWork) notice.value = lazyText('collection.allCompleted')
   await loadMeta()
 }
 

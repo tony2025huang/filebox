@@ -73,6 +73,7 @@ import { api } from '../api'
 import AuthenticatedTopbar from '../components/AuthenticatedTopbar.vue'
 import BrandFooter from '../components/BrandFooter.vue'
 import { t } from '../i18n'
+import { lazyText } from '../notice'
 import { Archive, Download, FolderUp, LoaderCircle, RefreshCw, Trash2, X } from 'lucide-vue-next'
 
 const user = ref(JSON.parse(localStorage.getItem('filebox_user') || '{}'))
@@ -101,21 +102,21 @@ async function loadUsers() {
   try { const body = await api('/api/admin/users'); users.value = (body.data.items || []).filter(candidate => candidate.id > 0) } catch { users.value = [] }
 }
 function openMove() {
-  if (!selectedIds.value.length) { error.value = t('recycle.emptySelection'); return }
+  if (!selectedIds.value.length) { error.value = lazyText('recycle.emptySelection'); return }
   moveError.value = ''; moveForm.value = { targetUserId: users.value[0]?.id || 0, targetDir: '' }; moveOpen.value = true
 }
 async function submitMove() {
   busy.value = true; moveError.value = ''
   try {
     const body = await api('/api/admin/recycle/move', { method: 'POST', body: JSON.stringify({ fileIds: selectedIds.value, targetUserId: moveForm.value.targetUserId, targetDir: moveForm.value.targetDir }) })
-    notice.value = t('recycle.moved', { count: body.data.moved || 0 })
+    notice.value = lazyText('recycle.moved', { count: body.data.moved || 0 })
     moveOpen.value = false; await loadRecycle()
   } catch (err) { moveError.value = err.message } finally { busy.value = false }
 }
 async function removeOne(file) {
   if (!window.confirm(`${t('recycle.delete')}: ${file.name}?`)) return
   busy.value = true
-  try { await api(`/api/admin/recycle/${file.id}`, { method: 'DELETE' }); notice.value = t('recycle.deleted'); await loadRecycle() } catch (err) { error.value = err.message } finally { busy.value = false }
+  try { await api(`/api/admin/recycle/${file.id}`, { method: 'DELETE' }); notice.value = lazyText('recycle.deleted'); await loadRecycle() } catch (err) { error.value = err.message } finally { busy.value = false }
 }
 async function download(file) {
   try {
@@ -135,7 +136,7 @@ async function submitPurge() {
   try {
     const payload = user.value.totpEnabled ? { code: purgeForm.value.code } : { password: purgeForm.value.password }
     const body = await api('/api/admin/recycle/purge', { method: 'POST', body: JSON.stringify(payload) })
-    notice.value = t('recycle.purged')
+    notice.value = lazyText('recycle.purged')
     purgeOpen.value = false
     await loadRecycle()
     if (body.data?.count !== undefined) notice.value = `${t('recycle.purged')} (${body.data.count})`

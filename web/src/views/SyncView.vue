@@ -30,6 +30,7 @@ import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { api } from '../api'
 import AuthenticatedTopbar from '../components/AuthenticatedTopbar.vue'
 import { t, currentLocale } from '../i18n'
+import { lazyText } from '../notice'
 import { Activity, ArrowUp, Check, Eye, EyeOff, File, FileText, Folder, FolderOpen, Globe, Home, LoaderCircle, Pencil, Play, Plus, RefreshCw, Save, Server, Trash2, X } from 'lucide-vue-next'
 
 const user = ref(JSON.parse(localStorage.getItem('filebox_user') || '{}'))
@@ -120,8 +121,8 @@ function syncScheduleStateLabel(item) { const enabled = item.enabled ? t('sync.e
 function onScheduleChange() { if (taskForm.scheduleType === 'triggered' && taskForm.direction !== 'push') { taskForm.scheduleType = 'once'; formError.value = t('sync.triggeredRequiresPush'); return } if (taskForm.scheduleType !== 'periodic') taskForm.cron = '' }
 function applyPreset(event) { const values = { daily: '0 3 * * *', hourly: '0 * * * *', weekday: '0 9 * * 1-5' }; if (values[event.target.value]) taskForm.cron = values[event.target.value]; event.target.value = '' }
 function taskPayload() { return { name: taskForm.name, direction: taskForm.direction, remoteSystemId: Number(taskForm.remoteSystemId), sourceType: taskForm.sourceType, sourcePath: taskForm.sourcePath, sourceKind: taskForm.sourceKind || 'directory', targetType: taskForm.targetType, targetPath: taskForm.targetPath, conflictPolicy: taskForm.conflictPolicy, scheduleType: taskForm.scheduleType, cron: taskForm.cron, enabled: taskForm.enabled } }
-async function saveTask() { if (taskForm.scheduleType === 'triggered' && taskForm.direction !== 'push') { formError.value = t('sync.triggeredRequiresPush'); return } saving.value = true; formError.value = ''; try { const body = await api(taskEditing.value ? `/api/sync/tasks/${taskForm.id}` : '/api/sync/tasks', { method: taskEditing.value ? 'PUT' : 'POST', body: JSON.stringify(taskPayload()) }); notice.value = t('sync.taskSaved'); taskModal.value = false; await loadAll(); if (body.data) tasks.value = tasks.value } catch (err) { formError.value = err.message } finally { saving.value = false } }
-async function runTask(item) { runningId.value = item.id; error.value = ''; try { await api(`/api/sync/tasks/${item.id}/run`, { method: 'POST' }); notice.value = t('sync.runStarted'); await loadAll() } catch (err) { error.value = err.message } finally { runningId.value = 0 } }
+async function saveTask() { if (taskForm.scheduleType === 'triggered' && taskForm.direction !== 'push') { formError.value = t('sync.triggeredRequiresPush'); return } saving.value = true; formError.value = ''; try { const body = await api(taskEditing.value ? `/api/sync/tasks/${taskForm.id}` : '/api/sync/tasks', { method: taskEditing.value ? 'PUT' : 'POST', body: JSON.stringify(taskPayload()) }); notice.value = lazyText('sync.taskSaved'); taskModal.value = false; await loadAll(); if (body.data) tasks.value = tasks.value } catch (err) { formError.value = err.message } finally { saving.value = false } }
+async function runTask(item) { runningId.value = item.id; error.value = ''; try { await api(`/api/sync/tasks/${item.id}/run`, { method: 'POST' }); notice.value = lazyText('sync.runStarted'); await loadAll() } catch (err) { error.value = err.message } finally { runningId.value = 0 } }
 function askConfirm(message) {
   return new Promise(resolve => {
     const entry = { message, resolve }
@@ -140,7 +141,7 @@ function chooseConfirm(value) {
   clearTimeout(entry.timer)
   entry.resolve(Boolean(value))
 }
-async function deleteTask(item) { if (!(await askConfirm(t('sync.confirmDeleteTask', { name: item.name })))) return; try { await api(`/api/sync/tasks/${item.id}`, { method: 'DELETE' }); notice.value = t('sync.taskDeleted'); await loadAll() } catch (err) { error.value = err.message } }
+async function deleteTask(item) { if (!(await askConfirm(t('sync.confirmDeleteTask', { name: item.name })))) return; try { await api(`/api/sync/tasks/${item.id}`, { method: 'DELETE' }); notice.value = lazyText('sync.taskDeleted'); await loadAll() } catch (err) { error.value = err.message } }
 function resetSecretView() { revealedSecret.value = null; secretVisible.value = false; secretDisplay.value = '' }
 function resetSystem() { Object.assign(systemForm, { id: 0, name: '', kind: 'sftp', host: '', url: '', port: 22, username: '', authType: 'password', authSecret: '', authPassphrase: '', hasCredentials: false }); resetSecretView() }
 function openSystemCreate() { resetSystem(); systemEditing.value = false; formError.value = ''; systemModal.value = true }
@@ -166,8 +167,8 @@ async function toggleSecret() {
   }
 }
 function syncSystemKind() { if (systemForm.kind === 'filebox') { systemForm.authType = 'password'; systemForm.host = ''; systemForm.authPassphrase = '' } }
-async function saveSystem() { saving.value = true; formError.value = ''; try { const body = { name: systemForm.name, kind: systemForm.kind || 'sftp', host: systemForm.kind === 'filebox' ? '' : systemForm.host, url: systemForm.kind === 'filebox' ? systemForm.url : '', port: Number(systemForm.port) || 22, username: systemForm.username, authType: systemForm.authType, authSecret: systemForm.authSecret, authPassphrase: systemForm.authPassphrase }; await api(systemEditing.value ? `/api/sync/systems/${systemForm.id}` : '/api/sync/systems', { method: systemEditing.value ? 'PUT' : 'POST', body: JSON.stringify(body) }); notice.value = t('sync.systemSaved'); systemModal.value = false; await loadAll() } catch (err) { formError.value = err.message } finally { saving.value = false } }
-async function deleteSystem(item) { if (!(await askConfirm(t('sync.confirmDeleteSystem', { name: item.name })))) return; try { await api(`/api/sync/systems/${item.id}`, { method: 'DELETE' }); notice.value = t('sync.systemDeleted'); await loadAll() } catch (err) { error.value = err.message } }
+async function saveSystem() { saving.value = true; formError.value = ''; try { const body = { name: systemForm.name, kind: systemForm.kind || 'sftp', host: systemForm.kind === 'filebox' ? '' : systemForm.host, url: systemForm.kind === 'filebox' ? systemForm.url : '', port: Number(systemForm.port) || 22, username: systemForm.username, authType: systemForm.authType, authSecret: systemForm.authSecret, authPassphrase: systemForm.authPassphrase }; await api(systemEditing.value ? `/api/sync/systems/${systemForm.id}` : '/api/sync/systems', { method: systemEditing.value ? 'PUT' : 'POST', body: JSON.stringify(body) }); notice.value = lazyText('sync.systemSaved'); systemModal.value = false; await loadAll() } catch (err) { formError.value = err.message } finally { saving.value = false } }
+async function deleteSystem(item) { if (!(await askConfirm(t('sync.confirmDeleteSystem', { name: item.name })))) return; try { await api(`/api/sync/systems/${item.id}`, { method: 'DELETE' }); notice.value = lazyText('sync.systemDeleted'); await loadAll() } catch (err) { error.value = err.message } }
 // testSystem 探测目标系统连通性（#5）：调用 POST /api/sync/systems/{id}/test，
 // 成功后把 ok/失败与测试时间写回行内徽标；失败消息仅临时展示，不落库（避免保存敏感信息）。
 // testSystem probes a remote system's connectivity (#5) via POST /api/sync/systems/{id}/test,
