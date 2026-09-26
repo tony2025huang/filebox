@@ -1049,22 +1049,29 @@ func (s *Store) ClearIPACL(username string) (bool, error) {
 	return count > 0, err
 }
 
+// userCountColumns 是 users 查询尾部的两个计数子查询（目录数、名下的 ready 文件数）。
+// 文件口径与文件列表一致（status = 'ready'）：软删除文件与未完成上传都不算"名下的文件"，
+// 这样 /api/auth/me 的 fileCount 与 /api/files 的 total 用的是同一套过滤条件（v044.25）。
+// userCountColumns holds the trailing count subqueries (folders, ready files owned by the user).
+// The file predicate mirrors the file list (status = 'ready') so /api/auth/me and /api/files agree.
+const userCountColumns = ", (SELECT COUNT(id) FROM folders WHERE folders.user_id = users.id), (SELECT COUNT(id) FROM files WHERE files.user_id = users.id AND files.status = 'ready')"
+
 func (s *Store) GetUserByUsername(username string) (User, error) {
 	// GetUserByUsername 按唯一用户名读取账户及其登录锁定状态。
 	// GetUserByUsername loads an account and its login-lock state by unique username.
-	return scanUser(s.DB.QueryRow("SELECT id, username, password_hash, COALESCE(last_password_change, ''), COALESCE(last_logout_at, ''), role, language, quota_bytes, used_bytes, disabled, failed_attempts, COALESCE(locked_until, ''), COALESCE(must_change_password, 0), COALESCE(totp_secret, ''), COALESCE(totp_enabled, 0), COALESCE(last_used_totp, ''), COALESCE(ip_acl_enabled, 0), COALESCE(ip_whitelist, ''), COALESCE(read_only_from, ''), COALESCE(read_only_until, ''), created_at, updated_at FROM users WHERE username = ?", username))
+	return scanUser(s.DB.QueryRow("SELECT id, username, password_hash, COALESCE(last_password_change, ''), COALESCE(last_logout_at, ''), role, language, quota_bytes, used_bytes, disabled, failed_attempts, COALESCE(locked_until, ''), COALESCE(must_change_password, 0), COALESCE(totp_secret, ''), COALESCE(totp_enabled, 0), COALESCE(last_used_totp, ''), COALESCE(ip_acl_enabled, 0), COALESCE(ip_whitelist, ''), COALESCE(read_only_from, ''), COALESCE(read_only_until, ''), created_at, updated_at"+userCountColumns+" FROM users WHERE username = ?", username))
 }
 
 func (s *Store) GetUser(id int64) (User, error) {
 	// GetUser 按账户 ID 读取用户记录。
 	// GetUser loads a user record by account ID.
-	return scanUser(s.DB.QueryRow("SELECT id, username, password_hash, COALESCE(last_password_change, ''), COALESCE(last_logout_at, ''), role, language, quota_bytes, used_bytes, disabled, failed_attempts, COALESCE(locked_until, ''), COALESCE(must_change_password, 0), COALESCE(totp_secret, ''), COALESCE(totp_enabled, 0), COALESCE(last_used_totp, ''), COALESCE(ip_acl_enabled, 0), COALESCE(ip_whitelist, ''), COALESCE(read_only_from, ''), COALESCE(read_only_until, ''), created_at, updated_at FROM users WHERE id = ?", id))
+	return scanUser(s.DB.QueryRow("SELECT id, username, password_hash, COALESCE(last_password_change, ''), COALESCE(last_logout_at, ''), role, language, quota_bytes, used_bytes, disabled, failed_attempts, COALESCE(locked_until, ''), COALESCE(must_change_password, 0), COALESCE(totp_secret, ''), COALESCE(totp_enabled, 0), COALESCE(last_used_totp, ''), COALESCE(ip_acl_enabled, 0), COALESCE(ip_whitelist, ''), COALESCE(read_only_from, ''), COALESCE(read_only_until, ''), created_at, updated_at"+userCountColumns+" FROM users WHERE id = ?", id))
 }
 
 func scanUser(row *sql.Row) (User, error) {
 	var user User
 	var disabled, mustChange, totpEnabled, ipACLEnabled int
-	err := row.Scan(&user.ID, &user.Username, &user.PasswordHash, &user.LastPasswordChange, &user.LastLogoutAt, &user.Role, &user.Language, &user.QuotaBytes, &user.UsedBytes, &disabled, &user.FailedAttempts, &user.LockedUntil, &mustChange, &user.TOTPSecret, &totpEnabled, &user.LastUsedTOTP, &ipACLEnabled, &user.IPWhitelist, &user.ReadOnlyFrom, &user.ReadOnlyUntil, &user.CreatedAt, &user.UpdatedAt)
+	err := row.Scan(&user.ID, &user.Username, &user.PasswordHash, &user.LastPasswordChange, &user.LastLogoutAt, &user.Role, &user.Language, &user.QuotaBytes, &user.UsedBytes, &disabled, &user.FailedAttempts, &user.LockedUntil, &mustChange, &user.TOTPSecret, &totpEnabled, &user.LastUsedTOTP, &ipACLEnabled, &user.IPWhitelist, &user.ReadOnlyFrom, &user.ReadOnlyUntil, &user.CreatedAt, &user.UpdatedAt, &user.FolderCount, &user.FileCount)
 	user.Disabled = disabled != 0
 	user.MustChangePassword = mustChange != 0
 	user.TOTPEnabled = totpEnabled != 0
@@ -1946,7 +1953,7 @@ func (s *Store) ListUsers(ctx context.Context, keyword string, page, pageSize in
 	if err := s.DB.QueryRowContext(ctx, "SELECT COUNT(id) FROM users WHERE id <> ? AND username LIKE ? ESCAPE '\\'", RecycleOwnerID, pattern).Scan(&total); err != nil {
 		return nil, 0, err
 	}
-	rows, err := s.DB.QueryContext(ctx, "SELECT id, username, password_hash, role, language, quota_bytes, used_bytes, disabled, failed_attempts, COALESCE(locked_until, ''), COALESCE(must_change_password, 0), COALESCE(totp_secret, ''), COALESCE(totp_enabled, 0), COALESCE(last_used_totp, ''), COALESCE(ip_acl_enabled, 0), COALESCE(ip_whitelist, ''), COALESCE(read_only_from, ''), COALESCE(read_only_until, ''), created_at, updated_at, (SELECT COUNT(id) FROM folders WHERE folders.user_id = users.id), (SELECT COUNT(id) FROM files WHERE files.user_id = users.id AND files.status = 'ready') FROM users WHERE id <> ? AND username LIKE ? ESCAPE '\\' ORDER BY id LIMIT ? OFFSET ?", RecycleOwnerID, pattern, pageSize, offset)
+	rows, err := s.DB.QueryContext(ctx, "SELECT id, username, password_hash, role, language, quota_bytes, used_bytes, disabled, failed_attempts, COALESCE(locked_until, ''), COALESCE(must_change_password, 0), COALESCE(totp_secret, ''), COALESCE(totp_enabled, 0), COALESCE(last_used_totp, ''), COALESCE(ip_acl_enabled, 0), COALESCE(ip_whitelist, ''), COALESCE(read_only_from, ''), COALESCE(read_only_until, ''), created_at, updated_at"+userCountColumns+" FROM users WHERE id <> ? AND username LIKE ? ESCAPE '\\' ORDER BY id LIMIT ? OFFSET ?", RecycleOwnerID, pattern, pageSize, offset)
 	if err != nil {
 		return nil, 0, err
 	}
