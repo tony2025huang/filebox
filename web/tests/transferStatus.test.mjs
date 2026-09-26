@@ -94,11 +94,17 @@ test('进行中条目按状态码归入准备/传输/处理/暂停四个阶段',
   assert.equal(transferStage(null), 'transferring')
 })
 
-test('每个状态码都能落到某个阶段（无遗漏）', () => {
+test('每个状态码：非终止码落到某个阶段，终止码不属于任何阶段', () => {
   for (const code of Object.keys(TRANSFER_STATUS_KEYS)) {
     const stage = transferStage({ status: code })
-    assert.ok(TRANSFER_STAGE_ORDER.includes(stage), `状态码 ${code} 未归入任何阶段`)
+    const terminal = isUploadTerminalState({ status: code })
+    if (terminal) assert.equal(stage, '', `终止码 ${code} 不应归入任何阶段（否则会被算成"传输中"）`)
+    else assert.ok(TRANSFER_STAGE_ORDER.includes(stage), `非终止码 ${code} 未归入任何阶段`)
   }
+  // 已完成的条目绝不能出现在任何阶段分组里
+  const done = { status: 'completed', done: true, progress: 100 }
+  assert.equal(transferStage(done), '')
+  assert.deepEqual(groupByStage([done, { status: 'uploading' }]).map(g => g.items.length), [1])
 })
 
 test('分组只返回非空组并保持顺序', () => {

@@ -59,9 +59,12 @@ export const TRANSFER_OUTCOME_KEYS = {
   cancelled: 'files.finishedCancelled'
 }
 
-/** 归纳进行中条目所属阶段；未知码按"传输中"处理，避免条目消失。 */
+/** 归纳进行中条目所属阶段；未知码按"传输中"处理，避免条目消失。**终止态不属于任何阶段**（返回 ''）——
+ *  否则已完成的条目会落进 default 分支被算作"传输中"，用户就会看到"已完成却仍在进行中/传输中计数里"（v044.21）。 */
 export function transferStage(item) {
-  switch (normalizeStatus(item?.status)) {
+  const code = normalizeStatus(item?.status)
+  if (code === 'failed' || completedStatuses.has(code)) return ''
+  switch (code) {
     case 'preparing':
     case 'checksum':
       return 'preparing'
