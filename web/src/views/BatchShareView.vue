@@ -5,7 +5,7 @@
       <div v-if="loading" class="empty-state"><LoaderCircle :size="30" class="spin" /><span>{{ t('share.loading') }}</span></div>
       <section v-else-if="error" class="share-error"><XCircle :size="42" /><h1>{{ error }}</h1><div class="share-actions"><button class="primary-button" @click="loadMeta"><RefreshCw :size="16" /> {{ t('share.retry') }}</button><RouterLink to="/login" class="secondary-button"><ArrowLeft :size="16" /> {{ t('share.backLogin') }}</RouterLink></div></section>
       <section v-else class="share-card">
-        <p class="eyebrow">{{ t('batchShare.heading') }}</p>
+        
         <h1>{{ t('batchShare.title') }}</h1>
         <dl class="share-meta">
           <div><dt>{{ t('batchShare.fileCount') }}</dt><dd>{{ files.length }}</dd></div>

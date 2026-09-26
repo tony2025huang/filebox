@@ -3,7 +3,7 @@
     <div class="login-language"><LanguageSelect /></div>
     <section class="login-intro">
       <BrandLogo variant="login" />
-      <p class="eyebrow">{{ t('login.introEyebrow') }}</p>
+      
       <h1>{{ t('login.heading') }}</h1>
       <p class="intro-copy">{{ t('login.copy') }}</p>
       <div class="intro-rule"></div>
@@ -12,7 +12,7 @@
     <section class="login-panel">
       <div class="login-form-wrap">
         <div class="mobile-brand"><BrandLogo variant="login" compact /></div>
-        <p class="eyebrow">{{ t('login.eyebrow') }}</p>
+        
         <h2>{{ t('login.formHeading', { title: brand.siteTitle }) }}</h2>
         <p class="muted">{{ t('login.formCopy') }}</p>
         <form @submit.prevent="submit">

@@ -5,7 +5,7 @@
       <div v-if="loading" class="empty-state"><LoaderCircle :size="30" class="spin" /><span>{{ t('common.loading') }}</span></div>
       <section v-else-if="metaError" class="share-error"><XCircle :size="42" /><h1>{{ metaError }}</h1><button class="primary-button" @click="loadMeta"><RefreshCw :size="16" /> {{ t('share.retry') }}</button></section>
       <section v-else-if="passwordGate" class="share-card upload-public-card">
-        <p class="eyebrow">{{ t('collection.upload') }}</p>
+        
         <h1>{{ t('collection.passwordTitle') }}</h1>
         <p class="muted">{{ t('collection.passwordHint') }}</p>
         <form class="public-password-form" @submit.prevent="submitPassword">
@@ -16,7 +16,7 @@
         <BrandFooter />
       </section>
       <section v-else class="share-card upload-public-card">
-        <p class="eyebrow">{{ t('collection.upload') }}</p>
+        
         <h1>{{ meta.name }}</h1>
         <dl class="share-meta"><div><dt>{{ t('collection.expiresAt') }}</dt><dd>{{ formatDate(meta.expiresAt) }}</dd></div><div><dt>{{ t('collection.uploadCount') }}</dt><dd>{{ meta.uploadCount }} / {{ meta.maxUploads || t('collection.unlimited') }}</dd></div><div><dt>{{ t('collection.maxFileBytes') }}</dt><dd>{{ meta.maxFileBytes ? formatBytes(meta.maxFileBytes) : t('collection.unlimited') }}</dd></div><div><dt>{{ t('collection.status') }}</dt><dd>{{ statusLabel }}</dd></div></dl>
         <p v-if="!meta.uploadAllowed" class="alert error">{{ statusLabel }}</p>

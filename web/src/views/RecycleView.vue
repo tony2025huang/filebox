@@ -3,7 +3,7 @@
     <AuthenticatedTopbar :user="user" section="recycle" />
     <section class="content-wrap">
       <div class="page-heading">
-        <div><p class="eyebrow">WORKSPACE / RECYCLE</p><h1>{{ t('recycle.title') }}</h1><p class="muted">{{ t('recycle.confirmPurge') }}</p></div>
+        <div><h1>{{ t('recycle.title') }}</h1><p class="muted">{{ t('recycle.confirmPurge') }}</p></div>
         <div class="sync-heading-actions">
           <button class="secondary-button" :title="t('files.refresh')" @click="loadRecycle"><RefreshCw :size="16" :class="{ spin: loading }" /></button>
           <button class="secondary-button" :disabled="!selectedIds.length" @click="openMove"><FolderUp :size="16" /> {{ t('recycle.move') }}</button>
@@ -40,7 +40,7 @@
     </section>
 
     <div v-if="moveOpen" class="modal-backdrop" @click.self="!busy && (moveOpen = false)"><section class="modal-panel share-panel" role="dialog" aria-modal="true">
-      <div class="panel-heading"><div><p class="eyebrow">{{ t('recycle.move') }}</p><h2>{{ t('recycle.moveTitle') }}</h2></div><button class="icon-button" :title="t('common.close')" :disabled="busy" @click="moveOpen = false"><X :size="18" /></button></div>
+      <div class="panel-heading"><div><h2>{{ t('recycle.moveTitle') }}</h2></div><button class="icon-button" :title="t('common.close')" :disabled="busy" @click="moveOpen = false"><X :size="18" /></button></div>
       <form @submit.prevent="submitMove">
         <label class="form-label">{{ t('recycle.targetUser') }}<select v-model.number="moveForm.targetUserId" required><option v-for="candidate in users" :key="candidate.id" :value="candidate.id">{{ candidate.username }}</option></select></label>
         <label class="form-label">{{ t('recycle.targetDir') }}<input v-model.trim="moveForm.targetDir" maxlength="512" placeholder="docs/2026" /></label>
@@ -51,7 +51,7 @@
     </section></div>
 
     <div v-if="purgeOpen" class="modal-backdrop" @click.self="!busy && (purgeOpen = false)"><section class="modal-panel share-panel" role="dialog" aria-modal="true">
-      <div class="panel-heading"><div><p class="eyebrow">{{ t('recycle.purge') }}</p><h2>{{ t('recycle.purgeConfirm') }}</h2></div><button class="icon-button" :title="t('common.close')" :disabled="busy" @click="purgeOpen = false"><X :size="18" /></button></div>
+      <div class="panel-heading"><div><h2>{{ t('recycle.purgeConfirm') }}</h2></div><button class="icon-button" :title="t('common.close')" :disabled="busy" @click="purgeOpen = false"><X :size="18" /></button></div>
       <form @submit.prevent="submitPurge">
         <p class="alert info">{{ t('recycle.confirmPurge') }}</p>
         <label v-if="!user.totpEnabled" class="form-label">{{ t('files.clearPassword') }}<input v-model="purgeForm.password" type="password" required autofocus /></label>
