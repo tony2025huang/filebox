@@ -95,11 +95,15 @@ test('进行中条目按状态码归入准备/传输/处理/暂停四个阶段',
 })
 
 test('每个状态码：非终止码落到某个阶段，终止码不属于任何阶段', () => {
+  // 终止**状态码**集合（注意：isUploadTerminalState 看的是 failed 标志，这里判的是码本身）
+  const terminalCodes = ['completed', 'instant', 'cancelled', 'failed', 'finished']
   for (const code of Object.keys(TRANSFER_STATUS_KEYS)) {
     const stage = transferStage({ status: code })
-    const terminal = isUploadTerminalState({ status: code })
-    if (terminal) assert.equal(stage, '', `终止码 ${code} 不应归入任何阶段（否则会被算成"传输中"）`)
-    else assert.ok(TRANSFER_STAGE_ORDER.includes(stage), `非终止码 ${code} 未归入任何阶段`)
+    if (terminalCodes.includes(code)) {
+      assert.equal(stage, '', `终止码 ${code} 不应归入任何阶段（否则会被算成"传输中"）`)
+    } else {
+      assert.ok(TRANSFER_STAGE_ORDER.includes(stage), `非终止码 ${code} 未归入任何阶段`)
+    }
   }
   // 已完成的条目绝不能出现在任何阶段分组里
   const done = { status: 'completed', done: true, progress: 100 }
