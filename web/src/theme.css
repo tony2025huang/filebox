@@ -1,0 +1,56 @@
+/* v044.17：语义 token 层 + 深色模式。
+   styles.css 的调色板色值已机械替换为下列 token；浅色值与原值一致，故浅色外观不变（改前改后 computed 颜色应完全相同）。
+   深色值随系统 prefers-color-scheme 生效。
+   已知边界：rgba() 阴影/遮罩与品牌强调色 --brand-color（运行时由 JS 注入）未做深色适配；
+   深色值是逐个指定的，**未经真实设备目视验证**（本环境无法模拟 prefers-color-scheme）。 */
+:root {
+  color-scheme: light;
+  --surface: #ffffff;
+  --surface-sunken: #f8fafc;
+  --surface-muted: #f0f4f7;
+  --border-soft: #e6ebf2;
+  --border: #dce5ed;
+  --text-strong: #102a43;
+  --text: #264653;
+  --text-body: #52657e;
+  --text-muted: #5f6f80;
+  --text-strong-muted: #4a5a6b;
+  --text-subtle: #5f6f80;
+  --text-faint: #5f6f80;
+  --brand-soft: #eaf8f5;
+  --brand-soft-strong: #b8ddd6;
+  --success: #1e7e34; --success-bg: #e8f5ec;
+  --danger: #a83e2d; --danger-bg: #fff0ed;
+  --warning: #a86a00; --warning-soft: #e6b65d; --warning-bg: #fff4df;
+  --info: #2563eb; --info-strong: #16697a;
+  --accent-warm: #e76f51;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --surface: #12181f;
+    --surface-sunken: #0d131a;
+    --surface-muted: #1a222c;
+    --border-soft: #232d38;
+    --border: #2c3844;
+    --text-strong: #eaf1f8;
+    --text: #d6e0ea;
+    --text-body: #b9c6d3;
+    --text-muted: #a3b3c2;
+    --text-strong-muted: #b9c6d3;
+    --text-subtle: #96a7b6;
+    --text-faint: #8695a3;
+    --brand-soft: #14302c;
+    --brand-soft-strong: #1f4a44;
+    --success: #7fd39a; --success-bg: #14301f;
+    --danger: #ff9c8a; --danger-bg: #35181a;
+    --warning: #f0c069; --warning-soft: #7a5a1e; --warning-bg: #33260f;
+    --info: #8ab4ff; --info-strong: #7fc4d6;
+    --accent-warm: #f08a6d;
+  }
+  /* 深色下浅色边框不足以分离卡片，补一层极浅内阴影 */
+  .form-panel, .modal-panel, .transfers-drawer, .file-table-wrap, .empty-state, .settings-panel {
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, .04);
+  }
+}
